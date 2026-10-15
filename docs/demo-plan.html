@@ -1,0 +1,1127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="60">
+<title>Fracker — session plan</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&display=swap">
+<style>
+
+:root { color-scheme: dark; }
+html {
+  background: #0a0d12;
+  background-image:
+    radial-gradient(1200px 500px at 50% -10%, #141b28 0%, rgba(20,27,40,0) 70%),
+    radial-gradient(1px 1px at 12% 22%, rgba(201,210,222,.14) 50%, transparent 51%),
+    radial-gradient(1px 1px at 68% 8%, rgba(201,210,222,.10) 50%, transparent 51%),
+    radial-gradient(1px 1px at 84% 34%, rgba(201,210,222,.12) 50%, transparent 51%),
+    radial-gradient(1px 1px at 32% 12%, rgba(201,210,222,.09) 50%, transparent 51%),
+    linear-gradient(#0a0d12, #11151d);
+  color-scheme: dark;
+}
+body {
+  margin: 0; background: transparent; color: #c9d2de;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  line-height: 1.45;
+}
+.wrap { max-width: 1080px; margin: 0 auto; padding: 28px 22px 60px; }
+h1, h2, h3, .brand, .do-text, .chunk-title, .goal-name, .farm-title {
+  font-family: Rajdhani, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+h2 {
+  font-size: 12px; letter-spacing: .18em; text-transform: uppercase;
+  color: #7e8898; margin: 34px 0 12px; font-weight: 600;
+}
+section { margin-bottom: 6px; }
+.masthead { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+.brand { font-size: 26px; font-weight: 700; letter-spacing: .3em; color: #bfa05a; }
+.stamp { color: #7e8898; font-size: 13px; }
+.card {
+  background: #151a23; border: 1px solid #232b38; border-radius: 0;
+  clip-path: polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px);
+  padding: 20px 22px; margin: 10px 0;
+}
+.quiet { color: #7e8898; }
+.donow { border-color: #bfa05a; }
+.do-text { font-size: 31px; font-weight: 700; color: #aee3ef; line-height: 1.2; }
+.do-sub { color: #7e8898; margin-top: 6px; }
+.expiring { display: grid; gap: 2px; margin-top: 8px; }
+.exp { padding: 12px 16px; }
+.exp-title { font-family: Rajdhani, sans-serif; font-weight: 600; font-size: 16px; }
+.exp-sub { color: #7e8898; font-size: 13px; display: block; margin-top: 2px; }
+.slate { display: grid; gap: 2px; }
+.chunk { display: flex; gap: 12px; align-items: flex-start; cursor: pointer; }
+.chunk.done { opacity: .45; }
+.chunk.done .chunk-title { text-decoration: line-through; }
+.chunk input { margin-top: 5px; accent-color: #bfa05a; }
+.chunk-body { display: flex; flex-direction: column; gap: 2px; }
+.chunk-title { font-size: 19px; font-weight: 600; }
+.chunk-meta { color: #7e8898; font-size: 13px; }
+.chunk-why { font-size: 14px; }
+.goals { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; margin-top: 12px; }
+.goal-head { display: flex; gap: 12px; align-items: center; }
+.portrait {
+  width: 46px; height: 46px; flex: none; display: flex; align-items: center; justify-content: center;
+  font-family: Rajdhani, sans-serif; font-size: 24px; font-weight: 700; color: #bfa05a;
+  background: #0d1117; border: 1px solid #232b38;
+  clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
+}
+.goal-titles { display: flex; flex-direction: column; }
+.goal-name { font-size: 19px; font-weight: 700; }
+.goal-sub { color: #7e8898; font-size: 12px; display: flex; gap: 8px; align-items: center; }
+.vaulted { color: #7e8898; border: 1px solid #7e8898; padding: 0 6px; font-size: 11px; letter-spacing: .12em; }
+.resurg { color: #bfa05a; border: 1px solid #bfa05a; padding: 0 6px; font-size: 11px; letter-spacing: .12em; }
+.pips { display: inline-flex; gap: 5px; margin-left: auto; }
+.pip { width: 11px; height: 11px; border-radius: 50%; border: 1px solid #7e8898; }
+.pip.have { background: #bfa05a; border-color: #bfa05a; }
+.pip.need { background: transparent; border-color: #c9d2de; }
+.pip.unknown { background: transparent; border-style: dashed; }
+.part { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; padding: 7px 0; border-top: 1px solid #1c2330; font-size: 14px; }
+.part-name { font-weight: 600; }
+.part-state { font-size: 12px; color: #7e8898; text-transform: uppercase; letter-spacing: .1em; }
+.part-state.need { color: #c9d2de; }
+.relic-list { font-size: 12px; color: #7e8898; }
+.relic.is-vaulted { opacity: .75; }
+.action { margin-top: 10px; padding: 10px 12px; background: #0d1420; border-left: 3px solid #aee3ef; font-size: 15px; color: #aee3ef; }
+.action-parked { border-color: #3a4354; color: #7e8898; }
+.action-resurgence { border-color: #bfa05a; color: #e8d9ae; }
+.action-farm, .action-wait { border-color: #7e8898; color: #c9d2de; }
+.chip-common, .chip-uncommon, .chip-rare {
+  font-size: 12px; padding: 1px 8px; border: 1px solid;
+  clip-path: polygon(5px 0, 100% 0, 100% calc(100% - 5px), calc(100% - 5px) 100%, 0 100%, 0 5px);
+}
+.chip-common { color: #b08d4f; border-color: #b08d4f; }
+.chip-uncommon { color: #c0c8d4; border-color: #c0c8d4; }
+.chip-rare { color: #e3c878; border-color: #e3c878; }
+.nw-grid, .wk-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; }
+.nw, .wk {
+  display: flex; flex-direction: column; gap: 2px; background: #131824; border: 1px solid #1f2735;
+  padding: 10px 12px; font-size: 13px; cursor: pointer;
+  clip-path: polygon(7px 0, 100% 0, 100% calc(100% - 7px), calc(100% - 7px) 100%, 0 100%, 0 7px);
+}
+.nw.done, .wk.done { opacity: .45; }
+.nw.done .nw-title, .wk.done .wk-name { text-decoration: line-through; }
+.nw input, .wk input, .bar input { accent-color: #bfa05a; }
+.nw-meta, .wk-meta, .wk-obs { color: #7e8898; font-size: 12px; }
+.wk-small { opacity: .8; font-size: 12px; }
+.nw-season { color: #7e8898; font-size: 13px; margin-bottom: 8px; }
+.caveat { color: #7e8898; font-size: 12px; margin-top: 6px; }
+.bars { display: grid; gap: 2px; }
+.bar { cursor: pointer; }
+.bar-name { font-family: Rajdhani, sans-serif; font-weight: 600; font-size: 16px; }
+.bar-track { height: 6px; background: #0d1117; margin: 8px 0 4px; }
+.bar-fill { height: 6px; background: #bfa05a; }
+.bar-meta { color: #7e8898; font-size: 12px; }
+.est { font-size: 11px; color: #7e8898; border: 1px solid #7e8898; padding: 0 5px; letter-spacing: .1em; }
+.snap { color: #c9d2de; }
+footer { margin-top: 10px; }
+details.alt { margin-top: 6px; font-size: 13px; color: #7e8898; }
+
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="masthead">
+<div class="brand">FRACKER</div>
+<div class="stamp">plan generated 2026-10-15 20:55 UTC &middot; world state as of 2026-10-15T20:55:06.000Z &middot; targets: seed (Xuerian token not set — targets may go stale)</div>
+</header>
+<section><h2>Do now</h2>
+<div class="card donow"><div class="do-text">Crack 4 (if you have it) at Umbriel (Uranus) (Neo C5 Radiant) — Khora Prime Blueprint.</div>
+<div class="do-sub">~30m, stay for 4 &middot; 20% at Radiant for Khora Prime Blueprint (400 traces). Goal: Khora Prime. Covers 2 other want(s) in the same relic.</div></div>
+<div class="expiring">
+<div class="card exp"><span class="exp-title">Crack 4 (if you have it) at Umbriel (Uranus) (Neo C4 Radiant) — Corvas Prime Barrel.</span>
+<span class="exp-sub">~30m, stay for 4 &middot; 10% at Radiant for Corvas Prime Barrel (400 traces). Goal: Corvas Prime. Covers 2 other want(s) in the same relic.</span></div>
+<div class="card exp"><span class="exp-title">Crack 4 (if you have it) at Persto (Deimos) (Axi W1 Radiant) — Inaros Prime Blueprint.</span>
+<span class="exp-sub">~22m, stay for 4 &middot; 20% at Radiant for Inaros Prime Blueprint (400 traces). Goal: Inaros Prime. Covers 3 other want(s) in the same relic.</span></div>
+<div class="card exp"><span class="exp-title">Crack 4 (if you have it) at Persto (Deimos) (Meso W2 Radiant) — Zhuge Prime Receiver.</span>
+<span class="exp-sub">~22m, stay for 4 &middot; 20% at Radiant for Zhuge Prime Receiver (400 traces). Goal: Zhuge Prime. Covers 2 other want(s) in the same relic.</span></div>
+<div class="card exp"><span class="exp-title">Crack 4 (if you have it) at Persto (Deimos) (Meso N10 Intact) — Pangolin Prime Handle.</span>
+<span class="exp-sub">~22m, stay for 4 &middot; 25.33% at Intact for Pangolin Prime Handle (0 traces). Goal: Pangolin Prime. Covers 1 other want(s) in the same relic.</span></div>
+<div class="card exp"><span class="exp-title">Crack 4 (if you have it) at Persto (Deimos) (Axi D5 Radiant) — Dual Keres Prime Blueprint.</span>
+<span class="exp-sub">~22m, stay for 4 &middot; 10% at Radiant for Dual Keres Prime Blueprint (400 traces). Goal: Dual Keres Prime. Covers 1 other want(s) in the same relic.</span></div>
+<div class="card exp"><span class="exp-title">Crack 4 (if you have it) at Persto (Deimos) (Axi N14 Radiant) — Nami Skyla Prime Blade.</span>
+<span class="exp-sub">~22m, stay for 4 &middot; 20% at Radiant for Nami Skyla Prime Blade (400 traces). Goal: Nami Skyla Prime.</span></div>
+<div class="card exp"><span class="exp-title">Varzia rotation ends in 13d — Ivara Prime (Maroo's Bazaar (Mars)).</span>
+<span class="exp-sub">window &middot; Vaulted relics purchasable for Aya while the rotation is live.</span></div>
+</div>
+</section>
+<section><h2>The hunt</h2>
+<div class="slate">
+<label class="card chunk"><input type="checkbox" data-id="t2-crack-lith-g10">
+<span class="chunk-body"><span class="chunk-title">Crack 4 (if you have it) at Olympus (Mars) (Lith G10 Radiant) — Hildryn Prime Neuroptics Blueprint.</span>
+<span class="chunk-meta">~18m, stay for 4 &middot; target crack</span>
+<span class="chunk-why">20% at Radiant for Hildryn Prime Neuroptics Blueprint (400 traces). Goal: Hildryn Prime. Covers 2 other want(s) in the same relic.</span></span></label>
+<label class="card chunk"><input type="checkbox" data-id="t2-crack-lith-p4">
+<span class="chunk-body"><span class="chunk-title">Crack 4 (if you have it) at Olympus (Mars) (Lith P4 Radiant) — Equinox Prime Blueprint.</span>
+<span class="chunk-meta">~18m, stay for 4 &middot; target crack</span>
+<span class="chunk-why">20% at Radiant for Equinox Prime Blueprint (400 traces). Goal: Equinox Prime. Covers 1 other want(s) in the same relic.</span></span></label>
+<label class="card chunk"><input type="checkbox" data-id="t2-crack-lith-n13">
+<span class="chunk-body"><span class="chunk-title">Crack 4 (if you have it) at Olympus (Mars) (Lith N13 Radiant) — Tipedo Prime Ornament.</span>
+<span class="chunk-meta">~18m, stay for 4 &middot; target crack</span>
+<span class="chunk-why">20% at Radiant for Tipedo Prime Ornament (400 traces). Goal: Tipedo Prime. Covers 1 other want(s) in the same relic.</span></span></label>
+<label class="card chunk"><input type="checkbox" data-id="t2-crack-lith-o3">
+<span class="chunk-body"><span class="chunk-title">Crack 4 (if you have it) at Olympus (Mars) (Lith O3 Radiant) — Octavia Prime Blueprint.</span>
+<span class="chunk-meta">~18m, stay for 4 &middot; target crack</span>
+<span class="chunk-why">10% at Radiant for Octavia Prime Blueprint (400 traces). Goal: Octavia Prime. Covers 1 other want(s) in the same relic.</span></span></label>
+<label class="card chunk"><input type="checkbox" data-id="t2-crack-lith-g3">
+<span class="chunk-body"><span class="chunk-title">Crack 4 (if you have it) at Olympus (Mars) (Lith G3 Radiant) — Guandao Prime Handle.</span>
+<span class="chunk-meta">~18m, stay for 4 &middot; target crack</span>
+<span class="chunk-why">10% at Radiant for Guandao Prime Handle (400 traces). Goal: Guandao Prime. Covers 1 other want(s) in the same relic.</span></span></label>
+<label class="card chunk"><input type="checkbox" data-id="t2-crack-lith-t10">
+<span class="chunk-body"><span class="chunk-title">Crack 4 (if you have it) at Olympus (Mars) (Lith T10 Radiant) — Tatsu Prime Handle.</span>
+<span class="chunk-meta">~18m, stay for 4 &middot; target crack</span>
+<span class="chunk-why">10% at Radiant for Tatsu Prime Handle (400 traces). Goal: Tatsu Prime. Covers 1 other want(s) in the same relic.</span></span></label>
+</div>
+<div class="goals">
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">E</span>
+<span class="goal-titles"><span class="goal-name">Equinox Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/4</span></span>
+<span class="pips" aria-hidden="true"><span class="pip need"></span><span class="pip unknown"></span><span class="pip unknown"></span><span class="pip unknown"></span></span></div>
+<div class="part"><span class="part-name">Equinox Prime Blueprint</span>
+<span class="part-state need">need</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi K5 ?</span> <span class="relic is-vaulted">Axi T3 ?</span> <span class="relic is-vaulted">Axi T4 ?</span> <span class="relic is-vaulted">Lith P4 ?</span> <span class="relic is-vaulted">Lith S13 ?</span> </span></div>
+<div class="part"><span class="part-name">Equinox Prime Chassis Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi A8 ?</span> <span class="relic is-vaulted">Axi P1 ?</span> <span class="relic is-vaulted">Lith C6 ?</span> <span class="relic is-vaulted">Lith D2 ?</span> <span class="relic is-vaulted">Lith L2 ?</span> </span></div>
+<div class="part"><span class="part-name">Equinox Prime Neuroptics Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi T9 ?</span> <span class="relic is-vaulted">Lith L1 ?</span> <span class="relic is-vaulted">Meso M3 ?</span> <span class="relic is-vaulted">Neo A3 ?</span> <span class="relic is-vaulted">Neo D2 ?</span> </span></div>
+<div class="part"><span class="part-name">Equinox Prime Systems Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Meso E2 ?</span> <span class="relic is-vaulted">Meso E3 ?</span> <span class="relic is-vaulted">Meso E4 ?</span> <span class="relic is-vaulted">Neo E2 ?</span> <span class="relic is-vaulted">Neo E3 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Lith P4 (if you have it), refine to Radiant, run Olympus (Mars) (Disruption) — stay for 4 rotations — cracks Equinox Prime Blueprint. (400 traces)</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">H</span>
+<span class="goal-titles"><span class="goal-name">Hildryn Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/4</span></span>
+<span class="pips" aria-hidden="true"><span class="pip unknown"></span><span class="pip unknown"></span><span class="pip need"></span><span class="pip unknown"></span></span></div>
+<div class="part"><span class="part-name">Hildryn Prime Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi H6 ?</span> <span class="relic is-vaulted">Axi H8 ?</span> <span class="relic is-vaulted">Meso H5 ?</span> <span class="relic is-vaulted">Meso H7 ?</span> <span class="relic is-vaulted">Neo H4 ?</span> </span></div>
+<div class="part"><span class="part-name">Hildryn Prime Chassis Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi A18 ?</span> <span class="relic is-vaulted">Axi L6 ?</span> <span class="relic is-vaulted">Meso G10 ?</span> <span class="relic is-vaulted">Meso P11 ?</span> <span class="relic is-vaulted">Neo G7 ?</span> </span></div>
+<div class="part"><span class="part-name">Hildryn Prime Neuroptics Blueprint</span>
+<span class="part-state need">need</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi W4 ?</span> <span class="relic is-vaulted">Lith G10 ?</span> <span class="relic is-vaulted">Lith M9 ?</span> <span class="relic is-vaulted">Meso P14 ?</span> <span class="relic is-vaulted">Neo C4 ?</span> </span></div>
+<div class="part"><span class="part-name">Hildryn Prime Systems Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi P6 ?</span> <span class="relic is-vaulted">Axi S17 ?</span> <span class="relic is-vaulted">Axi S19 ?</span> <span class="relic is-vaulted">Axi T12 ?</span> <span class="relic is-vaulted">Lith A6 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Lith G10 (if you have it), refine to Radiant, run Olympus (Mars) (Disruption) — stay for 4 rotations — cracks Hildryn Prime Neuroptics Blueprint. (400 traces)</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">I</span>
+<span class="goal-titles"><span class="goal-name">Inaros Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/4</span></span>
+<span class="pips" aria-hidden="true"><span class="pip need"></span><span class="pip unknown"></span><span class="pip unknown"></span><span class="pip unknown"></span></span></div>
+<div class="part"><span class="part-name">Inaros Prime Blueprint</span>
+<span class="part-state need">need</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi K12 ?</span> <span class="relic is-vaulted">Axi W1 ?</span> <span class="relic is-vaulted">Axi W2 ?</span> <span class="relic is-vaulted">Lith G4 ?</span> <span class="relic is-vaulted">Lith N10 ?</span> </span></div>
+<div class="part"><span class="part-name">Inaros Prime Chassis Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi K6 ?</span> <span class="relic is-vaulted">Axi O5 ?</span> <span class="relic is-vaulted">Lith H4 ?</span> <span class="relic is-vaulted">Lith N6 ?</span> <span class="relic is-vaulted">Neo A10 ?</span> </span></div>
+<div class="part"><span class="part-name">Inaros Prime Neuroptics Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi I1 ?</span> <span class="relic is-vaulted">Axi I2 ?</span> <span class="relic is-vaulted">Axi I3 ?</span> <span class="relic is-vaulted">Meso I1 ?</span> <span class="relic is-vaulted">Meso I2 ?</span> </span></div>
+<div class="part"><span class="part-name">Inaros Prime Systems Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi A13 ?</span> <span class="relic is-vaulted">Axi G7 ?</span> <span class="relic is-vaulted">Axi T7 ?</span> <span class="relic is-vaulted">Lith M6 ?</span> <span class="relic is-vaulted">Meso C7 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Axi W1 (if you have it), refine to Radiant, run Persto (Deimos) (Survival) — stay for 4 rotations — cracks Inaros Prime Blueprint. (400 traces)</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">I</span>
+<span class="goal-titles"><span class="goal-name">Ivara Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> <span class="resurg">VARZIA LIVE</span> parts 0/4</span></span>
+<span class="pips" aria-hidden="true"><span class="pip unknown"></span><span class="pip need"></span><span class="pip unknown"></span><span class="pip unknown"></span></span></div>
+<div class="part"><span class="part-name">Ivara Prime Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi B4 ?</span> <span class="relic is-vaulted">Axi S13 ?</span> <span class="relic is-vaulted">Lith B12 ?</span> <span class="relic is-vaulted">Lith B8 ?</span> <span class="relic is-vaulted">Lith N4 ?</span> </span></div>
+<div class="part"><span class="part-name">Ivara Prime Chassis Blueprint</span>
+<span class="part-state need">need</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Lith I1 ?</span> <span class="relic is-vaulted">Meso I3 ?</span> <span class="relic is-vaulted">Neo I1 ?</span> <span class="relic is-vaulted">Neo I2 ?</span> <span class="relic is-vaulted">Neo I3 ?</span> </span></div>
+<div class="part"><span class="part-name">Ivara Prime Neuroptics Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Lith D3 ?</span> <span class="relic is-vaulted">Meso B5 ?</span> <span class="relic is-vaulted">Meso C4 ?</span> <span class="relic is-vaulted">Meso D6 ?</span> <span class="relic is-vaulted">Meso N10 ?</span> </span></div>
+<div class="part"><span class="part-name">Ivara Prime Systems Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi A15 ?</span> <span class="relic is-vaulted">Axi A9 ?</span> <span class="relic is-vaulted">Axi C6 ?</span> <span class="relic is-vaulted">Lith A4 ?</span> <span class="relic is-vaulted">Lith T7 ?</span> </span></div>
+<div class="action action-resurgence">Rotation ends in 13d — Varzia has Ivara Prime's relics (Maroo's Bazaar (Mars)). Farm Aya, buy the relics, then crack above.</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">K</span>
+<span class="goal-titles"><span class="goal-name">Khora Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/4</span></span>
+<span class="pips" aria-hidden="true"><span class="pip need"></span><span class="pip unknown"></span><span class="pip unknown"></span><span class="pip unknown"></span></span></div>
+<div class="part"><span class="part-name">Khora Prime Blueprint</span>
+<span class="part-state need">need</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Neo C5 ?</span> <span class="relic is-vaulted">Lith K9 ?</span> <span class="relic is-vaulted">Meso K4 ?</span> <span class="relic is-vaulted">Neo K6 ?</span> </span></div>
+<div class="part"><span class="part-name">Khora Prime Chassis Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi G13 ?</span> <span class="relic is-vaulted">Lith C10 ?</span> <span class="relic is-vaulted">Lith G9 ?</span> <span class="relic is-vaulted">Lith S15 ?</span> <span class="relic is-vaulted">Neo D7 ?</span> </span></div>
+<div class="part"><span class="part-name">Khora Prime Neuroptics Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi K8 ?</span> <span class="relic is-vaulted">Neo K5 ?</span> <span class="relic is-vaulted">Neo K7 ?</span> <span class="relic is-vaulted">Neo K8 ?</span> </span></div>
+<div class="part"><span class="part-name">Khora Prime Systems Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi N11 ?</span> <span class="relic is-vaulted">Lith H7 ?</span> <span class="relic is-vaulted">Lith R4 ?</span> <span class="relic is-vaulted">Meso A5 ?</span> <span class="relic is-vaulted">Meso G5 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Neo C5 (if you have it), refine to Radiant, run Umbriel (Uranus) (Interception) — stay for 4 rotations — cracks Khora Prime Blueprint. (400 traces)</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">N</span>
+<span class="goal-titles"><span class="goal-name">Nidus Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/4</span></span>
+<span class="pips" aria-hidden="true"><span class="pip unknown"></span><span class="pip need"></span><span class="pip unknown"></span><span class="pip unknown"></span></span></div>
+<div class="part"><span class="part-name">Nidus Prime Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi A14 ?</span> <span class="relic is-vaulted">Lith K10 ?</span> <span class="relic is-vaulted">Lith R2 ?</span> <span class="relic is-vaulted">Lith S17 ?</span> <span class="relic is-vaulted">Lith T9 ?</span> </span></div>
+<div class="part"><span class="part-name">Nidus Prime Chassis Blueprint</span>
+<span class="part-state need">need</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi N12 ?</span> <span class="relic is-vaulted">Lith N12 ?</span> <span class="relic is-vaulted">Lith N7 ?</span> <span class="relic is-vaulted">Meso N13 ?</span> <span class="relic is-vaulted">Meso N14 ?</span> </span></div>
+<div class="part"><span class="part-name">Nidus Prime Neuroptics Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Neo S19 ?</span> <span class="relic is-vaulted">Axi N10 ?</span> <span class="relic is-vaulted">Axi N9 ?</span> <span class="relic is-vaulted">Neo N16 ?</span> </span></div>
+<div class="part"><span class="part-name">Nidus Prime Systems Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Meso A3 ?</span> <span class="relic is-vaulted">Meso B5 ?</span> <span class="relic is-vaulted">Meso D7 ?</span> <span class="relic is-vaulted">Meso H2 ?</span> <span class="relic is-vaulted">Meso P9 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Axi N12 (if you have it), refine to Radiant, run Persto (Deimos) (Survival) — stay for 4 rotations — cracks Nidus Prime Chassis Blueprint. (400 traces)</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">O</span>
+<span class="goal-titles"><span class="goal-name">Octavia Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/4</span></span>
+<span class="pips" aria-hidden="true"><span class="pip need"></span><span class="pip unknown"></span><span class="pip unknown"></span><span class="pip unknown"></span></span></div>
+<div class="part"><span class="part-name">Octavia Prime Blueprint</span>
+<span class="part-state need">need</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi O5 ?</span> <span class="relic is-vaulted">Lith O3 ?</span> <span class="relic is-vaulted">Meso O5 ?</span> </span></div>
+<div class="part"><span class="part-name">Octavia Prime Chassis Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi K8 ?</span> <span class="relic is-vaulted">Axi S11 ?</span> <span class="relic is-vaulted">Lith K7 ?</span> <span class="relic is-vaulted">Meso N15 ?</span> <span class="relic is-vaulted">Meso S11 ?</span> </span></div>
+<div class="part"><span class="part-name">Octavia Prime Neuroptics Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi K6 ?</span> <span class="relic is-vaulted">Axi P5 ?</span> <span class="relic is-vaulted">Lith G3 ?</span> <span class="relic is-vaulted">Lith G4 ?</span> <span class="relic is-vaulted">Lith G5 ?</span> </span></div>
+<div class="part"><span class="part-name">Octavia Prime Systems Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi N7 ?</span> <span class="relic is-vaulted">Lith C9 ?</span> <span class="relic is-vaulted">Lith N7 ?</span> <span class="relic is-vaulted">Lith R2 ?</span> <span class="relic is-vaulted">Meso D6 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Lith O3 (if you have it), refine to Radiant, run Olympus (Mars) (Disruption) — stay for 4 rotations — cracks Octavia Prime Blueprint. (400 traces)</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">W</span>
+<span class="goal-titles"><span class="goal-name">Wukong Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/4</span></span>
+<span class="pips" aria-hidden="true"><span class="pip need"></span><span class="pip unknown"></span><span class="pip unknown"></span><span class="pip unknown"></span></span></div>
+<div class="part"><span class="part-name">Wukong Prime Blueprint</span>
+<span class="part-state need">need</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi W1 ?</span> <span class="relic is-vaulted">Axi W2 ?</span> <span class="relic is-vaulted">Lith W1 ?</span> <span class="relic is-vaulted">Lith W2 ?</span> <span class="relic is-vaulted">Meso W1 ?</span> </span></div>
+<div class="part"><span class="part-name">Wukong Prime Chassis Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi A10 ?</span> <span class="relic is-vaulted">Axi T6 ?</span> <span class="relic is-vaulted">Lith K3 ?</span> <span class="relic is-vaulted">Lith N13 ?</span> <span class="relic is-vaulted">Meso B4 ?</span> </span></div>
+<div class="part"><span class="part-name">Wukong Prime Neuroptics Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi G2 ?</span> <span class="relic is-vaulted">Axi T4 ?</span> <span class="relic is-vaulted">Axi Z1 ?</span> <span class="relic is-vaulted">Lith D2 ?</span> <span class="relic is-vaulted">Lith S13 ?</span> </span></div>
+<div class="part"><span class="part-name">Wukong Prime Systems Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi A11 ?</span> <span class="relic is-vaulted">Axi P3 ?</span> <span class="relic is-vaulted">Axi R3 ?</span> <span class="relic is-vaulted">Meso K2 ?</span> <span class="relic is-vaulted">Meso T4 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Axi W1 (if you have it), refine to Radiant, run Persto (Deimos) (Survival) — stay for 4 rotations — cracks Wukong Prime Blueprint. (400 traces)</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">D</span>
+<span class="goal-titles"><span class="goal-name">Dual Keres Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/3</span></span>
+<span class="pips" aria-hidden="true"><span class="pip unknown"></span><span class="pip need"></span><span class="pip need"></span></span></div>
+<div class="part"><span class="part-name">Dual Keres Prime Blade</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi G8 ?</span> <span class="relic is-vaulted">Axi G9 ?</span> <span class="relic is-vaulted">Lith G9 ?</span> <span class="relic is-vaulted">Lith W3 ?</span> <span class="relic is-vaulted">Meso M4 ?</span> </span></div>
+<div class="part"><span class="part-name">Dual Keres Prime Blueprint</span>
+<span class="part-state need">need</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi D5 ?</span> <span class="relic is-vaulted">Lith D6 ?</span> <span class="relic is-vaulted">Meso D7 ?</span> <span class="relic is-vaulted">Neo D5 ?</span> <span class="relic is-vaulted">Neo D7 ?</span> </span></div>
+<div class="part"><span class="part-name">Dual Keres Prime Handle</span>
+<span class="part-state need">need</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Lith T10 ?</span> <span class="relic is-vaulted">Meso H8 ?</span> <span class="relic is-vaulted">Meso P11 ?</span> <span class="relic is-vaulted">Meso V7 ?</span> <span class="relic is-vaulted">Neo W1 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Lith T10 (if you have it), refine to Radiant, run Olympus (Mars) (Disruption) — stay for 4 rotations — cracks Dual Keres Prime Handle. (400 traces)</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">G</span>
+<span class="goal-titles"><span class="goal-name">Guandao Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/3</span></span>
+<span class="pips" aria-hidden="true"><span class="pip need"></span><span class="pip unknown"></span><span class="pip need"></span></span></div>
+<div class="part"><span class="part-name">Guandao Prime Blade</span>
+<span class="part-state need">need</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi S10 ?</span> <span class="relic is-vaulted">Axi S9 ?</span> <span class="relic is-vaulted">Lith K7 ?</span> <span class="relic is-vaulted">Lith O3 ?</span> <span class="relic is-vaulted">Meso H2 ?</span> </span></div>
+<div class="part"><span class="part-name">Guandao Prime Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Lith K9 ?</span> <span class="relic is-vaulted">Lith P5 ?</span> <span class="relic is-vaulted">Meso B5 ?</span> <span class="relic is-vaulted">Meso I2 ?</span> <span class="relic is-vaulted">Meso P7 ?</span> </span></div>
+<div class="part"><span class="part-name">Guandao Prime Handle</span>
+<span class="part-state need">need</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Lith G3 ?</span> <span class="relic is-vaulted">Lith G4 ?</span> <span class="relic is-vaulted">Lith G7 ?</span> <span class="relic is-vaulted">Meso G2 ?</span> <span class="relic is-vaulted">Meso G4 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Axi S10 (if you have it), refine to Intact, run Persto (Deimos) (Survival) — stay for 4 rotations — cracks Guandao Prime Blade.</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">G</span>
+<span class="goal-titles"><span class="goal-name">Gunsen Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/3</span></span>
+<span class="pips" aria-hidden="true"><span class="pip need"></span><span class="pip need"></span><span class="pip need"></span></span></div>
+<div class="part"><span class="part-name">Gunsen Prime Blade</span>
+<span class="part-state need">need</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Lith G10 ?</span> <span class="relic is-vaulted">Lith G13 ?</span> <span class="relic is-vaulted">Meso G10 ?</span> <span class="relic is-vaulted">Meso G5 ?</span> </span></div>
+<div class="part"><span class="part-name">Gunsen Prime Blueprint</span>
+<span class="part-state need">need</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi P9 ?</span> <span class="relic is-vaulted">Lith C11 ?</span> <span class="relic is-vaulted">Lith L6 ?</span> <span class="relic is-vaulted">Lith N16 ?</span> <span class="relic is-vaulted">Meso F5 ?</span> </span></div>
+<div class="part"><span class="part-name">Gunsen Prime Handle</span>
+<span class="part-state need">need</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi S19 ?</span> <span class="relic is-vaulted">Axi T12 ?</span> <span class="relic is-vaulted">Meso P15 ?</span> <span class="relic is-vaulted">Meso W4 ?</span> <span class="relic is-vaulted">Neo B9 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Neo C4 (if you have it), refine to Intact, run Umbriel (Uranus) (Interception) — stay for 4 rotations — cracks Gunsen Prime Blueprint.</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">H</span>
+<span class="goal-titles"><span class="goal-name">Hystrix Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/3</span></span>
+<span class="pips" aria-hidden="true"><span class="pip unknown"></span><span class="pip need"></span><span class="pip unknown"></span></span></div>
+<div class="part"><span class="part-name">Hystrix Prime Barrel</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi G13 ?</span> <span class="relic is-vaulted">Axi P6 ?</span> <span class="relic is-vaulted">Lith N14 ?</span> <span class="relic is-vaulted">Lith S15 ?</span> <span class="relic is-vaulted">Meso K6 ?</span> </span></div>
+<div class="part"><span class="part-name">Hystrix Prime Blueprint</span>
+<span class="part-state need">need</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi B7 ?</span> <span class="relic is-vaulted">Axi G10 ?</span> <span class="relic is-vaulted">Axi K9 ?</span> <span class="relic is-vaulted">Neo C5 ?</span> <span class="relic is-vaulted">Neo K6 ?</span> </span></div>
+<div class="part"><span class="part-name">Hystrix Prime Receiver</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Lith H6 ?</span> <span class="relic is-vaulted">Lith H8 ?</span> <span class="relic is-vaulted">Lith H9 ?</span> <span class="relic is-vaulted">Meso H3 ?</span> <span class="relic is-vaulted">Meso H6 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Neo C5 (if you have it), refine to Radiant, run Umbriel (Uranus) (Interception) — stay for 4 rotations — cracks Hystrix Prime Blueprint. (400 traces)</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">K</span>
+<span class="goal-titles"><span class="goal-name">Kogake Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/3</span></span>
+<span class="pips" aria-hidden="true"><span class="pip unknown"></span><span class="pip unknown"></span><span class="pip need"></span></span></div>
+<div class="part"><span class="part-name">Kogake Prime Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi C4 ?</span> <span class="relic is-vaulted">Axi K4 ?</span> <span class="relic is-vaulted">Axi P1 ?</span> <span class="relic is-vaulted">Axi V7 ?</span> <span class="relic is-vaulted">Meso M3 ?</span> </span></div>
+<div class="part"><span class="part-name">Kogake Prime Boot</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi A12 ?</span> <span class="relic is-vaulted">Axi A3 ?</span> <span class="relic is-vaulted">Axi T2 ?</span> <span class="relic is-vaulted">Lith L1 ?</span> <span class="relic is-vaulted">Lith M7 ?</span> </span></div>
+<div class="part"><span class="part-name">Kogake Prime Gauntlet</span>
+<span class="part-state need">need</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Lith K2 ?</span> <span class="relic is-vaulted">Lith K5 ?</span> <span class="relic is-vaulted">Meso K1 ?</span> <span class="relic is-vaulted">Neo K1 ?</span> <span class="relic is-vaulted">Neo K2 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Lith K2 (if you have it), refine to Radiant, run Olympus (Mars) (Disruption) — stay for 4 rotations — cracks Kogake Prime Gauntlet. (400 traces)</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">N</span>
+<span class="goal-titles"><span class="goal-name">Nami Skyla Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/3</span></span>
+<span class="pips" aria-hidden="true"><span class="pip need"></span><span class="pip unknown"></span><span class="pip unknown"></span></span></div>
+<div class="part"><span class="part-name">Nami Skyla Prime Blade</span>
+<span class="part-state need">need</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi N14 ?</span> <span class="relic is-vaulted">Axi N5 ?</span> <span class="relic is-vaulted">Lith N9 ?</span> <span class="relic is-vaulted">Neo N10 ?</span> <span class="relic is-vaulted">Neo N8 ?</span> </span></div>
+<div class="part"><span class="part-name">Nami Skyla Prime Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi L2 ?</span> <span class="relic is-vaulted">Axi L3 ?</span> <span class="relic is-vaulted">Axi V7 ?</span> <span class="relic is-vaulted">Lith Z2 ?</span> <span class="relic is-vaulted">Meso C3 ?</span> </span></div>
+<div class="part"><span class="part-name">Nami Skyla Prime Handle</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi B10 ?</span> <span class="relic is-vaulted">Lith C2 ?</span> <span class="relic is-vaulted">Lith H1 ?</span> <span class="relic is-vaulted">Meso D3 ?</span> <span class="relic is-vaulted">Meso S7 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Axi N14 (if you have it), refine to Radiant, run Persto (Deimos) (Survival) — stay for 4 rotations — cracks Nami Skyla Prime Blade. (400 traces)</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">N</span>
+<span class="goal-titles"><span class="goal-name">Ninkondi Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/3</span></span>
+<span class="pips" aria-hidden="true"><span class="pip unknown"></span><span class="pip unknown"></span><span class="pip need"></span></span></div>
+<div class="part"><span class="part-name">Ninkondi Prime Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi G3 ?</span> <span class="relic is-vaulted">Axi T9 ?</span> <span class="relic is-vaulted">Meso K3 ?</span> <span class="relic is-vaulted">Meso L1 ?</span> <span class="relic is-vaulted">Meso T4 ?</span> </span></div>
+<div class="part"><span class="part-name">Ninkondi Prime Chain</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi P1 ?</span> <span class="relic is-vaulted">Lith D1 ?</span> <span class="relic is-vaulted">Lith D3 ?</span> <span class="relic is-vaulted">Lith D4 ?</span> <span class="relic is-vaulted">Neo R3 ?</span> </span></div>
+<div class="part"><span class="part-name">Ninkondi Prime Handle</span>
+<span class="part-state need">need</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Lith N13 ?</span> <span class="relic is-vaulted">Lith N4 ?</span> <span class="relic is-vaulted">Lith N5 ?</span> <span class="relic is-vaulted">Meso N10 ?</span> <span class="relic is-vaulted">Meso N7 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Lith N13 (if you have it), refine to Radiant, run Olympus (Mars) (Disruption) — stay for 4 rotations — cracks Ninkondi Prime Handle. (400 traces)</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">P</span>
+<span class="goal-titles"><span class="goal-name">Pangolin Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/3</span></span>
+<span class="pips" aria-hidden="true"><span class="pip unknown"></span><span class="pip unknown"></span><span class="pip need"></span></span></div>
+<div class="part"><span class="part-name">Pangolin Prime Blade</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi A11 ?</span> <span class="relic is-vaulted">Axi A13 ?</span> <span class="relic is-vaulted">Axi C8 ?</span> <span class="relic is-vaulted">Axi G4 ?</span> <span class="relic is-vaulted">Axi T7 ?</span> </span></div>
+<div class="part"><span class="part-name">Pangolin Prime Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi P4 ?</span> <span class="relic is-vaulted">Lith P5 ?</span> <span class="relic is-vaulted">Meso P3 ?</span> <span class="relic is-vaulted">Neo P1 ?</span> <span class="relic is-vaulted">Neo P3 ?</span> </span></div>
+<div class="part"><span class="part-name">Pangolin Prime Handle</span>
+<span class="part-state need">need</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi C6 ?</span> <span class="relic is-vaulted">Axi I1 ?</span> <span class="relic is-vaulted">Axi V11 ?</span> <span class="relic is-vaulted">Meso N10 ?</span> <span class="relic is-vaulted">Meso R3 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Meso N10 (if you have it), refine to Intact, run Persto (Deimos) (Survival) — stay for 4 rotations — cracks Pangolin Prime Handle.</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">T</span>
+<span class="goal-titles"><span class="goal-name">Tatsu Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/3</span></span>
+<span class="pips" aria-hidden="true"><span class="pip unknown"></span><span class="pip unknown"></span><span class="pip need"></span></span></div>
+<div class="part"><span class="part-name">Tatsu Prime Blade</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi C9 ?</span> <span class="relic is-vaulted">Lith G6 ?</span> <span class="relic is-vaulted">Lith R5 ?</span> <span class="relic is-vaulted">Meso B8 ?</span> <span class="relic is-vaulted">Meso G7 ?</span> </span></div>
+<div class="part"><span class="part-name">Tatsu Prime Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi N10 ?</span> <span class="relic is-vaulted">Axi P7 ?</span> <span class="relic is-vaulted">Lith A9 ?</span> <span class="relic is-vaulted">Lith H6 ?</span> <span class="relic is-vaulted">Meso G6 ?</span> </span></div>
+<div class="part"><span class="part-name">Tatsu Prime Handle</span>
+<span class="part-state need">need</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi T10 ?</span> <span class="relic is-vaulted">Lith T10 ?</span> <span class="relic is-vaulted">Lith T12 ?</span> <span class="relic is-vaulted">Lith T13 ?</span> <span class="relic is-vaulted">Neo T7 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Lith T10 (if you have it), refine to Radiant, run Olympus (Mars) (Disruption) — stay for 4 rotations — cracks Tatsu Prime Handle. (400 traces)</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">T</span>
+<span class="goal-titles"><span class="goal-name">Tekko Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/3</span></span>
+<span class="pips" aria-hidden="true"><span class="pip need"></span><span class="pip unknown"></span><span class="pip unknown"></span></span></div>
+<div class="part"><span class="part-name">Tekko Prime Blade</span>
+<span class="part-state need">need</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi T6 ?</span> <span class="relic is-vaulted">Axi T7 ?</span> <span class="relic is-vaulted">Meso T6 ?</span> <span class="relic is-vaulted">Neo T2 ?</span> </span></div>
+<div class="part"><span class="part-name">Tekko Prime Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Lith L2 ?</span> <span class="relic is-vaulted">Lith P5 ?</span> <span class="relic is-vaulted">Meso E4 ?</span> <span class="relic is-vaulted">Meso V8 ?</span> <span class="relic is-vaulted">Neo B7 ?</span> </span></div>
+<div class="part"><span class="part-name">Tekko Prime Gauntlet</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi C5 ?</span> <span class="relic is-vaulted">Axi G4 ?</span> <span class="relic is-vaulted">Axi W2 ?</span> <span class="relic is-vaulted">Lith A5 ?</span> <span class="relic is-vaulted">Lith T4 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Axi T6 (if you have it), refine to Radiant, run Persto (Deimos) (Survival) — stay for 4 rotations — cracks Tekko Prime Blade. (400 traces)</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">T</span>
+<span class="goal-titles"><span class="goal-name">Tipedo Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/3</span></span>
+<span class="pips" aria-hidden="true"><span class="pip unknown"></span><span class="pip unknown"></span><span class="pip need"></span></span></div>
+<div class="part"><span class="part-name">Tipedo Prime Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Lith B7 ?</span> <span class="relic is-vaulted">Lith P2 ?</span> <span class="relic is-vaulted">Meso A2 ?</span> <span class="relic is-vaulted">Meso C5 ?</span> <span class="relic is-vaulted">Meso L1 ?</span> </span></div>
+<div class="part"><span class="part-name">Tipedo Prime Handle</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi T2 ?</span> <span class="relic is-vaulted">Axi T3 ?</span> <span class="relic is-vaulted">Axi T4 ?</span> <span class="relic is-vaulted">Axi T9 ?</span> </span></div>
+<div class="part"><span class="part-name">Tipedo Prime Ornament</span>
+<span class="part-state need">need</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi A6 ?</span> <span class="relic is-vaulted">Axi C5 ?</span> <span class="relic is-vaulted">Axi G2 ?</span> <span class="relic is-vaulted">Lith N13 ?</span> <span class="relic is-vaulted">Neo N10 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Lith N13 (if you have it), refine to Radiant, run Olympus (Mars) (Disruption) — stay for 4 rotations — cracks Tipedo Prime Ornament. (400 traces)</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">Z</span>
+<span class="goal-titles"><span class="goal-name">Zakti Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/3</span></span>
+<span class="pips" aria-hidden="true"><span class="pip unknown"></span><span class="pip need"></span><span class="pip unknown"></span></span></div>
+<div class="part"><span class="part-name">Zakti Prime Barrel</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Lith D4 ?</span> <span class="relic is-vaulted">Lith G7 ?</span> <span class="relic is-vaulted">Lith N11 ?</span> <span class="relic is-vaulted">Lith N8 ?</span> <span class="relic is-vaulted">Lith T9 ?</span> </span></div>
+<div class="part"><span class="part-name">Zakti Prime Blueprint</span>
+<span class="part-state need">need</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi Z1 ?</span> <span class="relic is-vaulted">Lith Z3 ?</span> <span class="relic is-vaulted">Meso Z4 ?</span> <span class="relic is-vaulted">Meso Z5 ?</span> </span></div>
+<div class="part"><span class="part-name">Zakti Prime Receiver</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi A14 ?</span> <span class="relic is-vaulted">Axi T6 ?</span> <span class="relic is-vaulted">Lith T4 ?</span> <span class="relic is-vaulted">Lith T8 ?</span> <span class="relic is-vaulted">Meso H3 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Axi Z1 (if you have it), refine to Radiant, run Persto (Deimos) (Survival) — stay for 4 rotations — cracks Zakti Prime Blueprint. (400 traces)</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">A</span>
+<span class="goal-titles"><span class="goal-name">Afuris Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/4</span></span>
+<span class="pips" aria-hidden="true"><span class="pip need"></span><span class="pip unknown"></span><span class="pip unknown"></span><span class="pip need"></span></span></div>
+<div class="part"><span class="part-name">Afuris Prime Barrel</span>
+<span class="part-state need">need</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi N10 ?</span> <span class="relic is-vaulted">Lith H9 ?</span> <span class="relic is-vaulted">Lith N14 ?</span> <span class="relic is-vaulted">Lith P8 ?</span> <span class="relic is-vaulted">Meso B9 ?</span> </span></div>
+<div class="part"><span class="part-name">Afuris Prime Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi B6 ?</span> <span class="relic is-vaulted">Axi B9 ?</span> <span class="relic is-vaulted">Axi D5 ?</span> <span class="relic is-vaulted">Lith G6 ?</span> <span class="relic is-vaulted">Neo G7 ?</span> </span></div>
+<div class="part"><span class="part-name">Afuris Prime Link</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi G11 ?</span> <span class="relic is-vaulted">Meso A5 ?</span> <span class="relic is-vaulted">Meso V9 ?</span> <span class="relic is-vaulted">Neo K5 ?</span> <span class="relic is-vaulted">Neo P8 ?</span> </span></div>
+<div class="part"><span class="part-name">Afuris Prime Receiver</span>
+<span class="part-state need">need</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi A16 ?</span> <span class="relic is-vaulted">Axi A17 ?</span> <span class="relic is-vaulted">Lith A9 ?</span> <span class="relic is-vaulted">Meso A4 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Meso D7 (if you have it), refine to Intact, run Persto (Deimos) (Survival) — stay for 4 rotations — cracks Afuris Prime Barrel.</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">A</span>
+<span class="goal-titles"><span class="goal-name">Akarius Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/4</span></span>
+<span class="pips" aria-hidden="true"><span class="pip need"></span><span class="pip need"></span><span class="pip unknown"></span><span class="pip need"></span></span></div>
+<div class="part"><span class="part-name">Akarius Prime Barrel</span>
+<span class="part-state need">need</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi D5 ?</span> <span class="relic is-vaulted">Axi H8 ?</span> <span class="relic is-vaulted">Lith O4 ?</span> <span class="relic is-vaulted">Neo A12 ?</span> <span class="relic is-vaulted">Neo A13 ?</span> </span></div>
+<div class="part"><span class="part-name">Akarius Prime Blueprint</span>
+<span class="part-state need">need</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Meso A11 ?</span> <span class="relic is-vaulted">Meso A7 ?</span> <span class="relic is-vaulted">Neo A11 ?</span> </span></div>
+<div class="part"><span class="part-name">Akarius Prime Link</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi Y2 ?</span> <span class="relic is-vaulted">Lith A11 ?</span> <span class="relic is-vaulted">Lith R5 ?</span> <span class="relic is-vaulted">Meso N17 ?</span> <span class="relic is-vaulted">Meso P16 ?</span> </span></div>
+<div class="part"><span class="part-name">Akarius Prime Receiver</span>
+<span class="part-state need">need</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Neo G10 ?</span> <span class="relic is-vaulted">Lith A10 ?</span> <span class="relic is-vaulted">Lith A6 ?</span> <span class="relic is-vaulted">Lith A7 ?</span> <span class="relic is-vaulted">Lith A8 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Axi D5 (if you have it), refine to Intact, run Persto (Deimos) (Survival) — stay for 4 rotations — cracks Akarius Prime Barrel.</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">A</span>
+<span class="goal-titles"><span class="goal-name">Akbolto Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/4</span></span>
+<span class="pips" aria-hidden="true"><span class="pip unknown"></span><span class="pip unknown"></span><span class="pip unknown"></span><span class="pip need"></span></span></div>
+<div class="part"><span class="part-name">Akbolto Prime Barrel</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Lith A3 ?</span> <span class="relic is-vaulted">Lith C2 ?</span> <span class="relic is-vaulted">Lith K5 ?</span> <span class="relic is-vaulted">Lith O1 ?</span> <span class="relic is-vaulted">Lith V5 ?</span> </span></div>
+<div class="part"><span class="part-name">Akbolto Prime Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi G2 ?</span> <span class="relic is-vaulted">Axi H5 ?</span> <span class="relic is-vaulted">Lith M7 ?</span> <span class="relic is-vaulted">Meso D3 ?</span> <span class="relic is-vaulted">Neo M1 ?</span> </span></div>
+<div class="part"><span class="part-name">Akbolto Prime Link</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi H4 ?</span> <span class="relic is-vaulted">Lith S7 ?</span> <span class="relic is-vaulted">Lith W1 ?</span> <span class="relic is-vaulted">Meso E2 ?</span> <span class="relic is-vaulted">Neo B6 ?</span> </span></div>
+<div class="part"><span class="part-name">Akbolto Prime Receiver</span>
+<span class="part-state need">need</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi A12 ?</span> <span class="relic is-vaulted">Axi A3 ?</span> <span class="relic is-vaulted">Axi A4 ?</span> <span class="relic is-vaulted">Meso A2 ?</span> <span class="relic is-vaulted">Neo A2 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Meso A2 (if you have it), refine to Radiant, run Persto (Deimos) (Survival) — stay for 4 rotations — cracks Akbolto Prime Receiver. (400 traces)</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">A</span>
+<span class="goal-titles"><span class="goal-name">Akjagara Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/4</span></span>
+<span class="pips" aria-hidden="true"><span class="pip need"></span><span class="pip unknown"></span><span class="pip unknown"></span><span class="pip unknown"></span></span></div>
+<div class="part"><span class="part-name">Akjagara Prime Barrel</span>
+<span class="part-state need">need</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Lith A3 ?</span> <span class="relic is-vaulted">Meso A1 ?</span> <span class="relic is-vaulted">Neo A3 ?</span> <span class="relic is-vaulted">Neo A6 ?</span> <span class="relic is-vaulted">Neo A9 ?</span> </span></div>
+<div class="part"><span class="part-name">Akjagara Prime Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi B4 ?</span> <span class="relic is-vaulted">Axi M3 ?</span> <span class="relic is-vaulted">Axi P1 ?</span> <span class="relic is-vaulted">Lith M4 ?</span> <span class="relic is-vaulted">Lith P7 ?</span> </span></div>
+<div class="part"><span class="part-name">Akjagara Prime Link</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi R3 ?</span> <span class="relic is-vaulted">Lith P3 ?</span> <span class="relic is-vaulted">Meso B7 ?</span> <span class="relic is-vaulted">Meso M2 ?</span> <span class="relic is-vaulted">Meso N9 ?</span> </span></div>
+<div class="part"><span class="part-name">Akjagara Prime Receiver</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi L3 ?</span> <span class="relic is-vaulted">Lith M6 ?</span> <span class="relic is-vaulted">Lith N9 ?</span> <span class="relic is-vaulted">Meso L2 ?</span> <span class="relic is-vaulted">Neo I1 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Lith A3 (if you have it), refine to Radiant, run Olympus (Mars) (Disruption) — stay for 4 rotations — cracks Akjagara Prime Barrel. (400 traces)</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">A</span>
+<span class="goal-titles"><span class="goal-name">Aksomati Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/4</span></span>
+<span class="pips" aria-hidden="true"><span class="pip need"></span><span class="pip unknown"></span><span class="pip need"></span><span class="pip need"></span></span></div>
+<div class="part"><span class="part-name">Aksomati Prime Barrel</span>
+<span class="part-state need">need</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Lith B7 ?</span> <span class="relic is-vaulted">Meso D6 ?</span> <span class="relic is-vaulted">Meso S10 ?</span> <span class="relic is-vaulted">Neo P11 ?</span> <span class="relic is-vaulted">Neo S16 ?</span> </span></div>
+<div class="part"><span class="part-name">Aksomati Prime Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi B4 ?</span> <span class="relic is-vaulted">Axi G6 ?</span> <span class="relic is-vaulted">Lith B8 ?</span> <span class="relic is-vaulted">Lith N8 ?</span> <span class="relic is-vaulted">Meso I3 ?</span> </span></div>
+<div class="part"><span class="part-name">Aksomati Prime Link</span>
+<span class="part-state need">need</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi A10 ?</span> <span class="relic is-vaulted">Axi A13 ?</span> <span class="relic is-vaulted">Axi A14 ?</span> <span class="relic is-vaulted">Axi A15 ?</span> <span class="relic is-vaulted">Axi A23 ?</span> </span></div>
+<div class="part"><span class="part-name">Aksomati Prime Receiver</span>
+<span class="part-state need">need</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi D2 ?</span> <span class="relic is-vaulted">Axi G4 ?</span> <span class="relic is-vaulted">Axi S13 ?</span> <span class="relic is-vaulted">Axi W1 ?</span> <span class="relic is-vaulted">Lith B12 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Axi W1 (if you have it), refine to Intact, run Persto (Deimos) (Survival) — stay for 4 rotations — cracks Aksomati Prime Receiver.</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">B</span>
+<span class="goal-titles"><span class="goal-name">Baza Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/4</span></span>
+<span class="pips" aria-hidden="true"><span class="pip unknown"></span><span class="pip need"></span><span class="pip unknown"></span><span class="pip need"></span></span></div>
+<div class="part"><span class="part-name">Baza Prime Barrel</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi I2 ?</span> <span class="relic is-vaulted">Axi Z1 ?</span> <span class="relic is-vaulted">Lith A4 ?</span> <span class="relic is-vaulted">Lith S10 ?</span> <span class="relic is-vaulted">Lith W2 ?</span> </span></div>
+<div class="part"><span class="part-name">Baza Prime Blueprint</span>
+<span class="part-state need">need</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi S13 ?</span> <span class="relic is-vaulted">Meso I3 ?</span> <span class="relic is-vaulted">Axi B4 ?</span> <span class="relic is-vaulted">Lith B7 ?</span> <span class="relic is-vaulted">Lith B8 ?</span> </span></div>
+<div class="part"><span class="part-name">Baza Prime Receiver</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi A15 ?</span> <span class="relic is-vaulted">Axi N7 ?</span> <span class="relic is-vaulted">Axi W2 ?</span> <span class="relic is-vaulted">Lith K7 ?</span> <span class="relic is-vaulted">Meso C6 ?</span> </span></div>
+<div class="part"><span class="part-name">Baza Prime Stock</span>
+<span class="part-state need">need</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi B3 ?</span> <span class="relic is-vaulted">Lith B12 ?</span> <span class="relic is-vaulted">Lith B9 ?</span> <span class="relic is-vaulted">Meso B6 ?</span> <span class="relic is-vaulted">Neo B7 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Axi S13 (if you have it), refine to Radiant, run Persto (Deimos) (Survival) — stay for 4 rotations — cracks Baza Prime Blueprint. (400 traces)</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">C</span>
+<span class="goal-titles"><span class="goal-name">Cobra &amp; Crane Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/4</span></span>
+<span class="pips" aria-hidden="true"><span class="pip unknown"></span><span class="pip unknown"></span><span class="pip need"></span><span class="pip unknown"></span></span></div>
+<div class="part"><span class="part-name">Cobra &amp; Crane Prime Blade</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi G9 ?</span> <span class="relic is-vaulted">Axi L6 ?</span> <span class="relic is-vaulted">Meso H6 ?</span> <span class="relic is-vaulted">Meso N14 ?</span> <span class="relic is-vaulted">Meso R6 ?</span> </span></div>
+<div class="part"><span class="part-name">Cobra &amp; Crane Prime Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi B9 ?</span> <span class="relic is-vaulted">Axi K11 ?</span> <span class="relic is-vaulted">Lith G10 ?</span> <span class="relic is-vaulted">Lith N15 ?</span> <span class="relic is-vaulted">Meso K5 ?</span> </span></div>
+<div class="part"><span class="part-name">Cobra &amp; Crane Prime Guard</span>
+<span class="part-state need">need</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi C9 ?</span> <span class="relic is-vaulted">Lith C10 ?</span> <span class="relic is-vaulted">Lith C11 ?</span> <span class="relic is-vaulted">Lith C12 ?</span> <span class="relic is-vaulted">Meso C8 ?</span> </span></div>
+<div class="part"><span class="part-name">Cobra &amp; Crane Prime Hilt</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi A18 ?</span> <span class="relic is-vaulted">Axi H6 ?</span> <span class="relic is-vaulted">Axi H7 ?</span> <span class="relic is-vaulted">Lith A9 ?</span> <span class="relic is-vaulted">Lith G12 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Lith C11 (if you have it), refine to Radiant, run Olympus (Mars) (Disruption) — stay for 4 rotations — cracks Cobra &amp; Crane Prime Guard. (400 traces)</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">C</span>
+<span class="goal-titles"><span class="goal-name">Corinth Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/4</span></span>
+<span class="pips" aria-hidden="true"><span class="pip unknown"></span><span class="pip unknown"></span><span class="pip unknown"></span><span class="pip need"></span></span></div>
+<div class="part"><span class="part-name">Corinth Prime Barrel</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi C5 ?</span> <span class="relic is-vaulted">Axi C6 ?</span> <span class="relic is-vaulted">Axi C7 ?</span> <span class="relic is-vaulted">Meso C10 ?</span> <span class="relic is-vaulted">Meso C5 ?</span> </span></div>
+<div class="part"><span class="part-name">Corinth Prime Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi T4 ?</span> <span class="relic is-vaulted">Lith A4 ?</span> <span class="relic is-vaulted">Lith T5 ?</span> <span class="relic is-vaulted">Meso A6 ?</span> <span class="relic is-vaulted">Meso I1 ?</span> </span></div>
+<div class="part"><span class="part-name">Corinth Prime Receiver</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi P4 ?</span> <span class="relic is-vaulted">Axi T7 ?</span> <span class="relic is-vaulted">Lith D3 ?</span> <span class="relic is-vaulted">Lith G11 ?</span> <span class="relic is-vaulted">Meso P4 ?</span> </span></div>
+<div class="part"><span class="part-name">Corinth Prime Stock</span>
+<span class="part-state need">need</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi C8 ?</span> <span class="relic is-vaulted">Lith C6 ?</span> <span class="relic is-vaulted">Lith C9 ?</span> <span class="relic is-vaulted">Meso C6 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Axi C8 (if you have it), refine to Radiant, run Persto (Deimos) (Survival) — stay for 4 rotations — cracks Corinth Prime Stock. (400 traces)</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">C</span>
+<span class="goal-titles"><span class="goal-name">Corvas Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/4</span></span>
+<span class="pips" aria-hidden="true"><span class="pip need"></span><span class="pip unknown"></span><span class="pip unknown"></span><span class="pip unknown"></span></span></div>
+<div class="part"><span class="part-name">Corvas Prime Barrel</span>
+<span class="part-state need">need</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Meso C9 ?</span> <span class="relic is-vaulted">Neo C2 ?</span> <span class="relic is-vaulted">Neo C4 ?</span> <span class="relic is-vaulted">Neo C5 ?</span> </span></div>
+<div class="part"><span class="part-name">Corvas Prime Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi K7 ?</span> <span class="relic is-vaulted">Lith W3 ?</span> <span class="relic is-vaulted">Meso B8 ?</span> <span class="relic is-vaulted">Meso H8 ?</span> <span class="relic is-vaulted">Neo D5 ?</span> </span></div>
+<div class="part"><span class="part-name">Corvas Prime Receiver</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi G10 ?</span> <span class="relic is-vaulted">Axi K8 ?</span> <span class="relic is-vaulted">Axi T10 ?</span> <span class="relic is-vaulted">Lith D6 ?</span> <span class="relic is-vaulted">Lith G8 ?</span> </span></div>
+<div class="part"><span class="part-name">Corvas Prime Stock</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi G8 ?</span> <span class="relic is-vaulted">Lith K10 ?</span> <span class="relic is-vaulted">Lith S12 ?</span> <span class="relic is-vaulted">Meso G5 ?</span> <span class="relic is-vaulted">Neo C3 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Neo C4 (if you have it), refine to Radiant, run Umbriel (Uranus) (Interception) — stay for 4 rotations — cracks Corvas Prime Barrel. (400 traces)</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">F</span>
+<span class="goal-titles"><span class="goal-name">Fulmin Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/4</span></span>
+<span class="pips" aria-hidden="true"><span class="pip need"></span><span class="pip unknown"></span><span class="pip need"></span><span class="pip unknown"></span></span></div>
+<div class="part"><span class="part-name">Fulmin Prime Barrel</span>
+<span class="part-state need">need</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi W4 ?</span> <span class="relic is-vaulted">Axi Z2 ?</span> <span class="relic is-vaulted">Lith G10 ?</span> <span class="relic is-vaulted">Meso P13 ?</span> <span class="relic is-vaulted">Meso V9 ?</span> </span></div>
+<div class="part"><span class="part-name">Fulmin Prime Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi H8 ?</span> <span class="relic is-vaulted">Lith A7 ?</span> <span class="relic is-vaulted">Lith H9 ?</span> <span class="relic is-vaulted">Meso A5 ?</span> <span class="relic is-vaulted">Meso H7 ?</span> </span></div>
+<div class="part"><span class="part-name">Fulmin Prime Receiver</span>
+<span class="part-state need">need</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi F2 ?</span> <span class="relic is-vaulted">Axi F3 ?</span> <span class="relic is-vaulted">Lith F3 ?</span> <span class="relic is-vaulted">Meso F5 ?</span> <span class="relic is-vaulted">Neo F2 ?</span> </span></div>
+<div class="part"><span class="part-name">Fulmin Prime Stock</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi H7 ?</span> <span class="relic is-vaulted">Axi S19 ?</span> <span class="relic is-vaulted">Lith C11 ?</span> <span class="relic is-vaulted">Lith C12 ?</span> <span class="relic is-vaulted">Lith G8 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Lith G10 (if you have it), refine to Intact, run Olympus (Mars) (Disruption) — stay for 4 rotations — cracks Fulmin Prime Barrel.</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">L</span>
+<span class="goal-titles"><span class="goal-name">Larkspur Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/4</span></span>
+<span class="pips" aria-hidden="true"><span class="pip need"></span><span class="pip unknown"></span><span class="pip unknown"></span><span class="pip unknown"></span></span></div>
+<div class="part"><span class="part-name">Larkspur Prime Barrel</span>
+<span class="part-state need">need</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi L6 ?</span> <span class="relic is-vaulted">Lith L6 ?</span> <span class="relic is-vaulted">Neo L2 ?</span> <span class="relic is-vaulted">Neo L3 ?</span> <span class="relic is-vaulted">Neo L4 ?</span> </span></div>
+<div class="part"><span class="part-name">Larkspur Prime Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi S16 ?</span> <span class="relic is-vaulted">Lith T12 ?</span> <span class="relic is-vaulted">Lith X1 ?</span> <span class="relic is-vaulted">Meso B9 ?</span> <span class="relic is-vaulted">Meso H4 ?</span> </span></div>
+<div class="part"><span class="part-name">Larkspur Prime Receiver</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi A19 ?</span> <span class="relic is-vaulted">Axi G10 ?</span> <span class="relic is-vaulted">Lith G12 ?</span> <span class="relic is-vaulted">Lith P9 ?</span> <span class="relic is-vaulted">Meso G10 ?</span> </span></div>
+<div class="part"><span class="part-name">Larkspur Prime Stock</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi D5 ?</span> <span class="relic is-vaulted">Lith F3 ?</span> <span class="relic is-vaulted">Lith K10 ?</span> <span class="relic is-vaulted">Lith W3 ?</span> <span class="relic is-vaulted">Meso W3 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Lith L6 (if you have it), refine to Radiant, run Olympus (Mars) (Disruption) — stay for 4 rotations — cracks Larkspur Prime Barrel. (400 traces)</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">P</span>
+<span class="goal-titles"><span class="goal-name">Panthera Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/4</span></span>
+<span class="pips" aria-hidden="true"><span class="pip need"></span><span class="pip unknown"></span><span class="pip need"></span><span class="pip unknown"></span></span></div>
+<div class="part"><span class="part-name">Panthera Prime Barrel</span>
+<span class="part-state need">need</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Lith P3 ?</span> <span class="relic is-vaulted">Lith P4 ?</span> <span class="relic is-vaulted">Meso P12 ?</span> <span class="relic is-vaulted">Meso P4 ?</span> <span class="relic is-vaulted">Meso P7 ?</span> </span></div>
+<div class="part"><span class="part-name">Panthera Prime Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi C5 ?</span> <span class="relic is-vaulted">Axi I1 ?</span> <span class="relic is-vaulted">Axi I3 ?</span> <span class="relic is-vaulted">Axi O5 ?</span> <span class="relic is-vaulted">Axi S11 ?</span> </span></div>
+<div class="part"><span class="part-name">Panthera Prime Receiver</span>
+<span class="part-state need">need</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Neo A10 ?</span> <span class="relic is-vaulted">Meso P2 ?</span> <span class="relic is-vaulted">Meso P5 ?</span> </span></div>
+<div class="part"><span class="part-name">Panthera Prime Stock</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi M2 ?</span> <span class="relic is-vaulted">Axi S10 ?</span> <span class="relic is-vaulted">Lith G3 ?</span> <span class="relic is-vaulted">Lith V10 ?</span> <span class="relic is-vaulted">Meso G3 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Lith P4 (if you have it), refine to Radiant, run Olympus (Mars) (Disruption) — stay for 4 rotations — cracks Panthera Prime Barrel. (400 traces)</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">S</span>
+<span class="goal-titles"><span class="goal-name">Scourge Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/4</span></span>
+<span class="pips" aria-hidden="true"><span class="pip need"></span><span class="pip unknown"></span><span class="pip unknown"></span><span class="pip unknown"></span></span></div>
+<div class="part"><span class="part-name">Scourge Prime Barrel</span>
+<span class="part-state need">need</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi S10 ?</span> <span class="relic is-vaulted">Axi S14 ?</span> <span class="relic is-vaulted">Meso S11 ?</span> <span class="relic is-vaulted">Meso S12 ?</span> <span class="relic is-vaulted">Meso S13 ?</span> </span></div>
+<div class="part"><span class="part-name">Scourge Prime Blade</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi A16 ?</span> <span class="relic is-vaulted">Lith R2 ?</span> <span class="relic is-vaulted">Lith R3 ?</span> <span class="relic is-vaulted">Meso A4 ?</span> <span class="relic is-vaulted">Meso N16 ?</span> </span></div>
+<div class="part"><span class="part-name">Scourge Prime Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi S11 ?</span> <span class="relic is-vaulted">Axi S12 ?</span> <span class="relic is-vaulted">Axi S15 ?</span> <span class="relic is-vaulted">Axi S9 ?</span> <span class="relic is-vaulted">Lith S14 ?</span> </span></div>
+<div class="part"><span class="part-name">Scourge Prime Handle</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi K11 ?</span> <span class="relic is-vaulted">Axi T11 ?</span> <span class="relic is-vaulted">Lith C9 ?</span> <span class="relic is-vaulted">Meso C8 ?</span> <span class="relic is-vaulted">Meso G4 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Axi S10 (if you have it), refine to Radiant, run Persto (Deimos) (Survival) — stay for 4 rotations — cracks Scourge Prime Barrel. (400 traces)</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">S</span>
+<span class="goal-titles"><span class="goal-name">Stradavar Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/4</span></span>
+<span class="pips" aria-hidden="true"><span class="pip unknown"></span><span class="pip need"></span><span class="pip need"></span><span class="pip unknown"></span></span></div>
+<div class="part"><span class="part-name">Stradavar Prime Barrel</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Lith M4 ?</span> <span class="relic is-vaulted">Lith M5 ?</span> <span class="relic is-vaulted">Lith N6 ?</span> <span class="relic is-vaulted">Meso E3 ?</span> <span class="relic is-vaulted">Neo E3 ?</span> </span></div>
+<div class="part"><span class="part-name">Stradavar Prime Blueprint</span>
+<span class="part-state need">need</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Lith S10 ?</span> <span class="relic is-vaulted">Lith S13 ?</span> <span class="relic is-vaulted">Lith S8 ?</span> <span class="relic is-vaulted">Neo S11 ?</span> <span class="relic is-vaulted">Neo S12 ?</span> </span></div>
+<div class="part"><span class="part-name">Stradavar Prime Receiver</span>
+<span class="part-state need">need</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi A10 ?</span> <span class="relic is-vaulted">Axi W1 ?</span> <span class="relic is-vaulted">Lith D3 ?</span> <span class="relic is-vaulted">Lith W2 ?</span> <span class="relic is-vaulted">Meso W2 ?</span> </span></div>
+<div class="part"><span class="part-name">Stradavar Prime Stock</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi B3 ?</span> <span class="relic is-vaulted">Axi R3 ?</span> <span class="relic is-vaulted">Axi T2 ?</span> <span class="relic is-vaulted">Lith N13 ?</span> <span class="relic is-vaulted">Lith N5 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Axi W1 (if you have it), refine to Intact, run Persto (Deimos) (Survival) — stay for 4 rotations — cracks Stradavar Prime Receiver.</div>
+</article>
+<article class="card goal">
+<div class="goal-head"><span class="portrait" aria-hidden="true">Z</span>
+<span class="goal-titles"><span class="goal-name">Zhuge Prime</span>
+<span class="goal-sub"><span class="vaulted">VAULTED</span> parts 0/5</span></span>
+<span class="pips" aria-hidden="true"><span class="pip unknown"></span><span class="pip unknown"></span><span class="pip unknown"></span><span class="pip need"></span><span class="pip need"></span></span></div>
+<div class="part"><span class="part-name">Zhuge Prime Barrel</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-rare">rare — 2% Intact / 10% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Neo Z3 ?</span> <span class="relic is-vaulted">Neo Z5 ?</span> <span class="relic is-vaulted">Neo Z6 ?</span> <span class="relic is-vaulted">Neo Z7 ?</span> <span class="relic is-vaulted">Neo Z9 ?</span> </span></div>
+<div class="part"><span class="part-name">Zhuge Prime Blueprint</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi A6 ?</span> <span class="relic is-vaulted">Axi T4 ?</span> <span class="relic is-vaulted">Axi T9 ?</span> <span class="relic is-vaulted">Axi Z1 ?</span> <span class="relic is-vaulted">Lith L1 ?</span> </span></div>
+<div class="part"><span class="part-name">Zhuge Prime Grip</span>
+<span class="part-state unknown">unknown</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi P3 ?</span> <span class="relic is-vaulted">Lith N6 ?</span> <span class="relic is-vaulted">Lith S13 ?</span> <span class="relic is-vaulted">Meso A2 ?</span> <span class="relic is-vaulted">Meso P3 ?</span> </span></div>
+<div class="part"><span class="part-name">Zhuge Prime Receiver</span>
+<span class="part-state need">need</span>
+<span class="chip-uncommon">uncommon — 11% Intact / 20% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi B3 ?</span> <span class="relic is-vaulted">Axi D1 ?</span> <span class="relic is-vaulted">Meso W2 ?</span> <span class="relic is-vaulted">Neo N14 ?</span> </span></div>
+<div class="part"><span class="part-name">Zhuge Prime String</span>
+<span class="part-state need">need</span>
+<span class="chip-common">common — 25.33% Intact / 16.67% Radiant</span>
+<span class="relic-list"><span class="relic is-vaulted">Axi A11 ?</span> <span class="relic is-vaulted">Axi M1 ?</span> <span class="relic is-vaulted">Axi T5 ?</span> <span class="relic is-vaulted">Lith G3 ?</span> <span class="relic is-vaulted">Lith N5 ?</span> </span></div>
+<div class="action action-crack">Grab 4× Meso W2 (if you have it), refine to Radiant, run Persto (Deimos) (Survival) — stay for 4 rotations — cracks Zhuge Prime Receiver. (400 traces)</div>
+</article>
+</div>
+</section>
+<section><h2>Farms</h2>
+<div class="card quiet">No relic farms targeted — every current want sits in vaulted relics (crack-or-park). Sourcing activates for current-rotation goals.</div>
+<div class="card quiet">Relic sourcing: every current want sits in a vaulted relic — crack-or-park. Sourcing activates for current-rotation goals and general relic farming.</div>
+</section>
+<section><h2>Nightwave</h2>
+<div class="nw-season">Season 18 — acts below, never a standing total (unobservable).</div>
+<div class="nw-grid">
+<label class="nw"><input type="checkbox" data-id="nw-1792108800000seasondailyplacemarker">
+<span class="nw-title">Communicator</span>
+<span class="nw-meta">daily &middot; 0 standing</span></label>
+<label class="nw"><input type="checkbox" data-id="nw-1792195200000seasondailyslidekills">
+<span class="nw-title">Accelerator</span>
+<span class="nw-meta">daily &middot; 0 standing</span></label>
+<label class="nw"><input type="checkbox" data-id="nw-1792281600000seasondailycompletemissionmelee">
+<span class="nw-title">Swordsman</span>
+<span class="nw-meta">daily &middot; 0 standing</span></label>
+<label class="nw"><input type="checkbox" data-id="nw-1792368000000seasonweeklypermanentcompletemissions10">
+<span class="nw-title">Mission Complete X</span>
+<span class="nw-meta">weekly &middot; 0 standing</span></label>
+<label class="nw"><input type="checkbox" data-id="nw-1792368000000seasonweeklypermanentkilleximus10">
+<span class="nw-title">Eximus Eliminator X</span>
+<span class="nw-meta">weekly &middot; 0 standing</span></label>
+<label class="nw"><input type="checkbox" data-id="nw-1792368000000seasonweeklypermanentkillenemies10">
+<span class="nw-title">Not a Warning Shot X</span>
+<span class="nw-meta">weekly &middot; 0 standing</span></label>
+<label class="nw"><input type="checkbox" data-id="nw-1792368000000seasonweeklycompletenightmaremissions">
+<span class="nw-title">Sound Sleeper</span>
+<span class="nw-meta">weekly &middot; 0 standing</span></label>
+<label class="nw"><input type="checkbox" data-id="nw-1792368000000seasonweeklycompleterescue">
+<span class="nw-title">Rescuer</span>
+<span class="nw-meta">weekly &middot; 0 standing</span></label>
+<label class="nw"><input type="checkbox" data-id="nw-1792368000000seasonweeklyhardspiderhunt">
+<span class="nw-title">Season Weekly Hard Spider Hunt</span>
+<span class="nw-meta">elite &middot; 0 standing</span></label>
+<label class="nw"><input type="checkbox" data-id="nw-1792368000000seasonweeklyhardvitalarbiter">
+<span class="nw-title">Vital Arbiter</span>
+<span class="nw-meta">elite &middot; 0 standing</span></label>
+</div>
+<div class="caveat">World-state acts are a floor: Recovered backfill can exceed this list. Unmapped acts render display-only.</div>
+</section>
+<section><h2>This week</h2>
+<div class="wk-grid">
+<label class="wk"><input type="checkbox" data-id="wk-archon">
+<span class="wk-name">Archon Hunt</span>
+<span class="wk-meta">1 clear/wk &middot; 30–45m</span>
+<span class="wk-obs">missions in world state; completion from log</span></label>
+<label class="wk"><input type="checkbox" data-id="wk-netra">
+<span class="wk-name">Netracells</span>
+<span class="wk-meta">5 Search Pulses/wk (shared) &middot; 10–15m each</span>
+<span class="wk-obs">pulses tracked by ledger; rest manual</span></label>
+<label class="wk"><input type="checkbox" data-id="wk-deep">
+<span class="wk-name">Deep Archimedea (+Elite)</span>
+<span class="wk-meta">rewards 1×/wk, 2 pulses &middot; 30–45m</span>
+<span class="wk-obs">missions in world state; completion manual</span></label>
+<label class="wk"><input type="checkbox" data-id="wk-temp">
+<span class="wk-name">Temporal Archimedea (+Elite)</span>
+<span class="wk-meta">rewards 1×/wk, 2 pulses &middot; 30–45m</span>
+<span class="wk-obs">missions in world state; completion manual</span></label>
+<label class="wk"><input type="checkbox" data-id="wk-circuit">
+<span class="wk-name">The Circuit — Normal</span>
+<span class="wk-meta">1 reward track/wk &middot; 1.5–2h to Tier 10</span>
+<span class="wk-obs">manual</span></label>
+<label class="wk"><input type="checkbox" data-id="wk-circuit-sp">
+<span class="wk-name">The Circuit — Steel Path</span>
+<span class="wk-meta">2 Incarnon picks/wk &middot; 1.5–2.5h</span>
+<span class="wk-obs">manual</span></label>
+<label class="wk"><input type="checkbox" data-id="wk-descendia">
+<span class="wk-name">Descendia (Normal + SP)</span>
+<span class="wk-meta">10 rewards per difficulty/wk &middot; 45–90m each</span>
+<span class="wk-obs">seed in world state; completion manual</span></label>
+<label class="wk"><input type="checkbox" data-id="wk-kahl">
+<span class="wk-name">Break Narmer (Kahl)</span>
+<span class="wk-meta">1 mission set/wk, ≤115 Stock &middot; 15–25m</span>
+<span class="wk-obs">manual</span></label>
+<label class="wk"><input type="checkbox" data-id="wk-nw-weekly">
+<span class="wk-name">Nightwave weekly + elite acts</span>
+<span class="wk-meta">5 weekly + 2 elite/wk &middot; mostly passive</span>
+<span class="wk-obs">act list in world state; completion manual</span></label>
+<label class="wk"><input type="checkbox" data-id="wk-cal1999">
+<span class="wk-name">1999 Calendar weekly page</span>
+<span class="wk-meta">1 page/wk &middot; passive</span>
+<span class="wk-obs">page in world state; completion manual</span></label>
+<label class="wk"><input type="checkbox" data-id="wk-clan">
+<span class="wk-name">Clan Weekly Initiative</span>
+<span class="wk-meta">4 tiers/wk (clan-wide) &middot; passive</span>
+<span class="wk-obs">region in world state; claims manual</span></label>
+<label class="wk"><input type="checkbox" data-id="wk-conclave">
+<span class="wk-name">Conclave weekly challenges</span>
+<span class="wk-meta">3 + bonus/wk — Fri reset &middot; varies</span>
+<span class="wk-obs">list in world state; completion manual</span></label>
+<label class="wk"><input type="checkbox" data-id="wk-teshin-rot">
+<span class="wk-name">Teshin — featured item</span>
+<span class="wk-meta">1/wk &middot; 2m</span>
+<span class="wk-obs">rotation in world state; purchase manual</span></label>
+<label class="wk"><input type="checkbox" data-id="wk-teshin-cap">
+<span class="wk-name">Teshin — evergreen caps</span>
+<span class="wk-meta">cipher 1/wk; Kuva/Relic ×25 &middot; 2m</span>
+<span class="wk-obs">stock in world state; purchases manual</span></label>
+<label class="wk"><input type="checkbox" data-id="wk-palladino">
+<span class="wk-name">Palladino (Iron Wake)</span>
+<span class="wk-meta">each ware 1/wk &middot; 2m</span>
+<span class="wk-obs">manual</span></label>
+<label class="wk"><input type="checkbox" data-id="wk-acrithis">
+<span class="wk-name">Acrithis weekly wares</span>
+<span class="wk-meta">5 wares, 1 each/wk — Sun reset &middot; 2m</span>
+<span class="wk-obs">manual</span></label>
+<label class="wk"><input type="checkbox" data-id="wk-yonta">
+<span class="wk-name">Archimedean Yonta — Forma</span>
+<span class="wk-meta">3/wk &middot; 2m</span>
+<span class="wk-obs">manual</span></label>
+<label class="wk"><input type="checkbox" data-id="wk-bird3">
+<span class="wk-name">Bird 3 — Archon Shard</span>
+<span class="wk-meta">1/wk &middot; 2m</span>
+<span class="wk-obs">manual</span></label>
+<label class="wk"><input type="checkbox" data-id="wk-chipper">
+<span class="wk-name">Chipper — Archon Shard</span>
+<span class="wk-meta">1/wk (Rank 5) &middot; 2m</span>
+<span class="wk-obs">manual</span></label>
+<label class="wk"><input type="checkbox" data-id="wk-helminth">
+<span class="wk-name">Helminth Invigoration</span>
+<span class="wk-meta">3 frames/wk &middot; 2m</span>
+<span class="wk-obs">manual</span></label>
+<label class="wk"><input type="checkbox" data-id="wk-nw-shop">
+<span class="wk-name">Nightwave Cred Offerings</span>
+<span class="wk-meta">rotation/wk &middot; 2m</span>
+<span class="wk-obs">manual</span></label>
+<label class="wk"><input type="checkbox" data-id="wk-baro">
+<span class="wk-name">Baro Ki'Teer</span>
+<span class="wk-meta">biweekly Fri–Sun &middot; 5m</span>
+<span class="wk-obs">schedule + inventory in world state</span></label>
+<label class="wk wk-small"><input type="checkbox" data-id="wk-clem">
+<span class="wk-name">Help Clem (Darvo)</span>
+<span class="wk-meta">1/wk &middot; ~10m</span>
+<span class="wk-obs">manual — passing by only</span></label>
+<label class="wk wk-small"><input type="checkbox" data-id="wk-maroo">
+<span class="wk-name">Ayatan Treasure Hunt (Maroo)</span>
+<span class="wk-meta">1 sculpture/wk &middot; ~5m</span>
+<span class="wk-obs">manual — passing by only</span></label>
+</div>
+</section>
+<section><h2>Today&apos;s bars</h2>
+<div class="bars">
+<div class="card bar"><div class="bar-name">Focus cap <span class="est">estimate</span></div>
+<div class="bar-track"><div class="bar-fill" style="width:0%"></div></div>
+<div class="bar-meta">daily cap 250,000 + 5,000 × MR — progress unobservable from clean sources; best farm route lands with the focus spike</div></div>
+<div class="card bar"><div class="bar-name">Syndicate standing <span class="est">estimate</span></div>
+<div class="bar-track"><div class="bar-fill" style="width:0%"></div></div>
+<div class="bar-meta">daily cap 16,000 + 500 × MR — measured vs estimated depends on the §7.5 fixture check; shown as estimate until then</div></div>
+<label class="card bar"><input type="checkbox" data-id="sortie-daily">
+<span class="bar-name">Sortie done/not</span>
+<span class="bar-meta">daily reset 17:00 UTC</span></label>
+</div>
+</section>
+<footer><section><h2>Targets snapshot</h2>
+<div class="card snap">49 wants remaining across 35 goals. Completed this week: shown via log proofs as they land.</div>
+</section></footer>
+<script>
+
+// Checkbox persistence: localStorage keyed by plan-item id + in-game date.
+(function () {
+  var date = document.querySelector('.stamp');
+  var day = (date ? date.textContent : '').slice(0, 10).replace(/[^0-9-]/g, '');
+  function key(id) { return 'fracker:' + day + ':' + id; }
+  document.querySelectorAll('input[type=checkbox][data-id]').forEach(function (box) {
+    var id = box.getAttribute('data-id');
+    try {
+      if (localStorage.getItem(key(id)) === '1' && !box.checked) { box.checked = true; }
+    } catch (e) {}
+    box.addEventListener('change', function () {
+      var host = box.closest('.chunk,.nw,.wk,.bar,.card');
+      if (host) { host.classList.toggle('done', box.checked); }
+      try {
+        if (box.checked) { localStorage.setItem(key(id), '1'); }
+        else { localStorage.removeItem(key(id)); }
+      } catch (e) {}
+    });
+    if (box.checked) {
+      var host = box.closest('.chunk,.nw,.wk,.bar,.card');
+      if (host) { host.classList.add('done'); }
+    }
+  });
+})();
+
+</script>
+</div>
+</body>
+</html>
