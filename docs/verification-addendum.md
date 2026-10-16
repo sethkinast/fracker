@@ -166,10 +166,18 @@ it refines the brief where they disagree. For the next worker pass.
     the binding against Seth's real screenshot fixtures using a
     user-space static tesseract — the same binary the package
     will carry.
-31. **Do Now gaps (Seth, 2026-10-16; pass 5):** (a) the Do Now
+31. **Do Now gaps (Seth, 2026-10-16; queued):** (a) the Do Now
     tab renders NO icons — its target parts and chunk rows get
     the parent-item icons like everywhere else (addendum #14
     applies there too); (b) "Do Now" is renamed **First Crack**
     (Seth approved the pun, 2026-10-16: "send it"). The tab,
     its header, and any copy referencing "Do Now" as the tab
-    name change in pass 5.
+    name change with the rename.
+32. **Pass sizing: FAT passes preferred (Seth, 2026-10-16).**
+    Slow worker turns are fine — he'd rather each pass take
+    EVERYTHING accumulated in the queue at once than run many
+    small ones. (Supersedes the small-pass drift; passes still
+    freeze at dispatch per item 24.) Observed 2026-10-16: the
+    Oracle box idles through a run (load avg 0.22) — the wall
+    clock is remote inference + serial tool round-trips, with
+    local CPU only in compile bursts.
