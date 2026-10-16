@@ -113,3 +113,12 @@ sessions/squads; split on `Logged in` + inactivity, never file edges.
   Tipedo, Cobra & Crane Primes) are already in XPInfo = mastered.
   40 live wants remain (`data/wants-pruned.json`). Caveat: XPInfo
   absence means "never gained affinity," the design's mastery test.
+
+- **Drop attribution is NOT load-bearing (Seth, 2026-10-15):** what
+  changes state is (a) the relic Seth equipped being consumed and
+  (b) the reward Seth PICKED being acquired — in this very run he
+  picked the Protea part off a squadmate's vault-relic crack, while
+  his own drop was neither that nor the Forma. So the parser does
+  not need to solve whose-drop-was-whose from the reward relay
+  (the "self first?" ordering question is parked as a curiosity,
+  n=1, consistent but unproven). Track equips and picks.
