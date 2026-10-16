@@ -220,3 +220,10 @@ it refines the brief where they disagree. For the next worker pass.
     the worker directly — no approval tap per pass. Steering
     still lands as addendum items; passes still freeze at
     dispatch (#24).
+37. **Final-product behavior: resident + auto-report (Seth,
+    2026-10-16).** Fracker stays running (tray-resident). When a
+    NEW EE.log appears (new game session), that detection alone
+    triggers a fresh report run automatically — the plan page
+    is already current when Seth sits down, no manual step.
+    This is in addition to mission-end regenerations during the
+    session (item 35 watch) and the manual Regenerate verb.
