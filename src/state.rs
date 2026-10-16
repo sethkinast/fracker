@@ -55,6 +55,12 @@ pub struct AppState {
     /// completions (pack-defined resource).
     #[serde(default)]
     pub moonflesh_estimate: u32,
+    /// Persisted EE.log tail position `(inode, offset)` (sixth pass §4).
+    /// Startup reconciles by processing any unprocessed tail — the log
+    /// is unlinked/recreated every session, so a naive path tail loses
+    /// the final mission-end picks.
+    #[serde(default)]
+    pub log_position: crate::watch::LogPosition,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -311,21 +311,18 @@ impl Roster {
 // Companion universe manifest (data/companions.toml)
 // ---------------------------------------------------------------------------
 
-/// Companion sources + exclusions (addendum #22): the WFCD category
-/// files behind the universe, and the names that must never become
-/// backlog items no matter what a feed carries.
+/// Companion-dataset manifest: the WFCD category files behind the pet
+/// universe and the Prime-named entries that are members but never
+/// wants (non-masterable). The exclusion list itself lives in
+/// `data/exclusions.toml` (see [`UniverseScrub`]).
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct CompanionsManifest {
-    #[serde(default)]
-    pub excluded: Vec<String>,
     #[serde(default)]
     pub unmasterable: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct CompanionsFile {
-    #[serde(default)]
-    pub exclusions: CompanionsNames,
     #[serde(default)]
     pub unmasterable: CompanionsNames,
 }
@@ -344,28 +341,177 @@ impl CompanionsManifest {
         let file: CompanionsFile =
             toml::from_str(text).map_err(|e| format!("companions: {e}"))?;
         Ok(Self {
-            excluded: file.exclusions.names,
             unmasterable: file.unmasterable.names,
         })
     }
+}
 
-    pub fn is_excluded(&self, name: &str) -> bool {
-        self.excluded.iter().any(|x| x == name)
+// ---------------------------------------------------------------------------
+// Universe scrub (data/exclusions.toml — sixth pass §1)
+// ---------------------------------------------------------------------------
+
+/// Data-owned corrections to the item universe: entries that must never
+/// appear (with a per-entry reason) and duplicate names that collapse
+/// onto one canonical spelling. Applied everywhere the universe is
+/// consumed (backlog wants, category lists, OCR universe).
+#[derive(Debug, Clone, Default)]
+pub struct UniverseScrub {
+    /// Excluded name -> reason.
+    excluded: HashMap<String, String>,
+    /// Non-canonical name -> canonical spelling.
+    aliases: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ScrubFile {
+    #[serde(default)]
+    exclude: Vec<ScrubEntry>,
+    #[serde(default)]
+    alias: Vec<ScrubAlias>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ScrubEntry {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    reason: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ScrubAlias {
+    #[serde(default)]
+    from: String,
+    #[serde(default)]
+    to: String,
+}
+
+impl UniverseScrub {
+    pub fn from_toml(text: &str) -> Result<Self, String> {
+        let file: ScrubFile =
+            toml::from_str(text).map_err(|e| format!("exclusions: {e}"))?;
+        let mut excluded = HashMap::new();
+        for e in file.exclude {
+            if !e.name.trim().is_empty() {
+                excluded.insert(e.name, e.reason);
+            }
+        }
+        let mut aliases = HashMap::new();
+        for a in file.alias {
+            if !a.from.trim().is_empty() && !a.to.trim().is_empty() {
+                aliases.insert(a.from, a.to);
+            }
+        }
+        Ok(Self { excluded, aliases })
     }
 
-    /// Drop wants belonging to excluded gear: the gear name itself or
-    /// any of its parts (`"<gear> …"`). The collar stays out of every
-    /// regeneration regardless of what the feeds carry.
-    pub fn filter_wants(&self, wants: &[String]) -> Vec<String> {
-        wants
-            .iter()
-            .filter(|w| {
-                !self.excluded.iter().any(|x| {
-                    *w == x || w.starts_with(&format!("{x} "))
-                })
-            })
+    /// A name that is excluded outright.
+    pub fn is_excluded(&self, name: &str) -> bool {
+        self.excluded.contains_key(name)
+    }
+
+    /// The recorded reason for an excluded name.
+    pub fn reason(&self, name: &str) -> Option<&str> {
+        self.excluded.get(name).map(String::as_str)
+    }
+
+    /// Canonical spelling for `name` (identity when not an alias).
+    pub fn canonical(&self, name: &str) -> String {
+        self.aliases
+            .get(name)
             .cloned()
+            .unwrap_or_else(|| name.to_owned())
+    }
+
+    /// An excluded name or any of its parts (`"<name> …"`).
+    fn covers(&self, want: &str) -> bool {
+        self.excluded
+            .keys()
+            .any(|x| want == x || want.starts_with(&format!("{x} ")))
+    }
+
+    /// Apply the scrub to one name list: drop excluded entries (and
+    /// their parts), canonicalize duplicates. Order is preserved; an
+    /// alias whose canonical spelling is already present collapses onto
+    /// it. Non-alias duplicate names are left untouched (they are
+    /// distinct universe entries).
+    pub fn scrub_names(&self, names: &[String]) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for n in names {
+            if self.covers(n) {
+                continue;
+            }
+            let c = self.canonical(n);
+            if c != *n && out.iter().any(|x| *x == c) {
+                continue;
+            }
+            out.push(c);
+        }
+        out
+    }
+
+    /// Planner wants (same rules as [`Self::scrub_names`], named for the
+    /// call site).
+    pub fn scrub_wants(&self, wants: &[String]) -> Vec<String> {
+        self.scrub_names(wants)
+    }
+
+    /// Scrub every category list; empty categories are dropped.
+    pub fn scrub_categories(
+        &self,
+        categories: &HashMap<String, Vec<String>>,
+    ) -> HashMap<String, Vec<String>> {
+        categories
+            .iter()
+            .map(|(k, v)| (k.clone(), self.scrub_names(v)))
+            .filter(|(_, v)| !v.is_empty())
             .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Arcane item set (data/arcanes.toml — sixth pass §5)
+// ---------------------------------------------------------------------------
+
+/// Arcane universe (`data/arcanes.toml`). A LABELED stopgap: the names
+/// are transcribed from Seth's spoken debrief until his first Arcanes
+/// inventory capture lands. Consumed as the arcane-name set for OCR
+/// validation/routing (neither the profile nor EE.log carries arcane
+/// state — addendum #34).
+#[derive(Debug, Clone, Default)]
+pub struct ArcaneManifest {
+    /// Human-readable provenance label ("stopgap, not a capture").
+    pub label: String,
+    pub names: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ArcaneFile {
+    #[serde(default)]
+    stopgap: ArcaneStopgap,
+    #[serde(default)]
+    arcanes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ArcaneStopgap {
+    #[serde(default)]
+    label: String,
+}
+
+impl ArcaneManifest {
+    pub fn from_toml(text: &str) -> Result<Self, String> {
+        let file: ArcaneFile =
+            toml::from_str(text).map_err(|e| format!("arcanes: {e}"))?;
+        Ok(Self {
+            label: file.stopgap.label,
+            names: file.arcanes,
+        })
+    }
+
+    /// Names as a lookup set (for OCR universe + bucket routing).
+    pub fn name_set(&self) -> std::collections::HashSet<String> {
+        self.names.iter().cloned().collect()
     }
 }
 
@@ -877,22 +1023,121 @@ mod tests {
     use super::*;
 
     #[test]
-    fn companions_manifest_excludes_collar_always() {
+    fn universe_scrub_excludes_and_canonicalizes() {
+        // Sixth pass §1: the data-owned scrub drops excluded entries
+        // (and their parts) and collapses duplicate name orders. The
+        // collar and Helminth stay out of every regeneration; the
+        // duplicate frame name resolves to one canonical spelling.
         let text = std::fs::read_to_string(
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data/companions.toml"),
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("data/exclusions.toml"),
         )
         .unwrap();
-        let m = CompanionsManifest::from_toml(&text).unwrap();
-        assert!(m.is_excluded("Kavasa Prime"));
-        assert!(!m.is_excluded("Nautilus Prime"));
-        // Even an injected collar want (or its parts) filters out.
-        let wants = vec![
+        let s = UniverseScrub::from_toml(&text).unwrap();
+        assert!(s.is_excluded("Helminth"));
+        assert!(s.is_excluded("Kavasa Prime"));
+        assert!(s.is_excluded("Excalibur Prime"));
+        assert!(!s.is_excluded("Nautilus Prime"));
+        assert!(s.reason("Helminth").is_some());
+        let names = vec![
             "Kavasa Prime".to_owned(),
             "Kavasa Prime Band".to_owned(),
+            "Helminth".to_owned(),
+            "Orion & Sirius".to_owned(),
+            "Sirius & Orion".to_owned(),
             "Nautilus Prime Blueprint".to_owned(),
         ];
-        let kept = m.filter_wants(&wants);
-        assert_eq!(kept, vec!["Nautilus Prime Blueprint".to_owned()]);
+        assert_eq!(
+            s.scrub_names(&names),
+            vec!["Orion & Sirius".to_owned(), "Nautilus Prime Blueprint".to_owned()],
+        );
+    }
+
+    #[test]
+    fn scrub_removes_only_scrubbed_entries_from_categories() {
+        // Delta discipline: applying the scrub changes counts ONLY by
+        // the scrubbed entries (excluded names + one alias collapse).
+        let text = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("data/exclusions.toml"),
+        )
+        .unwrap();
+        let s = UniverseScrub::from_toml(&text).unwrap();
+        let cats: HashMap<String, Vec<String>> = [
+            (
+                "Warframes".to_owned(),
+                vec![
+                    "Baruuk".to_owned(),
+                    "Helminth".to_owned(),
+                    "Orion & Sirius".to_owned(),
+                    "Sirius & Orion".to_owned(),
+                ],
+            ),
+            (
+                "Melee".to_owned(),
+                // A repeated non-alias name is a distinct entry: kept.
+                vec!["Balla".to_owned(), "Balla".to_owned()],
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let scrubbed = s.scrub_categories(&cats);
+        assert_eq!(
+            scrubbed.get("Warframes").unwrap(),
+            &vec!["Baruuk".to_owned(), "Orion & Sirius".to_owned()],
+        );
+        assert_eq!(
+            scrubbed.get("Melee").unwrap(),
+            &vec!["Balla".to_owned(), "Balla".to_owned()],
+            "unrelated duplicates survive"
+        );
+    }
+
+    #[test]
+    fn backlog_data_keeps_prime_counts_after_scrub() {
+        // Sixth pass §1 regression gate: the prime roster (163/99/63)
+        // is untouched; only the scrubbed category entries changed.
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(base.join("data/backlog.json")).unwrap();
+        let backlog = Backlog::from_json(&text).unwrap();
+        assert_eq!(backlog.primes.roster, 163);
+        assert_eq!(backlog.primes.mastered, 99);
+        assert_eq!(backlog.primes.unmastered.len(), 63);
+        let scrub = UniverseScrub::from_toml(
+            &std::fs::read_to_string(base.join("data/exclusions.toml")).unwrap(),
+        )
+        .unwrap();
+        let scrubbed = scrub.scrub_categories(&backlog.unmastered_by_category);
+        let frames = scrubbed.get("Warframes").expect("Warframes list");
+        assert_eq!(frames.len(), 8, "10 → 8 after two scrubbed entries");
+        assert!(!frames.iter().any(|n| n == "Helminth"));
+        assert!(!frames.iter().any(|n| n == "Sirius & Orion"));
+        assert!(frames.iter().any(|n| n == "Orion & Sirius"));
+        // Re-scrubbing is idempotent: the edited data already reflects it.
+        let again = scrub.scrub_categories(&scrubbed);
+        assert_eq!(again, scrubbed);
+    }
+
+    #[test]
+    fn arcane_manifest_loads_labeled_stopgap() {
+        // Sixth pass §5: the arcane set is data, LABELED as a stopgap
+        // until Seth's first Arcanes capture.
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let m = ArcaneManifest::from_toml(
+            &std::fs::read_to_string(base.join("data/arcanes.toml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(m.names.len(), 11, "the Taubound arcane set");
+        assert!(
+            m.label.to_lowercase().contains("stopgap"),
+            "must be labeled a stopgap: {}",
+            m.label
+        );
+        assert!(m.name_set().contains("Melee Influence"));
+        // The three still below rank 5 per the pack.
+        for n in ["Melee Animosity", "Melee Vortex", "Secondary Surge"] {
+            assert!(m.name_set().contains(n), "missing {n}");
+        }
     }
 
     #[test]

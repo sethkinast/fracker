@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.sethkinast.Fracker</id>
+  <name>Fracker</name>
+  <summary>Warframe session planner</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>
+      Fracker watches the Warframe EE.log, reconciles the public item
+      universe against your profile, and renders a single self-contained
+      session checklist page. It bootstraps local stock from screenshots
+      via a bundled OCR engine.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.sethkinast.Fracker.desktop</launchable>
+  <url type="homepage">https://github.com/sethkinast/fracker</url>
+  <url type="bugtracker">https://github.com/sethkinast/fracker/issues</url>
+  <content_rating type="oars-1.1"/>
+</component>

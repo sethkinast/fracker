@@ -1,0 +1,94 @@
+# Fracker Flatpak manifest (sixth pass §3, addendum #30).
+#
+# Builds the Rust binary AND the tesseract sidecar (leptonica + tesseract
+# as manifest modules) so the pass-3/pass-5 OCR engine is present in the
+# shipped app — no OCR is a packaging failure, not a degraded mode. The
+# `eng` tessdata is bundled and the launcher points the engine probes at it.
+#
+# Acceptance verifiable off-box: this manifest parses and the workflow YAML
+# is valid. The actual x86_64 bundle build runs in CI
+# (.github/workflows/flatpak.yml); the worker box is aarch64.
+
+app-id: io.github.sethkinast.Fracker
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: fracker
+
+finish-args:
+  # Worldstate / profile / icon fetches.
+  - --share=network
+  - --share=ipc
+  # Session bus + the tray icon (StatusNotifierWatcher on KDE Plasma).
+  - --socket=session-bus
+  - --talk-name=org.kde.StatusNotifierWatcher
+  # Open the generated page via the OpenURI portal when present.
+  - --talk-name=org.freedesktop.portal.Desktop
+  # EE.log CONTAINING FOLDER grant (item 35: the folder grant is primary).
+  # Mirrors data/paths.toml [ee_log] primary root+tail; a config/--log
+  # override still needs its own grant.
+  - --filesystem=~/.local/share/Steam/steamapps/compatdata/230410/pfx/drive_c/users/steamuser/AppData/Local/Warframe
+
+modules:
+  # leptonica: tesseract's image library (bundled, not assumed).
+  - name: leptonica
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DBUILD_SHARED_LIBS=ON
+      - -DBUILD_PROG=OFF
+      - -DSW_BUILD=OFF
+    sources:
+      - type: archive
+        url: https://github.com/DanBloomberg/leptonica/releases/download/1.85.0/leptonica-1.85.0.tar.gz
+        sha256: 3745ae3bf271a6801a2292eead83ac926e3a9bc1bf622e9cd4dd0f3786e17205
+
+  # tesseract: the OCR engine, installed to /app/bin/tesseract.
+  - name: tesseract
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DBUILD_SHARED_LIBS=ON
+      - -DBUILD_TRAINING_TOOLS=OFF
+      - -DGRAPHICS_DISABLED=ON
+      - -DINSTALL_CONFIGS=ON
+    sources:
+      - type: archive
+        url: https://github.com/tesseract-ocr/tesseract/archive/refs/tags/5.4.1.tar.gz
+        sha256: c4bc2a81c12a472f445b7c2fb4705a08bd643ef467f51ec84f0e148bd368051b
+
+  # English tessdata. The launcher sets TESSDATA_PREFIX=/app/share/tessdata.
+  - name: tessdata-eng
+    buildsystem: simple
+    build-commands:
+      - install -Dm644 eng.traineddata /app/share/tessdata/eng.traineddata
+    sources:
+      - type: file
+        url: https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.traineddata
+        sha256: 7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2
+
+  # Fracker itself: Rust binary + data + launcher/desktop/metainfo/icon.
+  - name: fracker
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        CARGO_HOME: /run/build/fracker/cargo
+    build-commands:
+      - cargo build --release --locked
+      - install -Dm755 target/release/fracker /app/bin/fracker.bin
+      - install -Dm755 flatpak/fracker.sh /app/bin/fracker
+      - install -Dm644 flatpak/io.github.sethkinast.Fracker.desktop /app/share/applications/io.github.sethkinast.Fracker.desktop
+      - install -Dm644 flatpak/io.github.sethkinast.Fracker.metainfo.xml /app/share/metainfo/io.github.sethkinast.Fracker.metainfo.xml
+      - install -Dm644 flatpak/io.github.sethkinast.Fracker.svg /app/share/icons/hicolor/scalable/apps/io.github.sethkinast.Fracker.svg
+      - mkdir -p /app/share/fracker
+      - cp -r data /app/share/fracker/data
+    sources:
+      - type: dir
+        path: .
+        skip:
+          - .git
+          - target
+          - .flatpak-builder

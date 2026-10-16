@@ -347,6 +347,7 @@ dependencies = [
  "chrono",
  "clap",
  "dirs",
+ "libc",
  "png",
  "regex",
  "reqwest",

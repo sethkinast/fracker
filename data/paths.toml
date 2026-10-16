@@ -1,0 +1,12 @@
+# EE.log discovery (sixth pass §3, addendum #35). The Steam/Proton path
+# is DATA, not code (addendum #20): the app auto-detects the log from
+# these roots, the Flatpak manifest grants the containing folder, and the
+# in-app `ee_log_path` / `--log` override still wins.
+#
+# The log path is configurable in-app; this is the default. `tail` is
+# appended to each root in `steam_roots` (priority order — the first
+# existing candidate wins).
+
+[ee_log]
+tail = "steamapps/compatdata/230410/pfx/drive_c/users/steamuser/AppData/Local/Warframe/EE.log"
+steam_roots = [".local/share/Steam", ".steam/steam", ".steam/root"]

@@ -1,0 +1,35 @@
+# Arcanes (sixth pass §5, addendum #34).
+#
+# STOPGAP — this is Seth's SPOKEN DEBRIEF transcribed, NOT an OCR capture.
+# Neither the profile endpoint nor EE.log carries arcane state, so the
+# Arcanes inventory screen (`[arcanes]` in data/capture/layouts.toml) is the
+# steady-state source. Replace this list with the first real capture; the
+# pipeline already routes validated arcane reads to the arcane bucket.
+#
+# Taubound arcane set (all 11). Per data/packs/taubound.toml, eight are at
+# rank 5 — Melee Fortification, Melee Retaliation, Arcane Battery, Arcane
+# Ice Storm, Melee Afflictions, Melee Exposure, Melee Influence, Secondary
+# Fortifier — and these three remain below rank 5: Melee Animosity, Melee
+# Vortex, Secondary Surge.
+#
+# The `arcanes` array is TOP-LEVEL (it must precede the [stopgap] table so
+# TOML does not scope it under that table).
+
+arcanes = [
+  "Melee Fortification",
+  "Melee Retaliation",
+  "Arcane Battery",
+  "Arcane Ice Storm",
+  "Melee Afflictions",
+  "Melee Exposure",
+  "Melee Influence",
+  "Secondary Fortifier",
+  "Melee Animosity",
+  "Melee Vortex",
+  "Secondary Surge",
+]
+
+[stopgap]
+label = "Seth's spoken debrief — stopgap, not a capture"
+source = "debrief 2026-10-16"
+replaced_by = "first Arcanes inventory capture ([arcanes] layout)"

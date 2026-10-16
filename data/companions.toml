@@ -12,18 +12,14 @@
 # with 4 parts each). Pets.json carries exactly one Prime-named entry,
 # Venari Prime (Khora's companion, masterable=false — not a backlog
 # item). Kavasa Prime is a companion COLLAR, not a weapon: no mastery,
-# owned already — EXCLUDED from every regeneration (addendum #22).
+# owned already — its exclusion now lives in `data/exclusions.toml`
+# (sixth pass §1 generalized the hand-applied lists).
 
 [pet_sources]
 pets = "https://raw.githubusercontent.com/WFCD/warframe-items/master/data/json/Pets.json"
 sentinels = "https://raw.githubusercontent.com/WFCD/warframe-items/master/data/json/Sentinels.json"
 local_pets = "data/cache/pets.json"
 local_sentinels = "data/cache/sentinels.json"
-
-[exclusions]
-# Never backlog items, even if present in a roster feed.
-names = ["Kavasa Prime"]
-reason = "owned collar, not a weapon — no mastery (addendum #22)"
 
 # Non-masterable Prime-named companion parts (universe members, never wants).
 [unmasterable]

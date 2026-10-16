@@ -1,0 +1,51 @@
+# Flatpak bundle build (sixth pass §3, addendum #30).
+#
+# Manual dispatch (any branch) and version tags produce ONE single-file
+# `.flatpak` bundle, uploaded to the run as an artifact and attached to the
+# GitHub release for tags. Seth installs with:
+#     flatpak install --user <bundle>
+#
+# The x86_64 bundle is built here in CI (the worker box is aarch64; the
+# manifest is not built locally).
+
+name: flatpak
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    name: flatpak bundle
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-24.08
+      options: --privileged
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build bundle
+        uses: flathub-infra/flatpak-github-actions/flatpak-builder@master
+        with:
+          bundle: fracker.flatpak
+          manifest-path: io.github.sethkinast.Fracker.yml
+          cache-key: flatpak-builder-${{ github.sha }}
+
+      - name: Upload bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fracker-flatpak
+          path: fracker.flatpak
+          if-no-files-found: error
+
+      - name: Attach bundle to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: fracker.flatpak

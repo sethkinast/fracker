@@ -21,6 +21,9 @@ dirs = "6"
 # Pure-Rust PNG decode for the OCR capture screenshots (pass 5).
 # The pass-3 loader was PGM/PPM-only; Seth's real fixtures are PNG.
 png = "0.17"
+# inotify FFI for the live EE.log watch (sixth pass §4): watch the
+# containing directory, not a naive path tail.
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

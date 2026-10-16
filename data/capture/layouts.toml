@@ -62,3 +62,30 @@ count_upscale = 8
 # relic screen; the ambiguity margin guard (not the absolute floor) is what
 # keeps the never-guess rule. See docs/fifth-pass.md.
 min_score = 0.5
+
+# Arcanes inventory screen (sixth pass §5, addendum #34). This screen is
+# the steady-state arcane source: neither the profile endpoint nor EE.log
+# carries arcane state.
+#
+# PROVISIONAL: the grid below is a best-effort shape derived from the parts
+# screen and has NOT been measured against a real Arcanes capture yet.
+# Never-guess validation is unchanged, so an off grid yields EMPTY arcane
+# stock, never bad stock. Replace x0/cell_w/y0/cell_h and the name/count
+# regions after Seth's first capture (docs/capture-checklist.md).
+[arcanes]
+cols = 8
+rows = 5
+ref_width = 1985
+ref_height = 1116
+x0 = 42.0
+cell_w = 150.0
+y0 = 300.0
+cell_h = 150.0
+name = [0.0, 0.0, 1.0, 1.0]
+count = [0.06, 0.0, 0.32, 0.16]
+count_style = "badge"
+name_psm = 6
+count_psm = 7
+name_upscale = 3
+count_upscale = 8
+min_score = 0.5

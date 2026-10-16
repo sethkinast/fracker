@@ -118,12 +118,20 @@ mod tests {
         assert_eq!(p.event.alert_payout_steel_path, 75);
         assert_eq!(p.community_goal.gated_pieces.len(), 3);
         assert!(p.community_goal.gated_pieces.contains(&"Contegorus Greaves".to_owned()));
-        assert!(p.arcanes.finish.contains(&"Melee Retaliation".to_owned()));
-        assert!(p.arcanes.finish.contains(&"Melee Influence".to_owned()));
-        for s in ["Melee Vortex", "Secondary Surge", "Melee Fortification"] {
-            assert!(p.arcanes.skip.contains(&s.to_owned()), "skip {s}");
-        }
         assert_eq!(p.arcanes.copies_per_rank5_set, 21);
+        // State 2026-10-16: eight of the eleven rank-5 sets are complete;
+        // only these three remain below rank 5, and they are the whole
+        // shopping list now. The old research "skip" list is empty.
+        assert_eq!(
+            p.arcanes.finish,
+            vec![
+                "Melee Animosity".to_owned(),
+                "Melee Vortex".to_owned(),
+                "Secondary Surge".to_owned(),
+            ],
+        );
+        assert!(p.arcanes.next.is_empty());
+        assert!(p.arcanes.skip.is_empty());
     }
 
     #[test]

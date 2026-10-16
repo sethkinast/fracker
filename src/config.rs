@@ -123,20 +123,72 @@ pub fn cache_dir() -> PathBuf {
         .join("fracker")
 }
 
-/// Standard EE.log candidates under Proton/Steam (BRIEF §3).
-/// Returned in priority order; the caller picks the first that exists.
-pub fn ee_log_candidates(home: &std::path::Path) -> Vec<PathBuf> {
-    const STEAM_TAIL: &str =
-        "steamapps/compatdata/230410/pfx/drive_c/users/steamuser/AppData/Local/Warframe/EE.log";
-    let mut out = Vec::new();
-    for root in [
-        home.join(".local/share/Steam"),
-        home.join(".steam/steam"),
-        home.join(".steam/root"),
-    ] {
-        out.push(root.join(STEAM_TAIL));
+/// EE.log discovery table (`data/paths.toml`, sixth pass §3). The
+/// Steam/Proton default is data, not code: roots + tail live here so the
+/// Flatpak manifest and the runtime share one source.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EeLogPaths {
+    /// Path appended to each Steam root to reach EE.log.
+    pub tail: String,
+    /// Steam install roots, in priority order (home-relative).
+    pub steam_roots: Vec<String>,
+}
+
+impl EeLogPaths {
+    pub fn from_toml(text: &str) -> Result<Self, String> {
+        let table: toml::Table =
+            toml::from_str(text).map_err(|e| format!("paths parse: {e}"))?;
+        let ee = table.get("ee_log").and_then(|v| v.as_table());
+        let tail = ee
+            .and_then(|t| t.get("tail"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_owned();
+        let steam_roots: Vec<String> = ee
+            .and_then(|t| t.get("steam_roots"))
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|e| e.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if tail.trim().is_empty() || steam_roots.is_empty() {
+            return Err("paths: [ee_log] needs a tail and steam_roots".to_owned());
+        }
+        Ok(Self { tail, steam_roots })
     }
-    out
+
+    pub fn load(path: &std::path::Path) -> Result<Self, String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("paths {}: {e}", path.display()))?;
+        Self::from_toml(&text)
+    }
+
+    /// Default table under the repo/install `data/` dir.
+    pub fn load_default() -> Result<Self, String> {
+        Self::load(&crate::tuning::data_dir().join("paths.toml"))
+    }
+
+    /// The EE.log CONTAINING FOLDER for the primary Steam root — the
+    /// directory the sandbox needs granted (item 35: the folder grant is
+    /// primary). Home-relative, so the manifest can use `~/…`.
+    pub fn primary_containing_folder(&self) -> Option<String> {
+        let root = self.steam_roots.first()?;
+        let tail_dir = self.tail.rsplit_once('/').map(|(d, _)| d)?;
+        Some(format!("{root}/{tail_dir}"))
+    }
+}
+
+/// Standard EE.log candidates under Proton/Steam (BRIEF §3), built from
+/// the data-owned discovery table. Returned in priority order; the
+/// caller picks the first that exists.
+pub fn ee_log_candidates(home: &std::path::Path, paths: &EeLogPaths) -> Vec<PathBuf> {
+    paths
+        .steam_roots
+        .iter()
+        .map(|root| home.join(root).join(&paths.tail))
+        .collect()
 }
 
 #[cfg(test)]
@@ -195,10 +247,39 @@ steel_path_tiebreak = false
 
     #[test]
     fn candidates_cover_brief_section_3_roots() {
+        let paths = paths_fixture();
         let home = std::path::Path::new("/home/seth");
-        let c = ee_log_candidates(home);
+        let c = ee_log_candidates(home, &paths);
         assert_eq!(c.len(), 3);
         assert!(c[0].to_string_lossy().contains(".local/share/Steam"));
         assert!(c.iter().all(|p| p.to_string_lossy().ends_with("Warframe/EE.log")));
+    }
+
+    fn paths_fixture() -> EeLogPaths {
+        EeLogPaths::load(
+            &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data/paths.toml"),
+        )
+        .expect("data/paths.toml loads")
+    }
+
+    #[test]
+    fn ee_log_paths_come_from_data() {
+        let paths = paths_fixture();
+        assert_eq!(
+            paths.tail,
+            "steamapps/compatdata/230410/pfx/drive_c/users/steamuser/AppData/Local/Warframe/EE.log"
+        );
+        assert_eq!(paths.steam_roots[0], ".local/share/Steam");
+        // The containing folder the sandbox must grant (item 35).
+        assert_eq!(
+            paths.primary_containing_folder().unwrap(),
+            ".local/share/Steam/steamapps/compatdata/230410/pfx/drive_c/users/steamuser/AppData/Local/Warframe"
+        );
+    }
+
+    #[test]
+    fn ee_log_paths_require_tail_and_roots() {
+        assert!(EeLogPaths::from_toml("[ee_log]\ntail = \"EE.log\"\n").is_err());
+        assert!(EeLogPaths::from_toml("[ee_log]\nsteam_roots = [\".steam\"]\n").is_err());
     }
 }

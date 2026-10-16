@@ -1162,19 +1162,29 @@ pub fn validate_read(
     out
 }
 
-/// Stock state file: loose parts + relic counts, JSON.
+/// Stock state file: loose parts + relic counts + arcane ranks, JSON.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct StockState {
     #[serde(default)]
     pub relics: HashMap<String, u32>,
     #[serde(default)]
     pub parts: HashMap<String, u32>,
+    /// Arcane counts/ranks from the Arcanes inventory screen (sixth pass
+    /// §5, addendum #34). Neither the profile endpoint nor EE.log carries
+    /// arcane state, so this screen is the steady-state source.
+    #[serde(default)]
+    pub arcanes: HashMap<String, u32>,
 }
 
 impl StockState {
-    /// Aggregate validated results: each held match counts once;
-    /// names in `relic_names` are relic stock, the rest loose parts.
-    pub fn from_results(results: &[CellResult], relic_names: &HashSet<String>) -> Self {
+    /// Aggregate validated results: each held match counts once; names in
+    /// `relic_names` are relic stock, names in `arcane_names` are arcane
+    /// stock, the rest loose parts.
+    pub fn from_results(
+        results: &[CellResult],
+        relic_names: &HashSet<String>,
+        arcane_names: &HashSet<String>,
+    ) -> Self {
         let mut stock = Self::default();
         for r in results {
             if !r.held {
@@ -1182,11 +1192,14 @@ impl StockState {
             }
             if let Some(name) = &r.matched {
                 let add = r.count.unwrap_or(1);
-                if relic_names.contains(name) {
-                    *stock.relics.entry(name.clone()).or_insert(0) += add;
+                let bucket = if relic_names.contains(name) {
+                    &mut stock.relics
+                } else if arcane_names.contains(name) {
+                    &mut stock.arcanes
                 } else {
-                    *stock.parts.entry(name.clone()).or_insert(0) += add;
-                }
+                    &mut stock.parts
+                };
+                *bucket.entry(name.clone()).or_insert(0) += add;
             }
         }
         stock
@@ -1223,6 +1236,11 @@ impl StockState {
     pub fn held_parts(&self) -> &HashMap<String, u32> {
         &self.parts
     }
+
+    /// Held arcane counts (stopgap or captured) for the bootstrap.
+    pub fn held_arcanes(&self) -> &HashMap<String, u32> {
+        &self.arcanes
+    }
 }
 
 /// Ingest one folder of screenshot pages: every `*.pgm`/`*.ppm`/`*.png`
@@ -1236,6 +1254,7 @@ pub fn ingest_folder(
     layout: &Layout,
     universe: &Universe,
     relic_names: &HashSet<String>,
+    arcane_names: &HashSet<String>,
     min_confidence: f32,
 ) -> Result<(StockState, Vec<CellResult>), String> {
     let mut pages: Vec<PathBuf> = std::fs::read_dir(dir)
@@ -1288,7 +1307,7 @@ pub fn ingest_folder(
             }
         }
     }
-    let stock = StockState::from_results(&results, relic_names);
+    let stock = StockState::from_results(&results, relic_names, arcane_names);
     Ok((stock, results))
 }
 
@@ -1321,6 +1340,22 @@ mod tests {
         let cells = split_flat_grid(&img, GridSpec { rows: 3, cols: 2 });
         assert_eq!(cells.len(), 6);
         assert!(cells.iter().all(|c| c.width == 50 && c.height == 20));
+    }
+
+    #[test]
+    fn capture_layouts_include_arcanes_screen() {
+        // Sixth pass §5: the Arcanes inventory screen is a first-class
+        // capture layout (addendum #34), alongside relic + parts.
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let layouts =
+            Layout::load_file(&base.join("data/capture/layouts.toml")).unwrap();
+        for key in ["relic", "parts", "arcanes"] {
+            assert!(layouts.contains_key(key), "missing layout {key}");
+        }
+        let arc = &layouts["arcanes"];
+        assert_eq!(arc.cells_total(), 40, "8x5 arcane grid");
+        assert!(matches!(arc.count_style, CountStyle::Badge));
+        assert_eq!(arc.min_score, 0.5);
     }
 
     #[test]
@@ -1409,7 +1444,7 @@ mod tests {
                     count: None,
                 }, &u, 0.5, 0.8, 3),
         ];
-        let stock = StockState::from_results(&reads, &rel);
+        let stock = StockState::from_results(&reads, &rel, &HashSet::new());
         assert_eq!(stock.relics.get("Neo C5"), Some(&4));
         assert_eq!(stock.parts.get("Forma Blueprint"), Some(&1));
         // Planner shape: known relic stock.
@@ -1431,8 +1466,41 @@ mod tests {
         let read = engine.ocr_cell(&img);
         let r = validate_read(&read, &u, 0.5, 0.8, 0);
         assert!(!r.held);
-        let stock = StockState::from_results(&[r], &rel);
+        let stock = StockState::from_results(&[r], &rel, &HashSet::new());
         assert!(stock.relics.is_empty() && stock.parts.is_empty());
+    }
+
+    #[test]
+    fn arcanes_route_to_the_arcane_bucket() {
+        // Sixth pass §5: the Arcanes inventory screen feeds arcane stock.
+        // Neither the profile nor EE.log carries arcane state (#34), so
+        // this routing is the steady-state source until a capture lands.
+        let names: Vec<String> = ["Melee Influence", "Axi A1"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let u = Universe::from_names(&names);
+        let relic_names: HashSet<String> = ["Axi A1".to_owned()].into_iter().collect();
+        let arcane_names: HashSet<String> =
+            ["Melee Influence".to_owned()].into_iter().collect();
+        let reads = vec![
+            validate_read(&OcrRead {
+                    text: "Melee Influence".into(),
+                    confidence: 0.9,
+                    count: Some(4),
+                }, &u, 0.5, 0.5, 0),
+            validate_read(&OcrRead {
+                    text: "Axi A1".into(),
+                    confidence: 0.9,
+                    count: None,
+                }, &u, 0.5, 0.5, 1),
+        ];
+        let stock = StockState::from_results(&reads, &relic_names, &arcane_names);
+        assert_eq!(stock.held_arcanes().get("Melee Influence"), Some(&4));
+        assert_eq!(stock.relics.get("Axi A1"), Some(&1));
+        assert!(stock.parts.is_empty(), "nothing falls through to parts");
+        let back = StockState::from_json(&stock.to_json().unwrap()).unwrap();
+        assert_eq!(back.held_arcanes().get("Melee Influence"), Some(&4));
     }
 
     #[test]
@@ -1501,6 +1569,7 @@ mod tests {
             &layout,
             &u,
             &rel,
+            &HashSet::new(),
             0.5,
         )
         .unwrap();
@@ -1657,7 +1726,7 @@ mod tests {
         ));
         let _ = std::fs::create_dir_all(&dir);
         std::fs::copy(&src, dir.join(file)).ok()?;
-        let res = ingest_folder(&dir, &engine, &layout, &universe, &relic_names, 0.5);
+        let res = ingest_folder(&dir, &engine, &layout, &universe, &relic_names, &HashSet::new(), 0.5);
         let _ = std::fs::remove_dir_all(&dir);
         res.ok().map(|(_, results)| results)
     }

@@ -12,13 +12,20 @@ use std::path::PathBuf;
 use chrono::Utc;
 use clap::Parser;
 
-use fracker::{config, fetch, model, ocr, pack, plan, render, tuning};
+use fracker::{config, elog, fetch, model, ocr, pack, plan, render, state, tuning, watch};
 use model::{OwnedEquipment, RelicStock};
 use tuning::Tuning;
 
 /// Live profile account (addendum #1: resolved from a real fissure log's
 /// reward relay and confirmed by the profile endpoint).
 pub const PROFILE_ACCOUNT_ID: &str = "5420fba23846322173707618";
+
+/// Repo/install data file path. `$FRACKER_DATA_DIR`-aware (see
+/// `tuning::data_dir`), so the Flatpak install resolves data from
+/// `/app/share/fracker/data` via the launcher's env.
+fn data_file(rel: &str) -> PathBuf {
+    tuning::data_dir().join(rel)
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "fracker", about = "Warframe session planner (first pass)")]
@@ -45,8 +52,19 @@ struct Args {
     #[arg(long, default_value = "relic")]
     ocr_layout: String,
     /// Capture layout file defining per-screen OCR geometry.
-    #[arg(long, default_value = "data/capture/layouts.toml")]
-    ocr_layouts: PathBuf,
+    /// Default: `<data>/capture/layouts.toml`.
+    #[arg(long)]
+    ocr_layouts: Option<PathBuf>,
+    /// Live watch loop: tail the EE.log containing DIRECTORY, regenerate
+    /// the page on mission end (sixth pass §4).
+    #[arg(long)]
+    watch: bool,
+    /// Explicit EE.log path (overrides config + auto-detect).
+    #[arg(long)]
+    log: Option<PathBuf>,
+    /// Watch wait tick in milliseconds; doubles as the poll fallback.
+    #[arg(long, default_value_t = 1000)]
+    watch_interval_ms: i32,
 }
 
 #[tokio::main]
@@ -66,7 +84,14 @@ async fn main() {
         }
         return;
     }
-    // No live loop this pass (watch/tray are stubs): report config state.
+    if args.watch {
+        if let Err(e) = run_watch(&args).await {
+            eprintln!("fracker --watch: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    // No tray runtime this pass: report config state.
     let cfg_path = args.config.unwrap_or_else(config::config_file);
     match config::Config::load(&cfg_path) {
         Ok((cfg, _)) => {
@@ -100,11 +125,12 @@ async fn run_demo(args: &Args) -> Result<(), String> {
     let cache = config::cache_dir();
     let mut endpoint_failures: Vec<String> = Vec::new();
 
-    // 0. Runtime tuning + companion exclusions (no content in Rust).
+    // 0. Runtime tuning + data-owned universe scrub (no content in Rust).
     let tuning = Tuning::load_defaults()?;
-    let companions_text = std::fs::read_to_string("data/companions.toml")
-        .map_err(|e| format!("companions data/companions.toml: {e}"))?;
-    let companions = model::CompanionsManifest::from_toml(&companions_text)?;
+    let scrub_path = data_file("exclusions.toml");
+    let scrub_text = std::fs::read_to_string(&scrub_path)
+        .map_err(|e| format!("exclusions {}: {e}", scrub_path.display()))?;
+    let scrub = model::UniverseScrub::from_toml(&scrub_text)?;
 
     // 1. World state: live, else recorded fixture.
     let (world_text, world_status) = match fetch::fetch_worldstate(&client, &cache).await {
@@ -127,15 +153,17 @@ async fn run_demo(args: &Args) -> Result<(), String> {
         .unwrap_or_else(|_| Utc::now());
 
     // 2. Reconciled backlog (profile-derived primes), exclusions applied.
-    let backlog_text = std::fs::read_to_string("data/backlog.json")
-        .map_err(|e| format!("backlog data/backlog.json: {e}"))?;
+    let backlog_path = data_file("backlog.json");
+    let backlog_text = std::fs::read_to_string(&backlog_path)
+        .map_err(|e| format!("backlog {}: {e}", backlog_path.display()))?;
     let backlog = model::Backlog::from_json(&backlog_text)?;
-    let wants = companions.filter_wants(&backlog.wants());
+    let wants = scrub.scrub_wants(&backlog.wants());
+    let backlog_categories = scrub.scrub_categories(&backlog.unmastered_by_category);
 
     // 3. Seed relic/roster data.
-    let rel_text = std::fs::read_to_string("data/cache/relictables.json")
+    let rel_text = std::fs::read_to_string(data_file("cache/relictables.json"))
         .map_err(|e| format!("seed relictables: {e}"))?;
-    let wish_text = std::fs::read_to_string("data/cache/wishlist.json")
+    let wish_text = std::fs::read_to_string(data_file("cache/wishlist.json"))
         .map_err(|e| format!("seed wishlist: {e}"))?;
     let relics = model::RelicTables::from_json(&rel_text)?;
     let roster = model::Roster::from_json(&wish_text)?;
@@ -161,7 +189,7 @@ async fn run_demo(args: &Args) -> Result<(), String> {
 
     // 5. Parent-item icons (addendum #14).
     let icons_text =
-        std::fs::read_to_string("data/icons.json").map_err(|e| format!("icons: {e}"))?;
+        std::fs::read_to_string(data_file("icons.json")).map_err(|e| format!("icons: {e}"))?;
     let icons = model::load_icons(&icons_text)?;
     let icon_resolved = backlog
         .gear_names()
@@ -170,7 +198,7 @@ async fn run_demo(args: &Args) -> Result<(), String> {
         .count();
 
     // 6. Taubound pack strip.
-    let pack_text = std::fs::read_to_string("data/packs/taubound.toml")
+    let pack_text = std::fs::read_to_string(data_file("packs/taubound.toml"))
         .map_err(|e| format!("taubound pack: {e}"))?;
     let taubound = pack::TauboundPack::from_toml(&pack_text)?;
     let pack_render = render::PackRender {
@@ -242,7 +270,7 @@ async fn run_demo(args: &Args) -> Result<(), String> {
         mastery_rank: Some(mastery_rank),
         icons: &icons,
         embedded_icons: Some(&embedded),
-        backlog_categories: &backlog.unmastered_by_category,
+        backlog_categories: &backlog_categories,
         daily,
         pack: Some(pack_render),
         tuning: &tuning,
@@ -286,6 +314,92 @@ async fn run_demo(args: &Args) -> Result<(), String> {
         embedded_count, hotlink_count,
     );
     Ok(())
+}
+
+/// Live EE.log watch (sixth pass §4). Watches the log's containing
+/// DIRECTORY (never a naive path tail), reconciles the persisted
+/// `(inode, offset)` on startup, and regenerates the page on mission end
+/// or when the tray's manual Regenerate asks for one. The wait tick
+/// doubles as the poll fallback when inotify is unavailable.
+async fn run_watch(args: &Args) -> Result<(), String> {
+    let cfg_path = args.config.clone().unwrap_or_else(config::config_file);
+    let (cfg, _) = config::Config::load(&cfg_path)?;
+    let log_path = resolve_log_path(args, &cfg)?;
+    let data_dir = config::data_dir();
+    let mut st = state::AppState::load(&data_dir)?;
+
+    let mut watcher = watch::LogWatcher::open(&log_path)?;
+    watcher.resume(st.log_position)?;
+
+    // The tray's manual "Regenerate" verb holds a clone of this signal and
+    // calls `request()`; mission-end events request it here too.
+    let regen = watch::RegenSignal::new();
+    let mut tracker = elog::SessionTracker::new();
+    let mut last_tick = std::time::Instant::now();
+    let mut last_inode = watcher.position().inode;
+
+    println!(
+        "watch: {} ({})",
+        log_path.display(),
+        if watcher.watching_dir() {
+            "inotify dir watch"
+        } else {
+            "poll fallback"
+        },
+    );
+    loop {
+        let lines = watcher.next_lines(args.watch_interval_ms)?;
+        let pos = watcher.position();
+        // A fresh inode (file recreation) is a hard session edge: the
+        // tracker sees an infinite gap so a re-login reads as a start.
+        let gap = if pos.inode != last_inode {
+            u64::MAX
+        } else {
+            last_tick.elapsed().as_secs()
+        };
+        last_tick = std::time::Instant::now();
+        last_inode = pos.inode;
+
+        for raw in &lines {
+            let line = elog::parse_line(raw);
+            let ev = elog::classify(&line);
+            tracker.feed(ev.as_ref(), gap);
+            if let Some(elog::Event::LoggedIn { name }) = &ev {
+                st.display_name = name.clone();
+            }
+            if ev.as_ref().map_or(false, |e| e.is_mission_end()) {
+                regen.request();
+            }
+        }
+
+        let dirty = !lines.is_empty() || regen.is_pending() || pos != st.log_position;
+        st.log_position = pos;
+        if dirty {
+            st.save(&data_dir)?;
+        }
+
+        if regen.take() {
+            println!("watch: regenerating page");
+            run_demo(args).await?;
+        }
+    }
+}
+
+/// Resolve the EE.log path: `--log` beats config `ee_log_path`, which
+/// beats the data-owned Steam/Proton auto-detect.
+fn resolve_log_path(args: &Args, cfg: &config::Config) -> Result<PathBuf, String> {
+    if let Some(p) = &args.log {
+        return Ok(p.clone());
+    }
+    if !cfg.ee_log_path.trim().is_empty() {
+        return Ok(PathBuf::from(cfg.ee_log_path.trim()));
+    }
+    let home = dirs::home_dir().ok_or("cannot find home dir for EE.log auto-detect")?;
+    let paths = config::EeLogPaths::load_default()?;
+    config::ee_log_candidates(&home, &paths)
+        .into_iter()
+        .find(|p| p.exists())
+        .ok_or_else(|| "no EE.log found; pass --log or set ee_log_path in config".to_owned())
 }
 
 /// Demo icon embedding: download each goal's parent icon, shrink to a
@@ -375,7 +489,7 @@ fn profile_context(
     snap: &fetch::ProfileSnapshot,
 ) -> (OwnedEquipment, Option<render::DailyRender>) {
     let names: std::collections::HashMap<String, String> =
-        std::fs::read_to_string("data/cache/item-names.json")
+        std::fs::read_to_string(data_file("cache/item-names.json"))
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_default();
@@ -410,7 +524,11 @@ fn run_ocr_ingest(args: &Args, dir: &std::path::Path) -> Result<(), String> {
 
     // Capture geometry is content (addendum #20): load the layout table
     // and pick the screen class named by --ocr-layout.
-    let layouts = ocr::Layout::load_file(&args.ocr_layouts)?;
+    let layouts_path = args
+        .ocr_layouts
+        .clone()
+        .unwrap_or_else(|| data_file("capture/layouts.toml"));
+    let layouts = ocr::Layout::load_file(&layouts_path)?;
     let layout = layouts
         .get(&args.ocr_layout)
         .cloned()
@@ -418,15 +536,31 @@ fn run_ocr_ingest(args: &Args, dir: &std::path::Path) -> Result<(), String> {
             format!(
                 "ocr layout {:?} not in {}",
                 args.ocr_layout,
-                args.ocr_layouts.display()
+                layouts_path.display()
             )
         })?;
 
-    // Item universe: roster parts + gear + relic names from the seed
-    // datasets (the same names the planner reasons about).
-    let rel_text = std::fs::read_to_string("data/cache/relictables.json")
+    // Data-owned universe corrections apply here too (sixth pass §1):
+    // excluded entries and duplicate spellings never reach the OCR
+    // universe.
+    let scrub_path = data_file("exclusions.toml");
+    let scrub = model::UniverseScrub::from_toml(
+        &std::fs::read_to_string(&scrub_path)
+            .map_err(|e| format!("exclusions {}: {e}", scrub_path.display()))?,
+    )?;
+    // Arcane set (sixth pass §5): labeled stopgap until the first Arcanes
+    // capture; the screen is the steady-state arcane source (#34).
+    let arcane_path = data_file("arcanes.toml");
+    let arcanes = model::ArcaneManifest::from_toml(
+        &std::fs::read_to_string(&arcane_path)
+            .map_err(|e| format!("arcanes {}: {e}", arcane_path.display()))?,
+    )?;
+
+    // Item universe: roster parts + gear + relic names + the arcane set,
+    // scrubbed (the same names the planner reasons about).
+    let rel_text = std::fs::read_to_string(data_file("cache/relictables.json"))
         .map_err(|e| format!("seed relictables: {e}"))?;
-    let wish_text = std::fs::read_to_string("data/cache/wishlist.json")
+    let wish_text = std::fs::read_to_string(data_file("cache/wishlist.json"))
         .map_err(|e| format!("seed wishlist: {e}"))?;
     let relics = model::RelicTables::from_json(&rel_text)?;
     let roster = model::Roster::from_json(&wish_text)?;
@@ -440,10 +574,13 @@ fn run_ocr_ingest(args: &Args, dir: &std::path::Path) -> Result<(), String> {
     for name in relics.relics.keys() {
         names.push(name.clone());
     }
+    names.extend(arcanes.names.iter().cloned());
+    let mut names = scrub.scrub_names(&names);
     names.sort();
     names.dedup();
     let universe = ocr::Universe::from_names(&names);
     let relic_names: HashSet<String> = relics.relics.keys().cloned().collect();
+    let arcane_names = arcanes.name_set();
 
     // Engine: tesseract when the binary exists, else the stub (empty
     // stock, never guesses) — status printed honestly either way.
@@ -464,16 +601,18 @@ fn run_ocr_ingest(args: &Args, dir: &std::path::Path) -> Result<(), String> {
         &layout,
         &universe,
         &relic_names,
+        &arcane_names,
         0.5,
     )?;
     stock.write_to(&args.stock_out)?;
     let held = results.iter().filter(|r| r.held).count();
     println!(
-        "ocr: {} cells, {} held ({} relics, {} parts) -> {}",
+        "ocr: {} cells, {} held ({} relics, {} parts, {} arcanes) -> {}",
         results.len(),
         held,
         stock.relics.values().sum::<u32>(),
         stock.parts.values().sum::<u32>(),
+        stock.arcanes.values().sum::<u32>(),
         args.stock_out.display(),
     );
     Ok(())
