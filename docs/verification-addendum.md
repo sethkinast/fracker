@@ -67,5 +67,11 @@ it refines the brief where they disagree. For the next worker pass.
     (Known gap: the pets category file failed to load — companion
     backlog incomplete; Kavasa Prime's status unverified.)
 13. **Inventory bootstrap still owed:** relic stock + loose parts
-    via the guided OCR scroll (brief design stands). Queued with
-    the second worker pass.
+    via the guided OCR scroll (brief design stands). Queued for
+    pass 3.
+14. **Icons (Seth, 2026-10-15):** frames and weapons show their real
+    WFCD icons (`imageName` → cdn.warframestat.us/img/<imageName>).
+    For a prime PART, use the icon of the ITEM ITSELF (the parent
+    frame/weapon), never the generic part/blueprint icon.
+15. **Iteration workflow (Seth, 2026-10-15):** Graf keeps cranking
+    passes; Seth steers after each pass. No per-pass approval gate.
