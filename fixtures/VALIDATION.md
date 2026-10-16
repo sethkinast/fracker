@@ -76,3 +76,40 @@ act completed → rank up, per Seth).
   present — every "focus"/"nightwave" hit in this file is an asset
   path, not a gain. Whether end-of-mission reports log gains remains
   OPEN until a session log with completed missions is inspected.
+
+## Third fixture: EE-2026-10-15-fissure.log (added later same day)
+
+46,272 lines — the FULL evening session (the earlier two files were
+mid-session snapshots of this same session: identical login, session
+IDs, and mm hashes). Segmentation rule CONFIRMED: one file, many
+sessions/squads; split on `Logged in` + inactivity, never file edges.
+
+- **Fissure reward markers — ALL VERIFIED VERBATIM:**
+  `ProjectionRewardChoice.lua: Relic rewards initialized`;
+  `VoidProjections: Client got reward info from <24-hex account ID>`
+  (×4, one per squad member); `VoidProjections: Client has reward
+  info for all players now`; `ProjectionRewardChoice.lua: Got
+  rewards`; `ProjectionRewardChoice.lua: Selection countdown done`;
+  `ProjectionRewardChoice.lua: Relic reward screen shut down`;
+  `DVRCAftermath` transmission on return. The reward screen's four
+  relics appear earlier as ResourceLoader projection paths.
+- **ACCOUNT ID RESOLVED (2026-10-15, endpoint-confirmed):**
+  `5420fba23846322173707618` — the first `got reward info from`
+  candidate; the profile endpoint returns DisplayName Jenterrobahne,
+  MR 30, and the response's own `AccountId` field matches. Control
+  tests behaved (squadmates' IDs return their own names). A second
+  name↔ID source also exists: `SendSessionUpdate` params carry
+  `"memberAccountId"` for session members. Which relic of the four
+  was Seth's own crack is NOT name-paired in the log — unresolved.
+- **Profile pull works end to end** (`data/profile-raw.json`, local
+  only): 610 XPInfo items, 470 mission nodes, affiliations, and —
+  the big one — **daily cap state**: `DailyAffiliation: 6300`
+  (faction standing REMAINING of the 31,000 MR30 cap),
+  `DailyAffiliationCavia/Cetus: 31000` (untouched), `DailyFocus:
+  262328` (remaining of 400,000). The daily bars need NO log
+  derivation — the profile reports remaining caps directly.
+- **Wants pruning works:** of the 49 Xuerian wants, 9 are stale —
+  their parents (Equinox, Hildryn, Khora, Nidus, Fulmin, Scourge,
+  Tipedo, Cobra & Crane Primes) are already in XPInfo = mastered.
+  40 live wants remain (`data/wants-pruned.json`). Caveat: XPInfo
+  absence means "never gained affinity," the design's mastery test.
