@@ -75,3 +75,10 @@ it refines the brief where they disagree. For the next worker pass.
     frame/weapon), never the generic part/blueprint icon.
 15. **Iteration workflow (Seth, 2026-10-15):** Graf keeps cranking
     passes; Seth steers after each pass. No per-pass approval gate.
+16. **Fissure era compatibility (Seth, 2026-10-15) — HARD planner
+    constraint, not a scoring factor.** A fissure cracks only its
+    own era's relics; Omnia fissures (Conjunction Survival et al.)
+    accept all eras. Batches must be era-compatible with the target
+    fissure as a whole; mixed-era batches route only to Omnia. The
+    pass-1 demo violated this at Persto (Deimos) — regression test
+    required (brief #2 §0).
