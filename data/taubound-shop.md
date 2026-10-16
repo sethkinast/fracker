@@ -159,3 +159,13 @@ the in-game UI is the only authority (Seth's 5-or-8 stands).
 
 Scrollbar suggests page 3 may not be the end either; send more
 shots if there are more rows.
+
+## Progress log
+
+- 2026-10-16: Seth reports ~2,000 Moonflesh earned across the
+  event so far (the second ~1,000 accumulated today; some of the
+  total was already spent on the Oct 16 arcane round-out).
+  Remaining after that round-out: the three arcanes ≈ 225–360;
+  all other priced-and-unowned ≈ 4,070 (≈ 3,545 purchasable
+  right now excluding the gated Contegorus set and consumables).
+  Pack expires 2026-11-17.
