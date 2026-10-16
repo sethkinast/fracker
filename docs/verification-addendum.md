@@ -144,3 +144,18 @@ it refines the brief where they disagree. For the next worker pass.
       around (world state voidTraders) — gone when he leaves.
     - Pass 4 reconciles WEEKLIES.md and the weeklies data file
       against this list.
+28. **Daily bars = one per standing pool (Seth, 2026-10-16).** A
+    single syndicate bar is wrong: the profile carries FOURTEEN
+    DailyAffiliation* pools (syndicates, Library/Simaris, Cetus,
+    Quills, Solaris, Ventkids, Vox, Entrati, Necraloid, Zariman,
+    Kahl, Cavia, Hex, PvP) — cap 31,000 each at MR 30 — plus
+    DailyFocus (400,000). Render one slim bar per pool,
+    remaining-of-cap; PvP is dropped per item 27's Conclave cut.
+    Lifetime faction standings (41 Affiliations records incl. 16
+    historical Nightwave seasons) are card data, not bars.
+29. **Icons ARE hotlinked by design (settled 2026-10-16).** The
+    WFCD CDN (cdn.warframestat.us/img/<imageName>) is published
+    for exactly this consumption; the product page hotlinks.
+    Embedding (item 23) is ONLY for demo/review exports into
+    sandboxed surfaces. A local icon cache is a possible later
+    robustness tweak, not a requirement.
