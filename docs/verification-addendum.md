@@ -100,3 +100,10 @@ it refines the brief where they disagree. For the next worker pass.
     packs, thresholds, target lists — lives in YAML/TOML/JSON files
     loaded at runtime; Rust only interprets. Updating game content
     must never require a code change.
+21. **Inventory source ruling (Seth, 2026-10-15): OCR is the plan.**
+    Sainan's warframe-api-helper was evaluated in full (read-only
+    memory scan for the session nonce → inventory.php dump). Seth's
+    call: back-pocket LAST RESORT only — not part of the build. The
+    clean-sources rule stands; the pass-3 OCR bootstrap proceeds.
+    The helper is revisited only if OCR genuinely fails AND Seth
+    explicitly reopens it.
