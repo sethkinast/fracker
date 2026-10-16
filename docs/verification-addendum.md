@@ -126,3 +126,12 @@ it refines the brief where they disagree. For the next worker pass.
     path are excluded, never listed as backlog. (Same scrub should
     catch non-frame entries squatting in the Warframes category —
     e.g. Helminth — queued for pass 4.)
+26. **Do Now layout on regen (Seth, 2026-10-16; pass 4):**
+    (a) A section for time-limited EVENT alerts; (b) a SEPARATE
+    section for "Gift of the Lotus" alerts (none active at design
+    time — empty sections hide); (c) then the ≤3 target relics with
+    what they give (already built); (d) Varzia/Resurgence detection
+    stays first-class — surfacing "Varzia sells relics for YOUR
+    unowned vaulted items" is the tool's showcase value (Seth's
+    words); (e) Nightwave acts render their DESCRIPTIONS, not just
+    names — the name alone doesn't say what to do.
