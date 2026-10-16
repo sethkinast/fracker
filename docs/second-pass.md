@@ -38,8 +38,17 @@ elsewhere), which accepts every era. Therefore:
    vaulted items into the current tier while the rotation lasts.
    Frames before weapons within a tier.
 3. **Page v2 — tabs, terse, scannable.**
-   - Two tabs: **Do Now** (chunk slate; exactly one loud action
-     line; everything else quiet) and **Backlog** (the full list).
+   - THREE tabs (Seth, 2026-10-15): **Do Now** (the focused slate),
+     **Hunt** (fan-out: all prime goal cards with their relic /
+     chance / stock rows, for when he wants more than the focus
+     set), and **Backlog** (everything unmastered, all gear).
+   - **Do Now targets AT MOST 3 parts at a time** (Seth's rule).
+     Pick the 3 by priority (item 2), preferring a spread across
+     different relic eras — era spread means a live fissure almost
+     always serves one of them, and an Omnia fissure can serve all
+     three at once. The slate's chunks pursue only these 3 parts;
+     everything else waits in Hunt/Backlog. Exactly one loud
+     action line; everything else quiet.
    - Copy goes TERSE everywhere: labels, numbers, pips, bars. No
      explanatory sentences. Seth's words: "way too many words."
    - Rows align into consistent columns (icon | item | parts pips |

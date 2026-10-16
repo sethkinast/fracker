@@ -82,3 +82,10 @@ it refines the brief where they disagree. For the next worker pass.
     fissure as a whole; mixed-era batches route only to Omnia. The
     pass-1 demo violated this at Persto (Deimos) — regression test
     required (brief #2 §0).
+17. **Do Now targets ≤ 3 parts (Seth, 2026-10-15), era-spread
+    preferred.** Focus beats breadth for the brain-off slate; three
+    parts across different relic classes means a live fissure
+    almost always serves one, and Omnia serves all three.
+18. **Three tabs (Seth, 2026-10-15):** Do Now (the ≤3-part slate) /
+    Hunt (fan-out over all prime goal cards) / Backlog (everything
+    unmastered). Supersedes the two-tab note in item 9.
