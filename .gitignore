@@ -12,3 +12,6 @@ fixtures/reallog/
 
 # Rust
 target/
+
+# Real inventory screenshots for OCR tests stay local.
+fixtures/ocr-samples/
