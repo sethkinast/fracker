@@ -1,12 +1,5 @@
-# Xuerian raw pull embeds the private bookmark token - never commit
+# Xuerian raw pull embeds Seth's private bookmark token as its key.
 data/xuerian-profile-raw.json
-
-# EE.log fixtures are Seth-side only
-fixtures/
-
-# Rust
+# EE.log fixtures stay local while the repo is public; add them if it goes private.
+fixtures/*.log
 target/
-
-# local state/config samples
-state.json
-config.toml
