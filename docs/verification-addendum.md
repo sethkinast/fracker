@@ -107,3 +107,11 @@ it refines the brief where they disagree. For the next worker pass.
     clean-sources rule stands; the pass-3 OCR bootstrap proceeds.
     The helper is revisited only if OCR genuinely fails AND Seth
     explicitly reopens it.
+22. **Kavasa Prime excluded (Seth, 2026-10-15):** Seth owns the
+    collar already; it's a companion collar, not a weapon — no
+    mastery, a special case. Out of the backlog on every
+    regeneration (unmastered primes 64 → 63).
+23. **Demo deliverable must be self-contained (2026-10-15):** CDN
+    hotlink icons don't render in Seth's review surface. The demo
+    export embeds icons as ≤128px data-URI thumbnails; the product
+    page itself keeps CDN hotlinks per BRIEF §4.2.

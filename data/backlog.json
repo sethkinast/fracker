@@ -693,19 +693,6 @@
     ]
    },
    {
-    "name": "Kavasa Prime",
-    "vaulted": true,
-    "type": null,
-    "status": "unknown",
-    "wants": "none",
-    "parts_wanted": [],
-    "all_parts": [
-     "Kavasa Prime Band",
-     "Kavasa Prime Buckle",
-     "Kavasa Prime Kubrow Collar Blueprint"
-    ]
-   },
-   {
     "name": "Kogake Prime",
     "vaulted": true,
     "type": null,
@@ -1223,6 +1210,12 @@
    "name": "Tipedo Prime",
    "cat": "Melee",
    "xp": 165854
+  }
+ ],
+ "excluded": [
+  {
+   "name": "Kavasa Prime",
+   "reason": "Seth owns the collar already (2026-10-15); companion collar, not a weapon \u2014 no mastery, special case excluded from the backlog."
   }
  ]
 }
