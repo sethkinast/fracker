@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use chrono::Utc;
 use clap::Parser;
 
-use fracker::{config, fetch, model, ocr, pack, plan, render, tuning};
+use fracker::{config, elog, fetch, model, ocr, pack, plan, render, state, tuning, watch};
 use model::{OwnedEquipment, RelicStock};
 use tuning::Tuning;
 
@@ -52,8 +52,19 @@ struct Args {
     #[arg(long, default_value = "relic")]
     ocr_layout: String,
     /// Capture layout file defining per-screen OCR geometry.
-    #[arg(long, default_value = "data/capture/layouts.toml")]
-    ocr_layouts: PathBuf,
+    /// Default: `<data>/capture/layouts.toml`.
+    #[arg(long)]
+    ocr_layouts: Option<PathBuf>,
+    /// Live watch loop: tail the EE.log containing DIRECTORY, regenerate
+    /// the page on mission end (sixth pass §4).
+    #[arg(long)]
+    watch: bool,
+    /// Explicit EE.log path (overrides config + auto-detect).
+    #[arg(long)]
+    log: Option<PathBuf>,
+    /// Watch wait tick in milliseconds; doubles as the poll fallback.
+    #[arg(long, default_value_t = 1000)]
+    watch_interval_ms: i32,
 }
 
 #[tokio::main]
@@ -73,7 +84,14 @@ async fn main() {
         }
         return;
     }
-    // No live loop this pass (watch/tray are stubs): report config state.
+    if args.watch {
+        if let Err(e) = run_watch(&args).await {
+            eprintln!("fracker --watch: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    // No tray runtime this pass: report config state.
     let cfg_path = args.config.unwrap_or_else(config::config_file);
     match config::Config::load(&cfg_path) {
         Ok((cfg, _)) => {
@@ -298,6 +316,92 @@ async fn run_demo(args: &Args) -> Result<(), String> {
     Ok(())
 }
 
+/// Live EE.log watch (sixth pass §4). Watches the log's containing
+/// DIRECTORY (never a naive path tail), reconciles the persisted
+/// `(inode, offset)` on startup, and regenerates the page on mission end
+/// or when the tray's manual Regenerate asks for one. The wait tick
+/// doubles as the poll fallback when inotify is unavailable.
+async fn run_watch(args: &Args) -> Result<(), String> {
+    let cfg_path = args.config.clone().unwrap_or_else(config::config_file);
+    let (cfg, _) = config::Config::load(&cfg_path)?;
+    let log_path = resolve_log_path(args, &cfg)?;
+    let data_dir = config::data_dir();
+    let mut st = state::AppState::load(&data_dir)?;
+
+    let mut watcher = watch::LogWatcher::open(&log_path)?;
+    watcher.resume(st.log_position)?;
+
+    // The tray's manual "Regenerate" verb holds a clone of this signal and
+    // calls `request()`; mission-end events request it here too.
+    let regen = watch::RegenSignal::new();
+    let mut tracker = elog::SessionTracker::new();
+    let mut last_tick = std::time::Instant::now();
+    let mut last_inode = watcher.position().inode;
+
+    println!(
+        "watch: {} ({})",
+        log_path.display(),
+        if watcher.watching_dir() {
+            "inotify dir watch"
+        } else {
+            "poll fallback"
+        },
+    );
+    loop {
+        let lines = watcher.next_lines(args.watch_interval_ms)?;
+        let pos = watcher.position();
+        // A fresh inode (file recreation) is a hard session edge: the
+        // tracker sees an infinite gap so a re-login reads as a start.
+        let gap = if pos.inode != last_inode {
+            u64::MAX
+        } else {
+            last_tick.elapsed().as_secs()
+        };
+        last_tick = std::time::Instant::now();
+        last_inode = pos.inode;
+
+        for raw in &lines {
+            let line = elog::parse_line(raw);
+            let ev = elog::classify(&line);
+            tracker.feed(ev.as_ref(), gap);
+            if let Some(elog::Event::LoggedIn { name }) = &ev {
+                st.display_name = name.clone();
+            }
+            if ev.as_ref().map_or(false, |e| e.is_mission_end()) {
+                regen.request();
+            }
+        }
+
+        let dirty = !lines.is_empty() || regen.is_pending() || pos != st.log_position;
+        st.log_position = pos;
+        if dirty {
+            st.save(&data_dir)?;
+        }
+
+        if regen.take() {
+            println!("watch: regenerating page");
+            run_demo(args).await?;
+        }
+    }
+}
+
+/// Resolve the EE.log path: `--log` beats config `ee_log_path`, which
+/// beats the data-owned Steam/Proton auto-detect.
+fn resolve_log_path(args: &Args, cfg: &config::Config) -> Result<PathBuf, String> {
+    if let Some(p) = &args.log {
+        return Ok(p.clone());
+    }
+    if !cfg.ee_log_path.trim().is_empty() {
+        return Ok(PathBuf::from(cfg.ee_log_path.trim()));
+    }
+    let home = dirs::home_dir().ok_or("cannot find home dir for EE.log auto-detect")?;
+    let paths = config::EeLogPaths::load_default()?;
+    config::ee_log_candidates(&home, &paths)
+        .into_iter()
+        .find(|p| p.exists())
+        .ok_or_else(|| "no EE.log found; pass --log or set ee_log_path in config".to_owned())
+}
+
 /// Demo icon embedding: download each goal's parent icon, shrink to a
 /// ≤128px thumbnail (python3 + PIL when available), and return the
 /// parent-name -> data-URI map plus embedded/fallback counts. Any
@@ -420,7 +524,11 @@ fn run_ocr_ingest(args: &Args, dir: &std::path::Path) -> Result<(), String> {
 
     // Capture geometry is content (addendum #20): load the layout table
     // and pick the screen class named by --ocr-layout.
-    let layouts = ocr::Layout::load_file(&args.ocr_layouts)?;
+    let layouts_path = args
+        .ocr_layouts
+        .clone()
+        .unwrap_or_else(|| data_file("capture/layouts.toml"));
+    let layouts = ocr::Layout::load_file(&layouts_path)?;
     let layout = layouts
         .get(&args.ocr_layout)
         .cloned()

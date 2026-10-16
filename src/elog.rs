@@ -121,6 +121,16 @@ pub enum Event {
     HostMigration,
 }
 
+impl Event {
+    /// True when this event marks a completed mission run (sixth pass
+    /// §4): the reward screen (`Got rewards`) or the post-crack
+    /// aftermath transmission on hub return. The live watch loop turns
+    /// these into an automatic page regeneration.
+    pub fn is_mission_end(&self) -> bool {
+        matches!(self, Event::RelicRewardScreen | Event::RelicCrack)
+    }
+}
+
 /// Substring classification per the §7.2 catalog.
 pub fn classify(line: &LogLine) -> Option<Event> {
     classify_inner(line)
@@ -450,6 +460,18 @@ mod tests {
             classify(&real("Game", "Mission progress XP: 33867")),
             None
         );
+    }
+
+    #[test]
+    fn mission_end_events_drive_regeneration() {
+        // Sixth pass §4: reward screen + post-crack aftermath are the
+        // mission-end signals the watch loop turns into a regen.
+        assert!(Event::RelicRewardScreen.is_mission_end());
+        assert!(Event::RelicCrack.is_mission_end());
+        assert!(!Event::MissionInfoSeen.is_mission_end());
+        assert!(!Event::LevelConnected.is_mission_end());
+        assert!(!Event::HostMigration.is_mission_end());
+        assert!(!Event::LoggedIn { name: "S".into() }.is_mission_end());
     }
 
     #[test]
