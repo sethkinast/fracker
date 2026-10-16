@@ -89,3 +89,7 @@ it refines the brief where they disagree. For the next worker pass.
 18. **Three tabs (Seth, 2026-10-15):** Do Now (the ≤3-part slate) /
     Hunt (fan-out over all prime goal cards) / Backlog (everything
     unmastered). Supersedes the two-tab note in item 9.
+19. **Merge policy (Seth, 2026-10-15): no PRs on this repo.** Worker
+    pass branches merge straight into master (raw push) when a pass
+    completes; Graf does the merge. Pass 1 merged 2026-10-15
+    (master 1920d92).
