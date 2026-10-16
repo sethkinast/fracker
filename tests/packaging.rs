@@ -53,13 +53,16 @@ fn py_yaml_parse(rel: &str) -> bool {
 fn flatpak_manifest_builds_binary_and_ocr_sidecar() {
     let manifest = read("io.github.sethkinast.Fracker.yml");
     // App identity + runtime + the Rust SDK extension. The canonical
-    // extension id is `ruststable` (mount /usr/lib/sdk/ruststable/bin);
-    // the hyphenated `rust-stable` id does not exist.
+    // For freedesktop 24.08 the extension id is hyphenated:
+    // `org.freedesktop.Sdk.Extension.rust-stable` (mount
+    // /usr/lib/sdk/rust-stable/bin). The legacy unhyphenated
+    // `ruststable` ref does not exist for 24.08 on Flathub
+    // (v0.1.1 CI: "Nothing matches ...ruststable in remote flathub").
     assert!(manifest.contains(&format!("app-id: {APP_ID}")));
     assert!(manifest.contains("runtime: org.freedesktop.Platform"));
-    assert!(manifest.contains("org.freedesktop.Sdk.Extension.ruststable"));
-    assert!(manifest.contains("/usr/lib/sdk/ruststable/bin"));
-    assert!(!manifest.contains("rust-stable"));
+    assert!(manifest.contains("org.freedesktop.Sdk.Extension.rust-stable"));
+    assert!(manifest.contains("/usr/lib/sdk/rust-stable/bin"));
+    assert!(!manifest.contains("Extension.ruststable"));
     // The C modules build out-of-tree via explicit cmake: leptonica 1.85
     // refuses in-source generation, so the builder's cmake-ninja
     // buildsystem (which landed in-source) must not be used.

@@ -14,7 +14,7 @@ runtime: org.freedesktop.Platform
 runtime-version: '24.08'
 sdk: org.freedesktop.Sdk
 sdk-extensions:
-  - org.freedesktop.Sdk.Extension.ruststable
+  - org.freedesktop.Sdk.Extension.rust-stable
 command: fracker
 
 finish-args:
@@ -86,7 +86,7 @@ modules:
   - name: fracker
     buildsystem: simple
     build-options:
-      append-path: /usr/lib/sdk/ruststable/bin
+      append-path: /usr/lib/sdk/rust-stable/bin
       env:
         CARGO_HOME: /run/build/fracker/cargo
         CARGO_NET_OFFLINE: 'true'
