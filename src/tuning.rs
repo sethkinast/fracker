@@ -289,6 +289,10 @@ struct PlannerFile {
     #[serde(default)]
     pub vendor: VendorTuning,
     #[serde(default)]
+    pub nightwave: NightwaveTuning,
+    #[serde(default)]
+    pub alert_sections: AlertSectionsTuning,
+    #[serde(default)]
     pub resurgence: ResurgenceTuning,
     #[serde(default)]
     pub daily_caps: DailyCapsTuning,
@@ -331,6 +335,22 @@ pub struct VendorTuning {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+pub struct NightwaveTuning {
+    #[serde(default)]
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AlertSectionsTuning {
+    /// Do Now §a header: time-limited event alerts.
+    #[serde(default)]
+    pub event_header: String,
+    /// Do Now §b header: separate gift-alert section (hides when empty).
+    #[serde(default)]
+    pub lotus_header: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct ResurgenceTuning {
     #[serde(default)]
     pub contact: String,
@@ -361,6 +381,8 @@ pub struct PlannerTuning {
     pub days_until_hour_boundary: i64,
     pub steel_path_label: String,
     pub vendor: VendorTuning,
+    pub nightwave: NightwaveTuning,
+    pub alert_sections: AlertSectionsTuning,
     pub resurgence: ResurgenceTuning,
     pub daily_caps: DailyCapsTuning,
     pub sortie: SortieTuning,
@@ -390,6 +412,8 @@ impl PlannerTuning {
             days_until_hour_boundary: f.days_until_hour_boundary,
             steel_path_label: f.steel_path_label,
             vendor: f.vendor,
+            nightwave: f.nightwave,
+            alert_sections: f.alert_sections,
             resurgence: f.resurgence,
             daily_caps: f.daily_caps,
             sortie: f.sortie,
@@ -454,17 +478,31 @@ mod tests {
     #[test]
     fn tuning_loads_all_four_files() {
         let t = Tuning::for_tests();
-        assert_eq!(t.weeklies.len(), 24);
+        assert_eq!(t.weeklies.len(), 16);
         // Least-important items render last (flagged in data, not code).
         let tail: Vec<&str> = t.weeklies.iter().rev().take(2).map(|w| w.id.as_str()).collect();
         assert!(tail.contains(&"clem") && tail.contains(&"maroo"));
         assert!(t.weeklies.iter().filter(|w| w.deprioritized).count() >= 2);
+        // Pass 4 slimming: the act board left the box for its own
+        // section; dropped rows never return via code.
+        for gone in ["nw-weekly", "clan", "conclave", "teshin-rot", "teshin-cap", "helminth", "nw-shop", "baro"] {
+            assert!(
+                t.weeklies.iter().all(|w| w.id != gone),
+                "cut weekly still tracked: {gone}"
+            );
+        }
         assert!((t.missions.base_minutes("capture") - 3.0).abs() < 1e-9);
         assert!(t.missions.is_endless("survival"));
         assert!(!t.missions.is_endless("capture"));
         assert_eq!(t.refinement.trace_cost(Refinement::Radiant), 100);
         assert_eq!(t.planner.focus_max_parts, 3);
-        assert_eq!(t.planner.daily_caps.families.len(), 13);
+        // Pass 4 daily bars: one pool per standing family, PvP dropped
+        // with the Conclave cut (main faction pool is separate).
+        assert_eq!(t.planner.daily_caps.families.len(), 12);
+        assert!(!t.planner.daily_caps.families.iter().any(|f| f.eq_ignore_ascii_case("pvp")));
+        assert_eq!(t.planner.nightwave.name, "Nightwave");
+        assert!(!t.planner.alert_sections.event_header.is_empty());
+        assert!(!t.planner.alert_sections.lotus_header.is_empty());
     }
 
     #[test]

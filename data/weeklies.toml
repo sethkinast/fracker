@@ -5,6 +5,11 @@
 # `src/render.rs` board renderer). Render order = file order; the two
 # least-important items render LAST ("just there if you're passing by").
 # `obs` = observability source: log | ledger | manual | acts live | world state.
+#
+# Pass-4 slimming (addendum #27): Nightwave left the box for its own
+# section; Conclave, Clan, Teshin (item + caps), Helminth, and the
+# NW-creds row are dropped outright (not tracked); Baro left the box
+# for his own live-window section (world state voidTraders).
 
 [[weekly]]
 id = "archon"
@@ -63,45 +68,10 @@ time = "15–25m"
 obs = "manual"
 
 [[weekly]]
-id = "nw-weekly"
-name = "Nightwave"
-limit = "5+2/wk"
-time = "passive"
-obs = "acts live"
-
-[[weekly]]
 id = "cal1999"
 name = "1999 Calendar"
 limit = "1 page/wk"
 time = "passive"
-obs = "manual"
-
-[[weekly]]
-id = "clan"
-name = "Clan Initiative"
-limit = "4 tiers/wk"
-time = "passive"
-obs = "manual"
-
-[[weekly]]
-id = "conclave"
-name = "Conclave"
-limit = "3+bonus · Fri"
-time = "—"
-obs = "manual"
-
-[[weekly]]
-id = "teshin-rot"
-name = "Teshin item"
-limit = "1/wk"
-time = "2m"
-obs = "world state"
-
-[[weekly]]
-id = "teshin-cap"
-name = "Teshin caps"
-limit = "cipher 1 · Kuva/relic 25"
-time = "2m"
 obs = "manual"
 
 [[weekly]]
@@ -138,27 +108,6 @@ name = "Chipper shard"
 limit = "1/wk R5"
 time = "2m"
 obs = "manual"
-
-[[weekly]]
-id = "helminth"
-name = "Helminth"
-limit = "3 frames/wk"
-time = "2m"
-obs = "manual"
-
-[[weekly]]
-id = "nw-shop"
-name = "NW Creds"
-limit = "rotation/wk"
-time = "2m"
-obs = "manual"
-
-[[weekly]]
-id = "baro"
-name = "Baro"
-limit = "biweekly F–S"
-time = "5m"
-obs = "world state"
 
 # Least important: render last, visually quiet.
 [[weekly]]

@@ -245,6 +245,101 @@ fn golden_slate_has_cracks_and_labels_filler() {
 }
 
 #[test]
+fn golden_donow_views_match_live_feed() {
+    // Pass 4 Do Now: the fixture's 3 alerts are all counted-payout
+    // events (own section); no gift alerts live (section hides); the
+    // rotation element covers Ivara; the trader window opens 13:00 —
+    // hidden at the 02:55 golden now.
+    let g = golden_plan_recompute();
+    assert_eq!(g.plan.event_alerts.len(), 3);
+    assert!(g.plan.lotus_alerts.is_empty());
+    let r = g.plan.resurgence.expect("rotation covers backlog gear");
+    assert!(r.gears.iter().any(|x| x == "Ivara Prime"), "{:?}", r.gears);
+    assert!(g.plan.baro.is_none(), "trader window not open yet");
+}
+
+#[test]
+fn golden_page_shows_pass4_sections_and_pool_bars() {
+    use fracker::render::{DailyRender, RenderContext};
+    let root = root();
+    let world_text =
+        std::fs::read_to_string(root.join("fixtures/worldstate.json")).unwrap();
+    let world = WorldState::from_json(&world_text).unwrap();
+    let profile_text = std::fs::read_to_string(
+        root.join("fixtures/profile-5420fba23846322173707618.json"),
+    )
+    .unwrap();
+    let snap = fracker::fetch::parse_profile(&profile_text).unwrap();
+    let tuning =
+        fracker::tuning::Tuning::load(&root.join("data")).unwrap();
+    let caps = &tuning.planner.daily_caps;
+    let mut families: Vec<(String, u32)> = snap
+        .daily
+        .per_family
+        .iter()
+        .filter(|(k, _)| !k.eq_ignore_ascii_case("pvp"))
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+    families.sort_by(|a, b| a.0.cmp(&b.0));
+    let daily = DailyRender {
+        affiliation_remaining: snap.daily.affiliation_remaining,
+        affiliation_cap: caps.standing_base + caps.standing_per_mr * snap.mastery_rank,
+        focus_remaining: snap.daily.focus_remaining,
+        focus_cap: caps.focus_base + caps.focus_per_mr * snap.mastery_rank,
+        families,
+    };
+    let g = golden_plan_recompute();
+    let weekly_done: HashMap<String, String> = HashMap::new();
+    let proven: HashSet<String> = HashSet::new();
+    let icons: HashMap<String, String> = HashMap::new();
+    let cats: HashMap<String, Vec<String>> = HashMap::new();
+    let ctx = RenderContext {
+        world: &world,
+        generated_label: "golden".to_owned(),
+        targets_status: "t".to_owned(),
+        world_status: "w".to_owned(),
+        weekly_done: &weekly_done,
+        proven_done: &proven,
+        mastery_rank: Some(snap.mastery_rank),
+        icons: &icons,
+        embedded_icons: None,
+        backlog_categories: &cats,
+        daily: Some(daily),
+        pack: None,
+        tuning: &tuning,
+    };
+    let html = fracker::render::render_plan(&g.plan, &ctx);
+    // Event section live with countdowns; gift section hidden.
+    assert!(html.contains(&tuning.planner.alert_sections.event_header));
+    assert!(html.contains("Nimus (Eris)"));
+    assert!(!html.contains(&format!(
+        "<h3 class=\"donow-sub\">{}</h3>",
+        tuning.planner.alert_sections.lotus_header
+    )));
+    // Rotation element + act descriptions + trader hidden.
+    assert!(html.contains("Ivara Prime"));
+    assert!(html.contains("Kill 10 Enemies while Sliding"));
+    assert!(!html.contains("card vendor\">"));
+    // Per-pool bars: 12 slim family bars, no PvP, remaining labels.
+    assert_eq!(html.matches("card bar slim").count(), 12);
+    assert!(!html.contains("Pvp"));
+    assert!(html.contains("Focus ·"));
+    // Slimmed box: kept rows render, cut rows never do.
+    assert!(html.contains("Archon Hunt"));
+    for cut in [
+        "Clan Initiative",
+        "Conclave",
+        "Teshin item",
+        "Teshin caps",
+        "Helminth",
+        "NW Creds",
+    ] {
+        assert!(!html.contains(cut), "cut weekly renders: {cut}");
+    }
+    assert!(!html.contains("wk-nw-weekly"), "acts own their section now");
+}
+
+#[test]
 fn golden_donow_targets_at_most_three_parts() {
     // Brief #2 item 3: the slate's crack chunks pursue only the ≤3
     // focus parts; everything else waits in Hunt/Backlog.

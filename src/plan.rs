@@ -174,6 +174,46 @@ pub struct Plan {
     /// preferred. The slate's crack chunks pursue only these parts;
     /// everything else waits in Hunt/Backlog.
     pub focus: Vec<FocusPart>,
+    /// Do Now §a: live time-limited event alerts (counted payouts).
+    pub event_alerts: Vec<AlertView>,
+    /// Do Now §b: separate gift-alert section (hides when empty).
+    pub lotus_alerts: Vec<AlertView>,
+    /// Do Now §d: first-class rotation element — the live rotation
+    /// intersected with his unmastered vaulted items. None when the
+    /// rotation covers nothing of his.
+    pub resurgence: Option<ResurgenceView>,
+    /// Pass-4 trader section: live only while a trader window covers
+    /// now; gone when he leaves.
+    pub baro: Option<BaroView>,
+}
+
+/// One alert row for the Do Now band: node, mission type, payout,
+/// minutes left. Terse labels, numbers, countdowns — not sentences.
+#[derive(Debug, Clone)]
+pub struct AlertView {
+    pub node: String,
+    pub mission_type: String,
+    pub payout: String,
+    pub left: String,
+}
+
+/// Live rotation ∩ unmastered vaulted items: the tool's showcase
+/// element. Gears are covered goal names, ends_in is "in Xh/d".
+#[derive(Debug, Clone)]
+pub struct ResurgenceView {
+    pub contact: String,
+    pub location: String,
+    pub ends_in: String,
+    pub gears: Vec<String>,
+    pub currency: String,
+}
+
+/// Live trader window: vendor + location + closing countdown.
+#[derive(Debug, Clone)]
+pub struct BaroView {
+    pub vendor: String,
+    pub location: String,
+    pub ends_in: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1439,6 +1479,9 @@ pub fn plan(input: &PlanInput<'_>) -> Plan {
     let cards = goal_cards_for(input, &active);
     let focus = pick_focus(&cards, input.relics, input.tuning);
     let (chunks, farms, notes) = build_chunks(input, &cards, &pruned, &focus);
+    let (event_alerts, lotus_alerts) = donow_alerts(input);
+    let resurgence = donow_resurgence(input, &cards);
+    let baro = donow_baro(input);
     Plan {
         goals: cards,
         chunks,
@@ -1446,6 +1489,86 @@ pub fn plan(input: &PlanInput<'_>) -> Plan {
         farms,
         notes,
         focus,
+        event_alerts,
+        lotus_alerts,
+        resurgence,
+        baro,
+    }
+}
+
+/// Do Now §§a–b: split live alerts into time-limited event alerts
+/// (counted payouts) and a separate gift section. Each hides when
+/// empty; the countdowns (not prose) are the content.
+fn donow_alerts(input: &PlanInput<'_>) -> (Vec<AlertView>, Vec<AlertView>) {
+    let mut events = Vec::new();
+    let mut lotus = Vec::new();
+    for alert in &input.world.alerts {
+        let expiry = match parse_time(&alert.expiry) {
+            Some(t) if t > input.now => t,
+            _ => continue,
+        };
+        let payout: Vec<String> = alert
+            .mission
+            .counted_items()
+            .iter()
+            .map(|c| format!("{}× {}", c.count, c.kind))
+            .collect();
+        let view = AlertView {
+            node: alert.mission.node.clone(),
+            mission_type: alert.mission.mission_type.clone(),
+            payout: payout.join(", "),
+            left: mins_left_label(input.now, expiry),
+        };
+        if alert.is_lotus() {
+            lotus.push(view);
+        } else if alert.is_event() {
+            events.push(view);
+        }
+    }
+    (events, lotus)
+}
+
+/// Do Now §d: first-class rotation element — live rotation window
+/// intersected with his unmastered vaulted items. None when the
+/// rotation covers nothing of his (the showcase hides, not an empty
+/// box).
+fn donow_resurgence(input: &PlanInput<'_>, cards: &[GoalCard]) -> Option<ResurgenceView> {
+    let vt = input.world.vault_trader.as_ref()?;
+    let mut gears: Vec<String> = cards
+        .iter()
+        .filter(|g| g.resurgence_live)
+        .map(|g| g.gear.clone())
+        .collect();
+    gears.sort();
+    if gears.is_empty() {
+        return None;
+    }
+    Some(ResurgenceView {
+        contact: input.tuning.planner.resurgence.contact.clone(),
+        location: vt.location.clone(),
+        ends_in: days_until(input.now, &vt.expiry, input.tuning),
+        gears,
+        currency: input.tuning.planner.resurgence.currency.clone(),
+    })
+}
+
+/// Pass-4 trader section: the live trader window, if any.
+fn donow_baro(input: &PlanInput<'_>) -> Option<BaroView> {
+    let live = input.world.active_trader(&input.now)?;
+    Some(BaroView {
+        vendor: input.tuning.planner.vendor.name.clone(),
+        location: live.location.clone(),
+        ends_in: days_until(input.now, &live.expiry, input.tuning),
+    })
+}
+
+/// "25m" / "1h05m" countdown label for a live expiry.
+fn mins_left_label(now: DateTime<Utc>, expiry: DateTime<Utc>) -> String {
+    let mins = (expiry - now).num_seconds() / 60;
+    if mins >= 60 {
+        format!("{}h{:02}m", mins / 60, mins % 60)
+    } else {
+        format!("{mins}m")
     }
 }
 
@@ -1890,5 +2013,107 @@ mod tests {
         assert_eq!(a.chunks.len(), b.chunks.len());
         assert_eq!(a.goals.len(), b.goals.len());
         assert_eq!(a.goals[0].action.text, b.goals[0].action.text);
+    }
+
+    fn syn_alert(
+        id: &str,
+        tag: &str,
+        desc: &str,
+        expiry: &str,
+        counted: bool,
+    ) -> crate::model::Alert {
+        use crate::model::{Alert, AlertMission, AlertReward, CountedItem};
+        Alert {
+            id: id.to_owned(),
+            tag: tag.to_owned(),
+            expiry: expiry.to_owned(),
+            mission: AlertMission {
+                description: desc.to_owned(),
+                node: "Nimus (Eris)".to_owned(),
+                mission_type: "Survival".to_owned(),
+                reward: AlertReward {
+                    counted_items: if counted {
+                        vec![CountedItem {
+                            unique_name: "u".to_owned(),
+                            kind: "Event Resource".to_owned(),
+                            count: 50,
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn donow_views_split_alerts_and_gate_trader() {
+        // Pass 4: event vs gift sections split on the feed; the trader
+        // view follows the live window (list shape included).
+        let tables = mini_tables();
+        let roster = mini_roster();
+        let now: DateTime<Utc> = "2026-10-16T02:55:00Z".parse().unwrap();
+        let mut world = WorldState {
+            alerts: vec![
+                syn_alert("e1", "RoadToTauEvent", "Event Alert Title", "2026-10-16T03:00:00Z", true),
+                syn_alert("g1", "GiftOfTheLotus", "Gift of the Lotus", "2026-10-16T05:00:00Z", false),
+                syn_alert("x1", "Expired", "Old Alert", "2026-10-15T00:00:00Z", true),
+            ],
+            baro: None,
+            void_traders: vec![crate::model::VoidTrader {
+                activation: "2026-10-16T13:00:00Z".to_owned(),
+                expiry: "2026-10-18T13:00:00Z".to_owned(),
+                location: "Orcus Relay (Pluto)".to_owned(),
+                active: false,
+            }],
+            ..Default::default()
+        };
+        let owned = OwnedEquipment::empty();
+        let stock = RelicStock::Unknown;
+        let wants = vec!["Khora Prime Blueprint".to_owned()];
+        let pins: Vec<String> = Vec::new();
+        let recent: HashSet<String> = HashSet::new();
+        let t = tuning();
+        let p = plan(&PlanInput {
+            now,
+            world: &world,
+            owned: &owned,
+            wants: &wants,
+            roster: &roster,
+            relics: &tables,
+            stock: &stock,
+            pins: &pins,
+            recent_gear: &recent,
+            steel_path_tiebreak: true,
+            tuning: &t,
+        });
+        assert_eq!(p.event_alerts.len(), 1, "expired alert drops out");
+        assert_eq!(p.event_alerts[0].left, "5m");
+        assert!(p.event_alerts[0].payout.contains("50×"));
+        assert_eq!(p.lotus_alerts.len(), 1);
+        assert_eq!(p.lotus_alerts[0].node, "Nimus (Eris)");
+        assert!(p.baro.is_none(), "window opens 13:00 — hidden at 02:55");
+        // Mid-window the same world shows the trader (list shape).
+        let noon: DateTime<Utc> = "2026-10-17T12:00:00Z".parse().unwrap();
+        world.alerts.clear();
+        let q = plan(&PlanInput {
+            now: noon,
+            world: &world,
+            owned: &owned,
+            wants: &wants,
+            roster: &roster,
+            relics: &tables,
+            stock: &stock,
+            pins: &pins,
+            recent_gear: &recent,
+            steel_path_tiebreak: true,
+            tuning: &t,
+        });
+        assert!(q.event_alerts.is_empty() && q.lotus_alerts.is_empty());
+        let b = q.baro.expect("trader live mid-window");
+        assert_eq!(b.location, "Orcus Relay (Pluto)");
+        assert!(!b.ends_in.is_empty());
     }
 }

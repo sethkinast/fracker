@@ -15,6 +15,20 @@ the live world-state API (`api.warframestat.us/pc/`, sampled
 - **(c)** — checkbox-only: no clean source can prove completion
   (vendor purchases, orbiter interactions, personal progress).
 
+## Tracked subset — pass-4 slimming (2026-10-16)
+
+`data/weeklies.toml` IS the tracked list (16 entries): Archon Hunt,
+Netracells, Deep + Temporal Archimedea, both Circuit tracks,
+Descendia, Kahl, 1999 Calendar, Palladino, Acrithis, Yonta, Bird 3,
+Chipper, Clem + Maroo (last, least important). Everything below in
+this file remains the research record; only the TOML renders.
+
+Cut, per addendum #27: Nightwave (own section now — no duplication),
+Conclave, Clan, Teshin (rotating item + evergreen caps), Helminth,
+and the NW-creds row (dropped outright, not tracked). Baro left the
+box for his own section, rendered only while a void trader is live
+in world state — gone when he leaves.
+
 ## Summary table
 
 | # | Item | Limit | ~Time | Observable via |
