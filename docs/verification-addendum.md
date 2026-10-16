@@ -203,7 +203,7 @@ it refines the brief where they disagree. For the next worker pass.
     capture class as relics/parts) in the runnable-here phase.
     Until then, Seth's debriefs are the stopgap — labeled as
     such, never silently presented as data-derived.
-36. **EE.log is UNLINKED and recreated every session (Seth,
+35. **EE.log is UNLINKED and recreated every session (Seth,
     confirmed 2026-10-16).** The live watch must NOT be a naive
     timer-poll or path-tail: the final lines of a session (the
     mission-end picks!) can be lost when the file is replaced.
