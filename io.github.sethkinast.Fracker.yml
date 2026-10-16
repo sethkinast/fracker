@@ -97,6 +97,9 @@ modules:
       - install -Dm644 flatpak/io.github.sethkinast.Fracker.desktop /app/share/applications/io.github.sethkinast.Fracker.desktop
       - install -Dm644 flatpak/io.github.sethkinast.Fracker.metainfo.xml /app/share/metainfo/io.github.sethkinast.Fracker.metainfo.xml
       - install -Dm644 flatpak/io.github.sethkinast.Fracker.svg /app/share/icons/hicolor/scalable/apps/io.github.sethkinast.Fracker.svg
+      # Autostart template (§5): the user copies/symlinks it into
+      # ~/.config/autostart/, or adds Fracker via KDE System Settings.
+      - install -Dm644 flatpak/io.github.sethkinast.Fracker.autostart.desktop /app/share/fracker/io.github.sethkinast.Fracker.autostart.desktop
       - mkdir -p /app/share/fracker
       - cp -r data /app/share/fracker/data
     sources:

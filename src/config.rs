@@ -123,6 +123,19 @@ pub fn cache_dir() -> PathBuf {
         .join("fracker")
 }
 
+/// The resident report page's home (seventh pass §3): the app data dir
+/// (`$XDG_DATA_HOME/fracker/plan.html`, or the Flatpak equivalent). The
+/// tray's "Open plan page" opens exactly this file.
+pub fn report_file() -> PathBuf {
+    data_dir().join("plan.html")
+}
+
+/// Single-instance lock file (seventh pass §1), in the app data dir so
+/// it survives across logins and is per-user.
+pub fn instance_lock_file() -> PathBuf {
+    data_dir().join("resident.lock")
+}
+
 /// EE.log discovery table (`data/paths.toml`, sixth pass §3). The
 /// Steam/Proton default is data, not code: roots + tail live here so the
 /// Flatpak manifest and the runtime share one source.

@@ -171,6 +171,23 @@ fn desktop_and_metainfo_carry_the_app_id() {
 }
 
 #[test]
+fn autostart_entry_ships_and_is_bundled() {
+    // Seventh pass §5: the resident can be autostarted. The entry is a
+    // real desktop file with the autostart marker, and the manifest
+    // bundles it (installed under /app/share/fracker).
+    let entry = read(&format!("flatpak/{APP_ID}.autostart.desktop"));
+    assert!(entry.starts_with("[Desktop Entry]"));
+    assert!(entry.contains("X-GNOME-Autostart-enabled=true"));
+    assert!(entry.contains("NoDisplay=true"));
+    assert!(entry.contains("Exec=fracker"));
+    let manifest = read("io.github.sethkinast.Fracker.yml");
+    assert!(
+        manifest.contains(&format!("{APP_ID}.autostart.desktop")),
+        "manifest must bundle the autostart entry"
+    );
+}
+
+#[test]
 fn workflow_dispatches_and_attaches_a_single_bundle() {
     let wf = read(".github/workflows/flatpak.yml");
     assert!(wf.contains("workflow_dispatch:"));
