@@ -15,7 +15,7 @@ use crate::plan::Plan;
 pub struct RenderContext<'a> {
     pub world: &'a WorldState,
     pub generated_label: String,
-    /// e.g. "seed (Xuerian token not set — targets may go stale)".
+    /// e.g. "backlog 64 primes · live profile".
     pub targets_status: String,
     pub world_status: String,
     /// Weekly item id -> completion label proven by the log.
@@ -23,6 +23,32 @@ pub struct RenderContext<'a> {
     /// Plan/challenge ids the log proves complete (struck-through).
     pub proven_done: &'a HashSet<String>,
     pub mastery_rank: Option<u32>,
+    /// Parent gear name -> WFCD `imageName` (addendum #14).
+    pub icons: &'a HashMap<String, String>,
+    /// Non-prime unmastered gear by category (list only, no routing).
+    pub backlog_categories: &'a HashMap<String, Vec<String>>,
+    pub daily: Option<DailyRender>,
+    pub pack: Option<PackRender>,
+}
+
+/// Profile-backed daily bars: REMAINING caps from the live profile
+/// (addendum #2) — never estimated.
+pub struct DailyRender {
+    pub affiliation_remaining: u32,
+    pub affiliation_cap: u32,
+    pub focus_remaining: u32,
+    pub focus_cap: u32,
+    /// Per-family `DailyAffiliation*` remaining, sorted by family.
+    pub families: Vec<(String, u32)>,
+}
+
+/// Taubound pack strip for the page (pack v1, expires 2026-11-17).
+pub struct PackRender {
+    pub live: bool,
+    pub expires_label: String,
+    /// Community-goal `health` on the Road To Tau event entry.
+    pub contegorus_health: Option<f64>,
+    pub arcane_line: String,
 }
 
 pub struct WeeklyItem {
@@ -35,32 +61,33 @@ pub struct WeeklyItem {
 
 /// All 24 tracked weeklies (WEEKLIES.md). Clem and Maroo are LAST —
 /// least important, "just there if you're passing by" (BRIEF §4.2).
+/// Copy is terse: labels, limits, times, 1-2 word sources.
 pub fn weekly_board() -> Vec<WeeklyItem> {
     vec![
-        WeeklyItem { id: "archon", name: "Archon Hunt", limit: "1 clear/wk", time: "30–45m", obs: "missions in world state; completion from log" },
-        WeeklyItem { id: "netra", name: "Netracells", limit: "5 Search Pulses/wk (shared)", time: "10–15m each", obs: "pulses tracked by ledger; rest manual" },
-        WeeklyItem { id: "deep", name: "Deep Archimedea (+Elite)", limit: "rewards 1×/wk, 2 pulses", time: "30–45m", obs: "missions in world state; completion manual" },
-        WeeklyItem { id: "temp", name: "Temporal Archimedea (+Elite)", limit: "rewards 1×/wk, 2 pulses", time: "30–45m", obs: "missions in world state; completion manual" },
-        WeeklyItem { id: "circuit", name: "The Circuit — Normal", limit: "1 reward track/wk", time: "1.5–2h to Tier 10", obs: "manual" },
-        WeeklyItem { id: "circuit-sp", name: "The Circuit — Steel Path", limit: "2 Incarnon picks/wk", time: "1.5–2.5h", obs: "manual" },
-        WeeklyItem { id: "descendia", name: "Descendia (Normal + SP)", limit: "10 rewards per difficulty/wk", time: "45–90m each", obs: "seed in world state; completion manual" },
-        WeeklyItem { id: "kahl", name: "Break Narmer (Kahl)", limit: "1 mission set/wk, ≤115 Stock", time: "15–25m", obs: "manual" },
-        WeeklyItem { id: "nw-weekly", name: "Nightwave weekly + elite acts", limit: "5 weekly + 2 elite/wk", time: "mostly passive", obs: "act list in world state; completion manual" },
-        WeeklyItem { id: "cal1999", name: "1999 Calendar weekly page", limit: "1 page/wk", time: "passive", obs: "page in world state; completion manual" },
-        WeeklyItem { id: "clan", name: "Clan Weekly Initiative", limit: "4 tiers/wk (clan-wide)", time: "passive", obs: "region in world state; claims manual" },
-        WeeklyItem { id: "conclave", name: "Conclave weekly challenges", limit: "3 + bonus/wk — Fri reset", time: "varies", obs: "list in world state; completion manual" },
-        WeeklyItem { id: "teshin-rot", name: "Teshin — featured item", limit: "1/wk", time: "2m", obs: "rotation in world state; purchase manual" },
-        WeeklyItem { id: "teshin-cap", name: "Teshin — evergreen caps", limit: "cipher 1/wk; Kuva/Relic ×25", time: "2m", obs: "stock in world state; purchases manual" },
-        WeeklyItem { id: "palladino", name: "Palladino (Iron Wake)", limit: "each ware 1/wk", time: "2m", obs: "manual" },
-        WeeklyItem { id: "acrithis", name: "Acrithis weekly wares", limit: "5 wares, 1 each/wk — Sun reset", time: "2m", obs: "manual" },
-        WeeklyItem { id: "yonta", name: "Archimedean Yonta — Forma", limit: "3/wk", time: "2m", obs: "manual" },
-        WeeklyItem { id: "bird3", name: "Bird 3 — Archon Shard", limit: "1/wk", time: "2m", obs: "manual" },
-        WeeklyItem { id: "chipper", name: "Chipper — Archon Shard", limit: "1/wk (Rank 5)", time: "2m", obs: "manual" },
-        WeeklyItem { id: "helminth", name: "Helminth Invigoration", limit: "3 frames/wk", time: "2m", obs: "manual" },
-        WeeklyItem { id: "nw-shop", name: "Nightwave Cred Offerings", limit: "rotation/wk", time: "2m", obs: "manual" },
-        WeeklyItem { id: "baro", name: "Baro Ki'Teer", limit: "biweekly Fri–Sun", time: "5m", obs: "schedule + inventory in world state" },
-        WeeklyItem { id: "clem", name: "Help Clem (Darvo)", limit: "1/wk", time: "~10m", obs: "manual — passing by only" },
-        WeeklyItem { id: "maroo", name: "Ayatan Treasure Hunt (Maroo)", limit: "1 sculpture/wk", time: "~5m", obs: "manual — passing by only" },
+        WeeklyItem { id: "archon", name: "Archon Hunt", limit: "1/wk", time: "30–45m", obs: "log" },
+        WeeklyItem { id: "netra", name: "Netracells", limit: "5 pulses shared", time: "10–15m", obs: "ledger" },
+        WeeklyItem { id: "deep", name: "Deep Archimedea", limit: "1×/wk · 2 pulses", time: "30–45m", obs: "manual" },
+        WeeklyItem { id: "temp", name: "Temporal Archimedea", limit: "1×/wk · 2 pulses", time: "30–45m", obs: "manual" },
+        WeeklyItem { id: "circuit", name: "Circuit", limit: "1 track/wk", time: "1.5–2h", obs: "manual" },
+        WeeklyItem { id: "circuit-sp", name: "Circuit SP", limit: "2 picks/wk", time: "1.5–2.5h", obs: "manual" },
+        WeeklyItem { id: "descendia", name: "Descendia N/SP", limit: "10 each/wk", time: "45–90m", obs: "manual" },
+        WeeklyItem { id: "kahl", name: "Kahl", limit: "1 set/wk · 115 Stock", time: "15–25m", obs: "manual" },
+        WeeklyItem { id: "nw-weekly", name: "Nightwave", limit: "5+2/wk", time: "passive", obs: "acts live" },
+        WeeklyItem { id: "cal1999", name: "1999 Calendar", limit: "1 page/wk", time: "passive", obs: "manual" },
+        WeeklyItem { id: "clan", name: "Clan Initiative", limit: "4 tiers/wk", time: "passive", obs: "manual" },
+        WeeklyItem { id: "conclave", name: "Conclave", limit: "3+bonus · Fri", time: "—", obs: "manual" },
+        WeeklyItem { id: "teshin-rot", name: "Teshin item", limit: "1/wk", time: "2m", obs: "world state" },
+        WeeklyItem { id: "teshin-cap", name: "Teshin caps", limit: "cipher 1 · Kuva/relic 25", time: "2m", obs: "manual" },
+        WeeklyItem { id: "palladino", name: "Palladino", limit: "1 ea/wk", time: "2m", obs: "manual" },
+        WeeklyItem { id: "acrithis", name: "Acrithis", limit: "5 wares · Sun", time: "2m", obs: "manual" },
+        WeeklyItem { id: "yonta", name: "Yonta Forma", limit: "3/wk", time: "2m", obs: "manual" },
+        WeeklyItem { id: "bird3", name: "Bird 3 shard", limit: "1/wk", time: "2m", obs: "manual" },
+        WeeklyItem { id: "chipper", name: "Chipper shard", limit: "1/wk R5", time: "2m", obs: "manual" },
+        WeeklyItem { id: "helminth", name: "Helminth", limit: "3 frames/wk", time: "2m", obs: "manual" },
+        WeeklyItem { id: "nw-shop", name: "NW Creds", limit: "rotation/wk", time: "2m", obs: "manual" },
+        WeeklyItem { id: "baro", name: "Baro", limit: "biweekly F–S", time: "5m", obs: "world state" },
+        WeeklyItem { id: "clem", name: "Clem", limit: "1/wk", time: "~10m", obs: "passing by" },
+        WeeklyItem { id: "maroo", name: "Maroo", limit: "1/wk", time: "~5m", obs: "passing by" },
     ]
 }
 
@@ -115,14 +142,33 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     ));
     h.push_str("</header>\n");
 
-    // ---- 1. do now ----
-    // Exactly ONE loud element (the current instruction); the rest of
-    // the expiring band renders quieter underneath (§19).
-    h.push_str("<section><h2>Do now</h2>\n");
+    // ---- tabs: Do Now (≤3-part slate) / Hunt (all primes) / Backlog (all gear) ----
+    h.push_str("<div class=\"tabs\">\n");
+    h.push_str("<input type=\"radio\" name=\"tab\" id=\"tab-donow\" checked><label class=\"tab\" for=\"tab-donow\">Do Now</label>\n");
+    h.push_str("<input type=\"radio\" name=\"tab\" id=\"tab-hunt\"><label class=\"tab\" for=\"tab-hunt\">Hunt</label>\n");
+    h.push_str("<input type=\"radio\" name=\"tab\" id=\"tab-backlog\"><label class=\"tab\" for=\"tab-backlog\">Backlog</label>\n");
+
+    // ---- tab 1: do now ----
+    // Exactly ONE loud element (the current instruction); everything
+    // else on the page stays quiet. Crack chunks pursue only the
+    // ≤3 focus parts.
+    h.push_str("<div class=\"tabpage\" id=\"page-donow\">\n<section><h2>Do now</h2>\n");
+    if !plan.focus.is_empty() {
+        h.push_str("<div class=\"focus\">\n");
+        for f in &plan.focus {
+            h.push_str(&format!(
+                "<span class=\"focus-part\">{} · {} · {}</span>\n",
+                esc(&f.part),
+                esc(&f.gear),
+                esc(&f.era),
+            ));
+        }
+        h.push_str("</div>\n");
+    }
     let top: Vec<&crate::plan::Chunk> =
         plan.chunks.iter().filter(|c| c.tier == 1).collect();
     if top.is_empty() {
-        h.push_str("<div class=\"card quiet\">Nothing expiring right now. Work the hunt below.</div>\n");
+        h.push_str("<div class=\"card quiet\">Nothing expiring.</div>\n");
     } else {
         let first = top[0];
         h.push_str(&format!(
@@ -144,14 +190,11 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
             h.push_str("</div>\n");
         }
     }
-    h.push_str("</section>\n");
-
-    // ---- 2. the hunt ----
-    h.push_str("<section><h2>The hunt</h2>\n");
+    // slate chunks (quiet rows)
     let slate: Vec<&crate::plan::Chunk> =
         plan.chunks.iter().filter(|c| c.tier == 2 || c.tier == 3).collect();
     if slate.is_empty() {
-        h.push_str("<div class=\"card quiet\">No live crack matches. Cards below show farm or parked state.</div>\n");
+        h.push_str("<div class=\"card quiet\">No live cracks.</div>\n");
     } else {
         h.push_str("<div class=\"slate\">\n");
         for c in &slate {
@@ -169,17 +212,74 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
         }
         h.push_str("</div>\n");
     }
-    // goal cards
-    h.push_str("<div class=\"goals\">\n");
-    for g in &plan.goals {
-        h.push_str(&goal_card_html(g, ctx));
-    }
-    h.push_str("</div>\n</section>\n");
+    h.push_str("</section>\n</div>\n");
 
-    // ---- 3. farms ----
+    // ---- tab 2: hunt (fan-out over all prime goal cards) ----
+    h.push_str("<div class=\"tabpage\" id=\"page-hunt\">\n<section><h2>Hunt</h2>\n");
+    h.push_str(&format!(
+        "<div class=\"backlog-head\">{} goals · {} parts</div>\n",
+        plan.goals.len(),
+        plan.goals.iter().map(|g| g.wants.len()).sum::<usize>(),
+    ));
+    h.push_str("<div class=\"backlog\">\n");
+    for g in &plan.goals {
+        h.push_str(&backlog_group_html(g, ctx));
+    }
+    h.push_str("</div>\n");
+    h.push_str("</section>\n</div>\n");
+
+    // ---- tab 3: backlog (everything unmastered, all gear) ----
+    h.push_str("<div class=\"tabpage\" id=\"page-backlog\">\n<section><h2>Backlog</h2>\n");
+    h.push_str("<div class=\"backlog\">\n");
+    for g in &plan.goals {
+        h.push_str(&backlog_compact_html(g, ctx));
+    }
+    h.push_str("</div>\n");
+    // non-prime unmastered gear, grouped by category (list only —
+    // no farm routing this pass).
+    if !ctx.backlog_categories.is_empty() {
+        h.push_str("<h3 class=\"nonprime-h\">Non-prime</h3>\n<div class=\"nonprime\">\n");
+        let mut cats: Vec<(&String, &Vec<String>)> = ctx.backlog_categories.iter().collect();
+        cats.sort_by(|a, b| a.0.cmp(b.0));
+        for (cat, items) in cats {
+            if cat == "Primes" || items.is_empty() {
+                continue;
+            }
+            let mut sorted = items.clone();
+            sorted.sort();
+            h.push_str(&format!(
+                "<div class=\"npcat\"><span class=\"npcat-name\">{} · {}</span><span class=\"npcat-items\">{}</span></div>\n",
+                esc(cat),
+                sorted.len(),
+                sorted.iter().map(|i| esc(i)).collect::<Vec<_>>().join(", "),
+            ));
+        }
+        h.push_str("</div>\n");
+    }
+    h.push_str("</section>\n</div>\n</div>\n");
+
+    // ---- Taubound strip (pack v1) ----
+    if let Some(pack) = &ctx.pack {
+        if pack.live {
+            h.push_str("<section><h2>Taubound</h2>\n");
+            let health = match pack.contegorus_health {
+                Some(v) => format!("Road To Tau {:.2}", v),
+                None => "Road To Tau —".to_owned(),
+            };
+            h.push_str(&format!(
+                "<div class=\"card tau\"><span class=\"tau-line\">Moonflesh 50 / 75 SP · ends {}</span><span class=\"tau-line\">Contegorus gated · {}</span><span class=\"tau-line\">{}</span></div>\n",
+                esc(&pack.expires_label),
+                esc(&health),
+                esc(&pack.arcane_line),
+            ));
+            h.push_str("</section>\n");
+        }
+    }
+
+    // ---- farms ----
     h.push_str("<section><h2>Farms</h2>\n");
     if plan.farms.is_empty() {
-        h.push_str("<div class=\"card quiet\">No relic farms targeted — every current want sits in vaulted relics (crack-or-park). Sourcing activates for current-rotation goals.</div>\n");
+        h.push_str("<div class=\"card quiet\">No farms — vaulted wants are crack-or-park.</div>\n");
     } else {
         for f in &plan.farms {
             h.push_str(&format!(
@@ -201,7 +301,7 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     h.push_str("<section><h2>Nightwave</h2>\n");
     match &ctx.world.nightwave {
         Some(nw) if !nw.active_challenges.is_empty() => {
-            h.push_str(&format!("<div class=\"nw-season\">Season {} — acts below, never a standing total (unobservable).</div>\n", nw.season));
+            h.push_str(&format!("<div class=\"nw-season\">Season {} — acts, never a standing total.</div>\n", nw.season));
             h.push_str("<div class=\"nw-grid\">\n");
             for a in &nw.active_challenges {
                 let tag = if a.is_daily { "daily" } else if a.is_elite { "elite" } else { "weekly" };
@@ -217,7 +317,7 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
                 ));
             }
             h.push_str("</div>\n");
-            h.push_str("<div class=\"caveat\">World-state acts are a floor: Recovered backfill can exceed this list. Unmapped acts render display-only.</div>\n");
+            h.push_str("<div class=\"caveat\">Acts are a floor — Recovered backfill can exceed this list.</div>\n");
         }
         _ => {
             h.push_str("<div class=\"card quiet\">No Nightwave season live in world state.</div>\n");
@@ -247,36 +347,69 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     }
     h.push_str("</div>\n</section>\n");
 
-    // ---- 6. today's bars ----
-    h.push_str("<section><h2>Today&apos;s bars</h2>\n<div class=\"bars\">\n");
-    let (focus_cap, stand_cap) = match ctx.mastery_rank {
-        Some(mr) => (
-            format!("{:}", 250_000 + 5_000 * mr),
-            format!("{:}", 16_000 + 500 * mr),
-        ),
-        None => ("250,000 + 5,000 × MR".to_owned(), "16,000 + 500 × MR".to_owned()),
-    };
-    h.push_str(&format!(
-        "<div class=\"card bar\"><div class=\"bar-name\">Focus cap <span class=\"est\">estimate</span></div>\n<div class=\"bar-track\"><div class=\"bar-fill\" style=\"width:0%\"></div></div>\n<div class=\"bar-meta\">daily cap {focus_cap} — progress unobservable from clean sources; best farm route lands with the focus spike</div></div>\n"
-    ));
-    h.push_str(&format!(
-        "<div class=\"card bar\"><div class=\"bar-name\">Syndicate standing <span class=\"est\">estimate</span></div>\n<div class=\"bar-track\"><div class=\"bar-fill\" style=\"width:0%\"></div></div>\n<div class=\"bar-meta\">daily cap {stand_cap} — measured vs estimated depends on the §7.5 fixture check; shown as estimate until then</div></div>\n"
-    ));
+    // ---- 6. today's bars (profile REMAINING values, never estimated) ----
+    h.push_str("<section><h2>Today</h2>\n<div class=\"bars\">\n");
+    match &ctx.daily {
+        Some(d) => {
+            let focus_pct = (100.0 * (1.0 - d.focus_remaining as f64 / d.focus_cap as f64))
+                .clamp(0.0, 100.0);
+            let aff_pct = (100.0
+                * (1.0 - d.affiliation_remaining as f64 / d.affiliation_cap as f64))
+            .clamp(0.0, 100.0);
+            h.push_str(&format!(
+                "<div class=\"card bar\"><div class=\"bar-name\">Focus · {} / {} left</div>\n<div class=\"bar-track\"><div class=\"bar-fill\" style=\"width:{:.0}%\"></div></div></div>\n",
+                fmt_int(d.focus_remaining),
+                fmt_int(d.focus_cap),
+                focus_pct,
+            ));
+            h.push_str(&format!(
+                "<div class=\"card bar\"><div class=\"bar-name\">Standing · {} / {} left</div>\n<div class=\"bar-track\"><div class=\"bar-fill\" style=\"width:{:.0}%\"></div></div></div>\n",
+                fmt_int(d.affiliation_remaining),
+                fmt_int(d.affiliation_cap),
+                aff_pct,
+            ));
+            if !d.families.is_empty() {
+                let fams: Vec<String> = d
+                    .families
+                    .iter()
+                    .map(|(k, v)| format!("{} {}", short_family(k), fmt_int(*v)))
+                    .collect();
+                h.push_str(&format!(
+                    "<div class=\"card quiet fam\">{}</div>\n",
+                    esc(&fams.join(" · ")),
+                ));
+            }
+        }
+        None => {
+            let (focus_cap, stand_cap) = match ctx.mastery_rank {
+                Some(mr) => (
+                    fmt_int(250_000 + 5_000 * mr),
+                    fmt_int(16_000 + 500 * mr),
+                ),
+                None => ("250k + 5k × MR".to_owned(), "16k + 500 × MR".to_owned()),
+            };
+            h.push_str(&format!(
+                "<div class=\"card quiet\">Focus cap {focus_cap} · Standing cap {stand_cap} — profile offline.</div>\n"
+            ));
+        }
+    }
     let sortie_done = ctx.weekly_done.contains_key("sortie-daily");
     h.push_str(&format!(
-        "<label class=\"card bar\"><input type=\"checkbox\" data-id=\"sortie-daily\"{}>\n<span class=\"bar-name\">Sortie done/not</span>\n<span class=\"bar-meta\">daily reset 17:00 UTC{}</span></label>\n",
+        "<label class=\"card bar\"><input type=\"checkbox\" data-id=\"sortie-daily\"{}>\n<span class=\"bar-name\">Sortie</span>\n<span class=\"bar-meta\">daily 17:00 UTC{}</span></label>\n",
         if sortie_done { " checked" } else { "" },
-        if sortie_done { " &middot; proven by log" } else { "" },
+        if sortie_done { " · log" } else { "" },
     ));
     h.push_str("</div>\n</section>\n");
 
     // ---- footer: targets snapshot ----
     let total_wants: usize = plan.goals.iter().map(|g| g.wants.len()).sum();
-    h.push_str("<footer><section><h2>Targets snapshot</h2>\n");
+    let live_resurg = plan.goals.iter().filter(|g| g.resurgence_live).count();
+    h.push_str("<footer><section><h2>Targets</h2>\n");
     h.push_str(&format!(
-        "<div class=\"card snap\">{} wants remaining across {} goals. Completed this week: shown via log proofs as they land.</div>\n",
+        "<div class=\"card snap\">{} goals · {} parts · {} Varzia-live</div>\n",
+        plan.goals.len(),
         total_wants,
-        plan.goals.len()
+        live_resurg,
     ));
     h.push_str("</section></footer>\n");
 
@@ -287,26 +420,36 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     h
 }
 
-fn goal_card_html(g: &crate::plan::GoalCard, ctx: &RenderContext<'_>) -> String {
+/// One parent group: icon + gear + pips, then aligned part rows
+/// (part | best relic + tier chance | stock | expected cracks).
+/// The icon is the PARENT ITEM's WFCD icon (addendum #14) — a prime
+/// part never shows a generic part icon. Unresolved items keep the
+/// monogram.
+fn backlog_group_html(g: &crate::plan::GoalCard, ctx: &RenderContext<'_>) -> String {
     let mut h = String::new();
     let initial = g.gear.chars().next().unwrap_or('?');
-    h.push_str("<article class=\"card goal\">\n");
-    h.push_str(&format!(
-        "<div class=\"goal-head\"><span class=\"portrait\" aria-hidden=\"true\">{initial}</span>\n<span class=\"goal-titles\"><span class=\"goal-name\">{name}</span>\n<span class=\"goal-sub\">",
-        initial = initial,
-        name = esc(&g.gear),
-    ));
+    let icon = crate::model::icon_url(&g.gear, ctx.icons);
+    h.push_str("<article class=\"card bgroup\">\n");
+    h.push_str("<div class=\"bhead\">");
+    match &icon {
+        Some(url) => h.push_str(&format!(
+            "<span class=\"portrait has-icon\"><img src=\"{}\" alt=\"\" loading=\"lazy\" onerror=\"this.remove()\">{initial}</span>",
+            esc(url),
+            initial = initial,
+        )),
+        None => h.push_str(&format!(
+            "<span class=\"portrait\" aria-hidden=\"true\">{initial}</span>",
+            initial = initial,
+        )),
+    }
+    h.push_str(&format!("<span class=\"bname\">{}</span>", esc(&g.gear)));
     if g.vaulted {
-        h.push_str("<span class=\"vaulted\">VAULTED</span> ");
+        h.push_str("<span class=\"vaulted\">V</span>");
     }
     if g.resurgence_live {
-        h.push_str("<span class=\"resurg\">VARZIA LIVE</span> ");
+        h.push_str("<span class=\"resurg\">VARZIA</span>");
     }
-    h.push_str(&format!(
-        "parts {have}/{total}</span></span>\n<span class=\"pips\" aria-hidden=\"true\">",
-        have = g.parts_have,
-        total = g.parts_total,
-    ));
+    h.push_str("<span class=\"pips\" aria-hidden=\"true\">");
     for p in &g.parts {
         let cls = match p.state {
             crate::plan::PartState::Have => "pip have",
@@ -315,45 +458,43 @@ fn goal_card_html(g: &crate::plan::GoalCard, ctx: &RenderContext<'_>) -> String 
         };
         h.push_str(&format!("<span class=\"{cls}\"></span>"));
     }
-    h.push_str("</span></div>\n");
-    // Part rows.
+    h.push_str(&format!(
+        "</span><span class=\"bcount\">{}/{}</span></div>\n",
+        g.parts_have, g.parts_total,
+    ));
     for p in &g.parts {
-        let state = match p.state {
-            crate::plan::PartState::Have => "have",
-            crate::plan::PartState::Need => "need",
-            crate::plan::PartState::Unknown => "unknown",
-        };
-        h.push_str(&format!(
-            "<div class=\"part\"><span class=\"part-name\">{name}</span>\n<span class=\"part-state {state}\">{state}</span>\n<span class=\"{rclass}\">{odds}</span>\n",
-            name = esc(&p.name),
-            state = state,
-            rclass = rarity_class(p.rarity),
-            odds = esc(&p.best_odds),
-        ));
-        if !p.relics.is_empty() {
-            h.push_str("<span class=\"relic-list\">");
-            let mut shown = 0;
-            for r in &p.relics {
-                if shown >= 5 {
-                    break;
-                }
-                shown += 1;
-                let held = match r.owned {
+        let (relic, tier, stock, cracks) = match &p.deal {
+            Some(d) => (
+                d.relic.clone(),
+                format!("{} {}%", d.refinement, fmt_terse_pct(d.chance)),
+                match d.owned {
                     Some(n) => format!("×{n}"),
                     None => "?".to_owned(),
-                };
-                h.push_str(&format!(
-                    "<span class=\"relic{vaulted}\">{relic} {held}</span> ",
-                    vaulted = if r.vaulted { " is-vaulted" } else { "" },
-                    relic = esc(&r.relic),
-                    held = held,
-                ));
-            }
-            h.push_str("</span>");
-        }
-        h.push_str("</div>\n");
+                },
+                format!("~{:.0}", d.expected),
+            ),
+            None => (
+                "—".to_owned(),
+                "—".to_owned(),
+                "?".to_owned(),
+                "—".to_owned(),
+            ),
+        };
+        h.push_str(&format!(
+            "<div class=\"brow\"><span class=\"bpart\">{}</span><span class=\"brelic{} {}\">{} · {}</span><span class=\"bstock\">{}</span><span class=\"bcracks\">{}</span></div>\n",
+            esc(&short_part(&p.name, &g.gear)),
+            if p.relics.first().map(|r| r.vaulted).unwrap_or(false) {
+                " is-vaulted"
+            } else {
+                ""
+            },
+            rarity_class(p.rarity),
+            esc(&relic),
+            esc(&tier),
+            esc(&stock),
+            esc(&cracks),
+        ));
     }
-    // Action line: the ONE current instruction (pale cyan).
     let kind = match g.action.kind {
         crate::plan::ActionKind::Crack => "crack",
         crate::plan::ActionKind::Resurgence => "resurgence",
@@ -366,9 +507,104 @@ fn goal_card_html(g: &crate::plan::GoalCard, ctx: &RenderContext<'_>) -> String 
         kind = kind,
         text = esc(&g.action.text),
     ));
-    let _ = ctx;
     h.push_str("</article>\n");
     h
+}
+
+/// Compact one-line gear entry for the Backlog tab (everything
+/// unmastered): icon, name, badges, pips, count, action kind.
+fn backlog_compact_html(g: &crate::plan::GoalCard, ctx: &RenderContext<'_>) -> String {
+    let initial = g.gear.chars().next().unwrap_or('?');
+    let icon = crate::model::icon_url(&g.gear, ctx.icons);
+    let mut h = String::new();
+    h.push_str("<div class=\"bline\">");
+    match &icon {
+        Some(url) => h.push_str(&format!(
+            "<span class=\"miniport\"><img src=\"{}\" alt=\"\" loading=\"lazy\" onerror=\"this.remove()\">{initial}</span>",
+            esc(url),
+            initial = initial,
+        )),
+        None => h.push_str(&format!(
+            "<span class=\"miniport\" aria-hidden=\"true\">{initial}</span>",
+            initial = initial,
+        )),
+    }
+    h.push_str(&format!("<span class=\"bname\">{}</span>", esc(&g.gear)));
+    if g.vaulted {
+        h.push_str("<span class=\"vaulted\">V</span>");
+    }
+    if g.resurgence_live {
+        h.push_str("<span class=\"resurg\">VARZIA</span>");
+    }
+    h.push_str("<span class=\"pips\" aria-hidden=\"true\">");
+    for p in &g.parts {
+        let cls = match p.state {
+            crate::plan::PartState::Have => "pip have",
+            crate::plan::PartState::Need => "pip need",
+            crate::plan::PartState::Unknown => "pip unknown",
+        };
+        h.push_str(&format!("<span class=\"{cls}\"></span>"));
+    }
+    h.push_str(&format!(
+        "</span><span class=\"bcount\">{}/{}</span>",
+        g.parts_have, g.parts_total,
+    ));
+    let kind = match g.action.kind {
+        crate::plan::ActionKind::Crack => "crack",
+        crate::plan::ActionKind::Resurgence => "resurgence",
+        crate::plan::ActionKind::WaitFissure => "wait",
+        crate::plan::ActionKind::Farm => "farm",
+        crate::plan::ActionKind::Parked => "parked",
+    };
+    h.push_str(&format!("<span class=\"bkind\">{kind}</span>"));
+    h.push_str("</div>\n");
+    h
+}
+
+/// "Ivara Prime Chassis Blueprint" -> "Chassis" inside its parent group.
+fn short_part(part: &str, gear: &str) -> String {
+    let s = part
+        .strip_prefix(gear)
+        .unwrap_or(part)
+        .trim()
+        .strip_suffix("Blueprint")
+        .unwrap_or(
+            part.strip_prefix(gear)
+                .unwrap_or(part)
+                .trim(),
+        )
+        .trim()
+        .to_owned();
+    if s.is_empty() {
+        part.to_owned()
+    } else {
+        s
+    }
+}
+
+fn fmt_terse_pct(p: f64) -> String {
+    if (p - p.round()).abs() < 1e-9 {
+        format!("{}", p.round() as u32)
+    } else {
+        format!("{p:.2}")
+    }
+}
+
+fn fmt_int(n: u32) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, ch) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
+}
+
+/// "DailyAffiliationCavia" -> "Cavia".
+fn short_family(key: &str) -> &str {
+    key.strip_prefix("DailyAffiliation").unwrap_or(key)
 }
 
 // ---------------------------------------------------------------------------
@@ -485,6 +721,66 @@ section { margin-bottom: 6px; }
 .snap { color: #c9d2de; }
 footer { margin-top: 10px; }
 details.alt { margin-top: 6px; font-size: 13px; color: #7e8898; }
+/* v2 tabs: Do Now vs Backlog (same palette, no new colors) */
+.tabs { margin-top: 8px; }
+.tabs input[name=tab] { display: none; }
+.tab {
+  display: inline-block; padding: 8px 22px; margin-right: 6px; cursor: pointer;
+  font-family: Rajdhani, sans-serif; font-weight: 700; font-size: 15px;
+  letter-spacing: .14em; text-transform: uppercase; color: #7e8898;
+  background: #131824; border: 1px solid #1f2735;
+  clip-path: polygon(7px 0, 100% 0, 100% calc(100% - 7px), calc(100% - 7px) 100%, 0 100%, 0 7px);
+}
+.tabpage { display: none; }
+#tab-donow:checked ~ #page-donow { display: block; }
+#tab-hunt:checked ~ #page-hunt { display: block; }
+#tab-backlog:checked ~ #page-backlog { display: block; }
+#tab-donow:checked ~ label[for=tab-donow] { color: #aee3ef; border-color: #aee3ef; }
+#tab-hunt:checked ~ label[for=tab-hunt] { color: #aee3ef; border-color: #aee3ef; }
+#tab-backlog:checked ~ label[for=tab-backlog] { color: #aee3ef; border-color: #aee3ef; }
+/* do-now focus trio (≤3 parts, terse) */
+.focus { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.focus-part { font-size: 13px; color: #bfa05a; border: 1px solid #bfa05a; padding: 2px 10px; }
+/* backlog compact lines */
+.bline {
+  display: flex; gap: 10px; align-items: center; font-size: 13px;
+  background: #131824; border: 1px solid #1f2735; padding: 5px 10px;
+}
+.miniport {
+  width: 24px; height: 24px; flex: none; display: inline-flex; align-items: center; justify-content: center;
+  font-family: Rajdhani, sans-serif; font-size: 13px; font-weight: 700; color: #bfa05a;
+  background: #0d1117; border: 1px solid #232b38; position: relative; overflow: hidden;
+}
+.miniport img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #0d1117; }
+.bkind { color: #7e8898; font-size: 11px; text-transform: uppercase; letter-spacing: .1em; margin-left: auto; }
+/* backlog: parent groups with aligned part rows */
+.backlog-head { color: #7e8898; font-size: 13px; margin: 2px 0 8px; }
+.backlog { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; }
+.bgroup { margin: 0; }
+.bhead { display: flex; gap: 10px; align-items: center; }
+.bname { font-family: Rajdhani, sans-serif; font-size: 18px; font-weight: 700; }
+.bcount { color: #7e8898; font-size: 12px; margin-left: auto; }
+.brow {
+  display: grid; grid-template-columns: minmax(92px, 1.1fr) minmax(150px, 1.9fr) 44px 44px;
+  gap: 8px; align-items: baseline; padding: 5px 0; border-top: 1px solid #1c2330;
+  font-size: 13px;
+}
+.bpart { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.brelic { color: #7e8898; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.brelic.is-vaulted { opacity: .7; }
+.bstock, .bcracks { text-align: right; color: #c9d2de; font-variant-numeric: tabular-nums; }
+.portrait.has-icon { position: relative; overflow: hidden; }
+.portrait.has-icon img {
+  position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
+  background: #0d1117;
+}
+.nonprime-h { font-size: 12px; letter-spacing: .18em; text-transform: uppercase; color: #7e8898; margin: 18px 0 8px; }
+.nonprime { display: grid; gap: 6px; }
+.npcat { display: flex; gap: 10px; font-size: 13px; background: #131824; border: 1px solid #1f2735; padding: 8px 12px; }
+.npcat-name { color: #bfa05a; font-weight: 600; white-space: nowrap; }
+.npcat-items { color: #7e8898; }
+.tau { display: flex; flex-direction: column; gap: 2px; font-size: 14px; border-color: #bfa05a; }
+.fam { font-size: 12px; }
 "#;
 
 const JS: &str = r#"
@@ -525,6 +821,8 @@ mod tests {
         // Lifetimes: build ctx inline to avoid borrow tangle.
         let weekly: HashMap<String, String> = HashMap::new();
         let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
         let ctx = RenderContext {
             world: &world,
             generated_label: "x".to_owned(),
@@ -533,11 +831,15 @@ mod tests {
             weekly_done: &weekly,
             proven_done: &proven,
             mastery_rank: None,
+            icons: &icons,
+            backlog_categories: &cats,
+            daily: None,
+            pack: None,
         };
         let html = render_plan(&plan, &ctx);
         for section in [
-            "Do now", "The hunt", "Farms", "Nightwave", "This week",
-            "Today", "Targets snapshot",
+            "Do now", "Hunt", "Backlog", "Farms", "Nightwave", "This week",
+            "Today", "Targets",
         ] {
             assert!(html.contains(section), "missing section: {section}");
         }
@@ -546,6 +848,67 @@ mod tests {
         assert!(html.contains("localStorage"), "checkbox persistence");
         assert!(html.contains("Rajdhani"), "game-adjacent type");
         assert!(html.contains("clip-path"), "chamfered cards");
+        // v2 tabs: empty plan has no loud line; all three tabs render.
+        assert!(!html.contains("card donow"), "no loud line without tier-1 chunks");
+        assert!(html.contains("tab-donow") && html.contains("tab-hunt") && html.contains("tab-backlog"), "three tabs");
+    }
+
+    #[test]
+    fn backlog_group_shows_parent_icon_not_part_icon() {
+        use crate::plan::{GoalCard, GoalAction, ActionKind, PartRow, PartState, Rarity};
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> =
+            [("Ivara Prime".to_owned(), "IvaraPrime.png".to_owned())]
+                .into_iter()
+                .collect();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let world = WorldState::default();
+        let ctx = RenderContext {
+            world: &world,
+            generated_label: "x".to_owned(),
+            targets_status: "t".to_owned(),
+            world_status: "w".to_owned(),
+            weekly_done: &weekly,
+            proven_done: &proven,
+            mastery_rank: None,
+            icons: &icons,
+            backlog_categories: &cats,
+            daily: None,
+            pack: None,
+        };
+        let plan = Plan {
+            goals: vec![GoalCard {
+                gear: "Ivara Prime".to_owned(),
+                is_warframe: true,
+                vaulted: true,
+                resurgence_live: true,
+                wants: vec!["Ivara Prime Chassis Blueprint".to_owned()],
+                parts_have: 0,
+                parts_total: 4,
+                parts: vec![PartRow {
+                    name: "Ivara Prime Chassis Blueprint".to_owned(),
+                    state: PartState::Need,
+                    relics: vec![],
+                    best_odds: String::new(),
+                    rarity: Rarity::Rare,
+                    deal: None,
+                }],
+                action: GoalAction {
+                    text: "x".to_owned(),
+                    kind: ActionKind::Resurgence,
+                    relic: None,
+                    score: 0.0,
+                },
+            }],
+            ..Default::default()
+        };
+        let html = render_plan(&plan, &ctx);
+        assert!(
+            html.contains("https://cdn.warframestat.us/img/IvaraPrime.png"),
+            "parent icon URL"
+        );
+        assert!(!html.contains("IvaraPrimeChassis"), "no part icon");
     }
 
     #[test]

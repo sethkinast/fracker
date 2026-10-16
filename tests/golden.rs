@@ -1,44 +1,64 @@
-//! Golden test: recorded live world state (`fixtures/worldstate.json`,
-//! captured 2026-10-15T20:55:06Z from https://api.warframestat.us/pc/)
-//! + the real seed targets (`data/targets.json`, 49 wants) + an EMPTY
-//! profile + UNKNOWN stock.
+//! Golden tests: recorded live world state (`fixtures/worldstate.json`,
+//! captured 2026-10-16T02:51:24Z from https://api.warframestat.us/pc/)
+//! + the reconciled backlog (`data/backlog.json`: 64 unmastered primes,
+//! profile-derived, NOT raw Xuerian wants) + the live profile fixture
+//! (`fixtures/profile-5420fba23846322173707618.json`) + UNKNOWN stock.
 //!
-//! Set FRACKER_REFRESH_FIXTURES=1 to re-record the fixture from the live
-//! API before asserting (network-optional; default runs offline).
+//! Set FRACKER_REFRESH_FIXTURES=1 to re-record the world-state fixture
+//! from the live API before asserting (network-optional; default runs
+//! offline).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
-use fracker::model::{OwnedEquipment, RelicStock, RelicTables, Roster, Targets, WorldState};
+use fracker::model::{
+    Backlog, OwnedEquipment, RelicStock, RelicTables, Roster, WorldState,
+};
 use fracker::plan::{self, ActionKind, PlanInput};
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// Planner "now" just after the fixture capture: fissures expiring
-/// imminently exercise the expiry cascade deterministically.
+/// Planner "now" just after the fixture capture: alerts/fissures
+/// expiring imminently exercise the expiry cascade deterministically.
 fn golden_now() -> DateTime<Utc> {
-    "2026-10-15T21:00:00Z".parse().unwrap()
+    "2026-10-16T02:55:00Z".parse().unwrap()
 }
 
-fn golden_plan_recompute() -> fracker::plan::Plan {
+struct Golden {
+    plan: fracker::plan::Plan,
+    backlog: Backlog,
+}
+
+fn golden_plan_recompute() -> Golden {
     let world_text =
         std::fs::read_to_string(root().join("fixtures/worldstate.json")).unwrap();
     let world = WorldState::from_json(&world_text).unwrap();
-    let seed = std::fs::read_to_string(root().join("data/targets.json")).unwrap();
-    let targets = Targets::from_seed_json(&seed).unwrap();
+    let backlog_text =
+        std::fs::read_to_string(root().join("data/backlog.json")).unwrap();
+    let backlog = Backlog::from_json(&backlog_text).unwrap();
+    let profile_text = std::fs::read_to_string(
+        root().join("fixtures/profile-5420fba23846322173707618.json"),
+    )
+    .unwrap();
+    let snap = fracker::fetch::parse_profile(&profile_text).unwrap();
+    let names_text =
+        std::fs::read_to_string(root().join("data/cache/item-names.json")).unwrap();
+    let names: HashMap<String, String> = serde_json::from_str(&names_text).unwrap();
+    let owned = fracker::fetch::owned_names_from_profile(&snap, &names);
+    let wants = backlog.wants();
     let rel = std::fs::read_to_string(root().join("data/cache/relictables.json")).unwrap();
     let relics = RelicTables::from_json(&rel).unwrap();
     let wish = std::fs::read_to_string(root().join("data/cache/wishlist.json")).unwrap();
     let roster = Roster::from_json(&wish).unwrap();
     // Leak to 'static so the borrowed input is valid for the call.
     let world: &'static WorldState = Box::leak(Box::new(world));
-    let targets: &'static Targets = Box::leak(Box::new(targets));
+    let wants: &'static Vec<String> = Box::leak(Box::new(wants));
     let relics: &'static RelicTables = Box::leak(Box::new(relics));
     let roster: &'static Roster = Box::leak(Box::new(roster));
-    let owned: &'static OwnedEquipment = Box::leak(Box::new(OwnedEquipment::empty()));
+    let owned: &'static OwnedEquipment = Box::leak(Box::new(owned));
     let stock: &'static RelicStock = Box::leak(Box::new(RelicStock::Unknown));
     let pins: &'static Vec<String> = Box::leak(Box::new(Vec::new()));
     let recent: &'static HashSet<String> = Box::leak(Box::new(HashSet::new()));
@@ -46,7 +66,7 @@ fn golden_plan_recompute() -> fracker::plan::Plan {
         now: golden_now(),
         world,
         owned,
-        wants: &targets.wants,
+        wants,
         roster,
         relics,
         stock,
@@ -54,7 +74,12 @@ fn golden_plan_recompute() -> fracker::plan::Plan {
         recent_gear: recent,
         steel_path_tiebreak: true,
     };
-    plan::plan(&input)
+    let plan = plan::plan(&input);
+    // Re-read the backlog for assertions (the leaked copies are 'static).
+    let backlog_text =
+        std::fs::read_to_string(root().join("data/backlog.json")).unwrap();
+    let backlog = Backlog::from_json(&backlog_text).unwrap();
+    Golden { plan, backlog }
 }
 
 #[test]
@@ -67,21 +92,77 @@ fn golden_fixture_parses_with_live_content() {
     assert!(world.vault_trader.is_some(), "recorded Varzia rotation");
     assert!(world.nightwave.is_some(), "recorded nightwave");
     assert!(world.sortie.is_some(), "recorded sortie");
+    // Taubound tier-1 needs the nested reward counted items + events.
+    assert!(
+        world.alerts.iter().any(|a| !a.mission.counted_items().is_empty()),
+        "alert payouts parse from reward.countedItems"
+    );
+    assert!(!world.events.is_empty(), "recorded events (Contegorus gate)");
 }
 
 #[test]
-fn golden_all_49_wants_survive_empty_profile() {
-    let plan = golden_plan_recompute();
-    assert!(plan.pruned.is_empty(), "empty profile prunes nothing");
-    let covered: usize = plan.goals.iter().map(|g| g.wants.len()).sum();
-    assert_eq!(covered, 49, "all 49 seed wants appear on goal cards");
-    assert!(!plan.goals.is_empty());
+fn golden_live_profile_prunes_newly_mastered_backlog() {
+    // The reconciled backlog (Oct 15) held 64 unmastered primes; the
+    // live profile fixture shows Shade Prime + Tipedo Prime (both
+    // in-progress then) now built in XPInfo = mastered since. The
+    // planner prunes them — profile-backed state working end to end.
+    let g = golden_plan_recompute();
+    assert_eq!(
+        g.backlog.primes.unmastered.len(),
+        64,
+        "reconciled backlog size"
+    );
+    assert_eq!(g.plan.goals.len(), 62, "two gears mastered since");
+    assert!(
+        !g.plan.goals.iter().any(|c| c.gear == "Shade Prime"),
+        "Shade Prime pruned (now mastered)"
+    );
+    assert!(
+        !g.plan.goals.iter().any(|c| c.gear == "Tipedo Prime"),
+        "Tipedo Prime pruned (now mastered)"
+    );
+    assert_eq!(g.plan.pruned.len(), 7, "4 Shade + 3 Tipedo parts");
+}
+
+#[test]
+fn golden_current_ranks_before_vaulted() {
+    let g = golden_plan_recompute();
+    let first_vaulted = g
+        .plan
+        .goals
+        .iter()
+        .position(|c| c.vaulted && !c.resurgence_live);
+    let last_current = g
+        .plan
+        .goals
+        .iter()
+        .rposition(|c| !c.vaulted || c.resurgence_live);
+    match (first_vaulted, last_current) {
+        (Some(fv), Some(lc)) => assert!(
+            lc < fv,
+            "all current (unvaulted/resurgence) goals precede parked vaulted ones"
+        ),
+        _ => panic!("expected both current and parked-vaulted goals"),
+    }
+    // Frames before weapons within the current tier.
+    let current: Vec<&fracker::plan::GoalCard> = g
+        .plan
+        .goals
+        .iter()
+        .take_while(|c| !c.vaulted || c.resurgence_live)
+        .collect();
+    let first_weapon = current.iter().position(|c| !c.is_warframe);
+    let last_frame = current.iter().rposition(|c| c.is_warframe);
+    if let (Some(fw), Some(lf)) = (first_weapon, last_frame) {
+        assert!(lf < fw, "frames before weapons within the current tier");
+    }
 }
 
 #[test]
 fn golden_ivara_unparked_by_live_resurgence() {
-    let plan = golden_plan_recompute();
-    let ivara = plan
+    let g = golden_plan_recompute();
+    let ivara = g
+        .plan
         .goals
         .iter()
         .find(|g| g.gear == "Ivara Prime")
@@ -100,27 +181,47 @@ fn golden_ivara_unparked_by_live_resurgence() {
 }
 
 #[test]
-fn golden_vaulted_wants_yield_no_farm_chunks() {
-    let plan = golden_plan_recompute();
+fn golden_taubound_alerts_enter_tier_1() {
+    let g = golden_plan_recompute();
     assert!(
-        plan.farms.is_empty(),
-        "every seed want sits in a vaulted relic: nothing to farm"
+        g.plan
+            .chunks
+            .iter()
+            .any(|c| c.tier == 1 && c.kind == "event alert"),
+        "live Moonflesh alerts are tier-1 chunks: {:?}",
+        g.plan.chunks.iter().map(|c| &c.kind).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn golden_vaulted_wants_yield_no_farm_chunks() {
+    let g = golden_plan_recompute();
+    // Backlog wants still sit in vaulted relics except current-rotation
+    // gear; farms stay empty or current-only.
+    assert!(
+        g.plan.farms.is_empty(),
+        "no farmable backlog relics in this rotation"
     );
     assert!(
-        plan.notes.iter().any(|n| n.contains("vaulted")),
+        g.plan.notes.iter().any(|n| n.contains("crack-or-park")),
         "planner says crack-or-park: {:?}",
-        plan.notes
+        g.plan.notes
     );
 }
 
 #[test]
 fn golden_slate_has_cracks_and_labels_filler() {
-    let plan = golden_plan_recompute();
-    assert!(
-        plan.chunks.iter().any(|c| c.tier == 2),
-        "target-matched fissures exist in the fixture"
-    );
-    for c in &plan.chunks {
+    let g = golden_plan_recompute();
+    // All target cracks expire <60 min in this fixture, so they join
+    // tier 1 as expiring value; the slate holds cracks either way.
+    let cracks: Vec<_> = g
+        .plan
+        .chunks
+        .iter()
+        .filter(|c| c.kind.contains("crack"))
+        .collect();
+    assert!(!cracks.is_empty(), "target-matched fissures exist");
+    for c in &g.plan.chunks {
         if c.tier >= 4 {
             assert!(
                 c.kind.contains("sortie") || c.kind.contains("filler"),
@@ -132,8 +233,31 @@ fn golden_slate_has_cracks_and_labels_filler() {
 }
 
 #[test]
+fn golden_donow_targets_at_most_three_parts() {
+    // Brief #2 item 3: the slate's crack chunks pursue only the ≤3
+    // focus parts; everything else waits in Hunt/Backlog.
+    let g = golden_plan_recompute();
+    assert!(!g.plan.focus.is_empty(), "focus is never empty with live wants");
+    assert!(
+        g.plan.focus.len() <= 3,
+        "at most 3 parts: {:?}",
+        g.plan.focus.iter().map(|f| &f.part).collect::<Vec<_>>(),
+    );
+    let eras: HashSet<&str> = g.plan.focus.iter().map(|f| f.era.as_str()).collect();
+    assert_eq!(eras.len(), g.plan.focus.len(), "era spread");
+    for c in g.plan.chunks.iter().filter(|c| c.kind.contains("crack")) {
+        let text = format!("{} {}", c.title, c.why);
+        assert!(
+            g.plan.focus.iter().any(|f| text.contains(&f.part)),
+            "slate crack pursues a focus part: {}",
+            c.title,
+        );
+    }
+}
+
+#[test]
 fn golden_weeklies_never_enter_chunks() {
-    let plan = golden_plan_recompute();
+    let g = golden_plan_recompute();
     // Weekly-item phrases (board-only). Location names such as
     // "Maroo's Bazaar" are fine — they are not weekly content.
     // (The skeletal T4 sortie chunk is the deliberate tier-4 exception.)
@@ -149,7 +273,7 @@ fn golden_weeklies_never_enter_chunks() {
         "syndicate mission",
     ] {
         assert!(
-            !plan.chunks.iter().any(|c| c.title.contains(banned)),
+            !g.plan.chunks.iter().any(|c| c.title.contains(banned)),
             "weekly content is board-only, found in chunk: {banned}"
         );
     }
@@ -157,8 +281,9 @@ fn golden_weeklies_never_enter_chunks() {
 
 #[test]
 fn golden_unknown_stock_labels_if_you_have_it() {
-    let plan = golden_plan_recompute();
-    let cracks: Vec<_> = plan
+    let g = golden_plan_recompute();
+    let cracks: Vec<_> = g
+        .plan
         .chunks
         .iter()
         .filter(|c| c.kind.contains("crack"))
@@ -170,7 +295,7 @@ fn golden_unknown_stock_labels_if_you_have_it() {
     );
 }
 
-/// Re-record the fixture from the live API. No-op unless
+/// Re-record the world-state fixture from the live API. No-op unless
 /// FRACKER_REFRESH_FIXTURES=1 (keeps the suite green offline).
 #[tokio::test]
 async fn refresh_worldstate_fixture() {

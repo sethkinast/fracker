@@ -357,6 +357,21 @@ impl Fissure {
     pub fn matches_era(&self, era: &str) -> bool {
         self.tier.eq_ignore_ascii_case("omnia") || self.tier.eq_ignore_ascii_case(era)
     }
+
+    /// HARD gate (brief #2 §0): a fissure accepts a batch ONLY if it
+    /// accepts EVERY era in the batch. Mixed-era batches route solely
+    /// to live Omnia fissures. This filters candidates BEFORE any
+    /// cascade scoring — never emit a line sending a relic to a
+    /// fissure that cannot crack it.
+    pub fn accepts_eras(&self, eras: &[&str]) -> bool {
+        if eras.is_empty() {
+            return false;
+        }
+        if self.tier.eq_ignore_ascii_case("omnia") {
+            return true;
+        }
+        eras.iter().all(|e| self.tier.eq_ignore_ascii_case(e))
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -372,6 +387,13 @@ pub struct CountedItem {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AlertReward {
+    #[serde(default)]
+    pub counted_items: Vec<CountedItem>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AlertMission {
     #[serde(default)]
     pub node: String,
@@ -380,7 +402,23 @@ pub struct AlertMission {
     #[serde(default)]
     pub faction: String,
     #[serde(default)]
-    pub counted_items: Vec<CountedItem>,
+    pub reward: AlertReward,
+    /// Older captures flattened counted items onto the mission itself;
+    /// accepted here so both shapes parse.
+    #[serde(default, rename = "countedItems")]
+    pub counted_items_flat: Vec<CountedItem>,
+}
+
+impl AlertMission {
+    /// Event-resource payouts live under `reward.countedItems` in the
+    /// live API (flattened in older captures).
+    pub fn counted_items(&self) -> &[CountedItem] {
+        if self.reward.counted_items.is_empty() {
+            &self.counted_items_flat
+        } else {
+            &self.reward.counted_items
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -463,6 +501,31 @@ pub fn normalize_gear_token(unique_name: &str) -> String {
     .join(" ")
 }
 
+/// Community/event entry from world state `/pc/events` (Taubound pack:
+/// the Contegorus set is gated on the community-goal `health` progress
+/// of the "Road To Tau" entry).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorldEvent {
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub health: Option<f64>,
+    #[serde(default)]
+    pub is_community: bool,
+    #[serde(default)]
+    pub expiry: String,
+    #[serde(default)]
+    pub activation: String,
+}
+
+impl WorldEvent {
+    pub fn is_road_to_tau(&self) -> bool {
+        let d = self.description.to_lowercase();
+        d.contains("road to tau") || d.contains("roadtotau")
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NightwaveChallenge {
@@ -528,6 +591,8 @@ pub struct WorldState {
     #[serde(default)]
     pub alerts: Vec<Alert>,
     #[serde(default)]
+    pub events: Vec<WorldEvent>,
+    #[serde(default)]
     pub vault_trader: Option<VaultTrader>,
     #[serde(default)]
     pub nightwave: Option<Nightwave>,
@@ -541,6 +606,97 @@ impl WorldState {
     pub fn from_json(text: &str) -> Result<Self, String> {
         serde_json::from_str(text).map_err(|e| format!("worldstate: {e}"))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Reconciled backlog (data/backlog.json — profile-derived, NOT Xuerian)
+// ---------------------------------------------------------------------------
+
+/// One unmastered prime from the reconciled backlog (addendum #12).
+#[derive(Debug, Clone, Deserialize)]
+pub struct BacklogEntry {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub vaulted: bool,
+    #[serde(default, rename = "type", deserialize_with = "null_default")]
+    pub gear_type: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub wants: String,
+    #[serde(default)]
+    pub parts_wanted: Vec<String>,
+    #[serde(default)]
+    pub all_parts: Vec<String>,
+}
+
+impl BacklogEntry {
+    pub fn is_warframe(&self) -> bool {
+        self.gear_type.eq_ignore_ascii_case("warframe")
+    }
+}
+
+/// The reconciled backlog: prime roster vs profile XPInfo.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Backlog {
+    #[serde(default)]
+    pub primes: BacklogPrimes,
+    #[serde(default)]
+    pub unmastered_by_category: HashMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct BacklogPrimes {
+    #[serde(default)]
+    pub roster: u32,
+    #[serde(default)]
+    pub mastered: u32,
+    #[serde(default)]
+    pub unmastered: Vec<BacklogEntry>,
+}
+
+impl Backlog {
+    pub fn from_json(text: &str) -> Result<Self, String> {
+        serde_json::from_str(text).map_err(|e| format!("backlog: {e}"))
+    }
+
+    /// Planner wants derived from the reconciled backlog: every part of
+    /// every unmastered prime (parts per parent come from the roster at
+    /// card-build time; this flat list feeds coverage scoring).
+    pub fn wants(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for e in &self.primes.unmastered {
+            for p in &e.all_parts {
+                if !out.contains(p) {
+                    out.push(p.clone());
+                }
+            }
+        }
+        out
+    }
+
+    pub fn gear_names(&self) -> Vec<String> {
+        self.primes.unmastered.iter().map(|e| e.name.clone()).collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Icons (addendum #14)
+// ---------------------------------------------------------------------------
+
+/// Parent-item icon URL from the WFCD dataset:
+/// parent name -> `imageName` -> `https://cdn.warframestat.us/img/<imageName>`.
+/// A prime PART always shows its PARENT item's icon, never the generic
+/// part/blueprint icon. Unresolved items keep the monogram (None).
+pub fn icon_url(parent: &str, icons: &HashMap<String, String>) -> Option<String> {
+    icons
+        .get(parent)
+        .map(|img| format!("https://cdn.warframestat.us/img/{img}"))
+}
+
+pub fn load_icons(text: &str) -> Result<HashMap<String, String>, String> {
+    serde_json::from_str(text).map_err(|e| format!("icons: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -629,5 +785,23 @@ mod tests {
             "/Lotus/Types/StoreItems/Packages/MegaPrimeVault/MPVIvaraPrimeSinglePack",
         );
         assert!(t.contains("ivara"), "pack token keeps gear name: {t}");
+    }
+
+    #[test]
+    fn era_gate_rejects_empty_and_locked() {
+        let omnia = Fissure {
+            tier: "Omnia".into(),
+            ..Default::default()
+        };
+        let meso = Fissure {
+            tier: "Meso".into(),
+            ..Default::default()
+        };
+        assert!(omnia.accepts_eras(&["Axi", "Meso"]));
+        assert!(meso.accepts_eras(&["Meso"]));
+        assert!(!meso.accepts_eras(&["Axi"]));
+        assert!(!meso.accepts_eras(&["Axi", "Meso"]));
+        assert!(!meso.accepts_eras(&[]));
+        assert!(!omnia.accepts_eras(&[]));
     }
 }

@@ -32,31 +32,46 @@ pub struct LogLine {
     pub message: String,
 }
 
-/// Parse an EE.log line. Format (BRIEF §7.1): timestamped lines tagged
-/// by subsystem (`Sys`, `Game`, `Script`, ...). Unparseable lines yield
-/// an empty-subsystem line carrying the raw text so the tail never dies.
+/// Parse an EE.log line. Real format (fixtures/VALIDATION.md):
+/// `<elapsed.sec> <Subsystem> [<Level>]: <message>`
+/// (e.g. `14.148 Sys [Info]: Logged in Jenterrobahne`). Unparseable
+/// lines yield an empty-subsystem line carrying the raw text so the
+/// tail never dies.
 pub fn parse_line(raw: &str) -> LogLine {
     let raw = raw.trim_end_matches(['\r', '\n']);
-    // Common shape: "[12:34:56.789] Sys: message" or "12:34:56 Sys: ...".
     let (ts, rest) = split_timestamp(raw);
-    if let Some((sub, msg)) = rest.split_once(':') {
-        let sub = sub.trim();
-        if !sub.is_empty()
-            && sub.len() <= 24
-            && sub.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-        {
-            return LogLine {
-                timestamp: ts,
-                subsystem: sub.to_owned(),
-                message: msg.trim_start().to_owned(),
-            };
-        }
+    if let Some((sub, msg)) = split_subsystem(rest) {
+        return LogLine {
+            timestamp: ts,
+            subsystem: sub,
+            message: msg,
+        };
     }
     LogLine {
         timestamp: ts,
         subsystem: String::new(),
         message: rest.to_owned(),
     }
+}
+
+/// Split `Sub [Level]: message` (or bare `Sub: message`). The bracketed
+/// level is consumed, not kept: classification keys on the subsystem.
+fn split_subsystem(rest: &str) -> Option<(String, String)> {
+    let (head, msg) = rest.split_once(':')?;
+    let sub = head.split_whitespace().next()?;
+    if sub.is_empty()
+        || sub.len() > 24
+        || !sub
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    {
+        return None;
+    }
+    let tail = head[sub.len()..].trim();
+    if !tail.is_empty() && !(tail.starts_with('[') && tail.ends_with(']')) {
+        return None;
+    }
+    Some((sub.to_owned(), msg.trim_start().to_owned()))
 }
 
 fn split_timestamp(raw: &str) -> (Option<String>, &str) {
@@ -67,11 +82,16 @@ fn split_timestamp(raw: &str) -> (Option<String>, &str) {
             return (Some(ts.to_owned()), rest.trim_start());
         }
     }
-    // Bare "HH:MM:SS.mmm ..." prefix.
+    // Bare "HH:MM:SS.mmm ..." prefix, or the real EE.log shape:
+    // elapsed seconds ("14.148 Sys [Info]: ...").
     let mut parts = t.splitn(2, ' ');
     let head = parts.next().unwrap_or("");
+    let tail = parts.next().unwrap_or("");
     if head.contains(':') && head.chars().all(|c| c.is_ascii_digit() || c == ':' || c == '.') {
-        return (Some(head.to_owned()), parts.next().unwrap_or(""));
+        return (Some(head.to_owned()), tail);
+    }
+    if head.contains('.') && head.parse::<f64>().is_ok() {
+        return (Some(head.to_owned()), tail);
     }
     (None, raw)
 }
@@ -171,19 +191,19 @@ impl SessionTracker {
     /// Feed one classified event. `gap_secs` = seconds since the
     /// previous write (u64::MAX on file recreation/first write).
     /// Returns true on a session-start transition.
+    ///
+    /// Segmentation rule (fixtures/VALIDATION.md, confirmed): one file
+    /// spans many sessions — split on `Logged in` + inactivity, NEVER on
+    /// file boundaries. Any `Logged in` (re)starts a session, even on a
+    /// short gap; a file edge alone never does.
     pub fn feed(&mut self, event: Option<&Event>, gap_secs: u64) -> bool {
         if gap_secs >= 30 * 60 {
             // Long silence (or recreate): drop back to Idle/Arming.
             self.phase = SessionPhase::Idle;
         }
-        match event {
-            Some(Event::LoggedIn { .. })
-                if matches!(self.phase, SessionPhase::Idle | SessionPhase::Arming) =>
-            {
-                self.phase = SessionPhase::Active;
-                return true;
-            }
-            _ => {}
+        if matches!(event, Some(Event::LoggedIn { .. })) {
+            self.phase = SessionPhase::Active;
+            return true;
         }
         if matches!(self.phase, SessionPhase::Idle) && event.is_some() {
             self.phase = SessionPhase::Arming;
@@ -309,63 +329,127 @@ pub fn extract_hex24(message: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
-    // All fixtures below are SYNTHETIC lines built from the documented
-    // markers (BRIEF §7.2). No real log content is used or implied.
+    // Markers below are transcribed-from-real-log: verbatim message text
+    // catalogued in fixtures/VALIDATION.md (third-fixture section),
+    // wrapped in the real `<elapsed.sec> Sub [Level]:` line shape.
+    // (`HostMigration` has no verbatim exemplar in the catalog — its
+    // test line stays synthetic.)
 
-    fn syn(sub: &str, msg: &str) -> LogLine {
-        parse_line(&format!("[12:00:00.000] {sub}: {msg}"))
+    /// Real-shaped line with a verbatim transcribed message.
+    fn real(sub: &str, msg: &str) -> LogLine {
+        parse_line(&format!("14.148 {sub} [Info]: {msg}"))
     }
 
     #[test]
-    fn synthetic_catalog_markers() {
+    fn real_line_shape_parses_subsystem_and_level() {
+        let l = parse_line("14.148 Sys [Info]: Logged in Jenterrobahne");
+        assert_eq!(l.timestamp.as_deref(), Some("14.148"));
+        assert_eq!(l.subsystem, "Sys");
+        assert_eq!(l.message, "Logged in Jenterrobahne");
+        // Bracketed shape without elapsed prefix still parses.
+        let b = parse_line("[12:00:00.000] Sys [Info]: Logged in Jenterrobahne");
+        assert_eq!(b.subsystem, "Sys");
+        assert_eq!(b.message, "Logged in Jenterrobahne");
+    }
+
+    #[test]
+    fn transcribed_catalog_markers() {
+        // transcribed-from-real-log: `Logged in Jenterrobahne` (Sys/Info).
         assert_eq!(
-            classify(&syn("Sys", "Logged in SethPrime extra")),
+            classify(&real("Sys", "Logged in Jenterrobahne")),
             Some(Event::LoggedIn {
-                name: "SethPrime extra".into()
+                name: "Jenterrobahne".into()
             })
         );
+        // transcribed-from-real-log: `Client loaded
+        // {"name":"SolNode173_Alert"} with MissionInfo:` (+ full JSON).
         assert_eq!(
-            classify(&syn("Script", "foo with MissionInfo: bar")),
+            classify(&real(
+                "Game",
+                r#"Client loaded {"name":"SolNode173_Alert"} with MissionInfo: {"missionType":"MT_EXTERMINATION"}"#
+            )),
             Some(Event::MissionInfoSeen)
         );
+        // transcribed-from-real-log: `===[ Game successfully connected
+        // to: /Lotus/Levels/Proc/TheNewWar/PartTwo/TNWDrifterCampMain/
+        // BoC8ACA.lp ]===` (hub transition, no MissionInfo armed).
         assert_eq!(
-            classify(&syn("Game", "Game successfully connected to: x")),
+            classify(&real(
+                "Game",
+                "===[ Game successfully connected to: /Lotus/Levels/Proc/TheNewWar/PartTwo/TNWDrifterCampMain/ BoC8ACA.lp ]==="
+            )),
             Some(Event::LevelConnected)
         );
+        // transcribed-from-real-log: `ProjectionRewardChoice.lua: Relic
+        // rewards initialized`.
         assert_eq!(
-            classify(&syn(
+            classify(&real(
                 "Script",
                 "ProjectionRewardChoice.lua: Relic rewards initialized"
             )),
             Some(Event::RelicRewardScreen)
         );
+        // transcribed-from-real-log: `ProjectionRewardChoice.lua: Got
+        // rewards`.
         assert_eq!(
-            classify(&syn("Script", "ProjectionRewardChoice.lua: Got rewards")),
+            classify(&real("Script", "ProjectionRewardChoice.lua: Got rewards")),
             Some(Event::RelicRewardScreen)
         );
+        // transcribed-from-real-log: `ProjectionRewardChoice.lua:
+        // Selection countdown done` — terminal countdown, no state change.
         assert_eq!(
-            classify(&syn("Game", "DVRCAftermath blah")),
+            classify(&real(
+                "Script",
+                "ProjectionRewardChoice.lua: Selection countdown done"
+            )),
+            None
+        );
+        // transcribed-from-real-log: `ProjectionRewardChoice.lua: Relic
+        // reward screen shut down` — teardown, no state change.
+        assert_eq!(
+            classify(&real(
+                "Script",
+                "ProjectionRewardChoice.lua: Relic reward screen shut down"
+            )),
+            None
+        );
+        // transcribed-from-real-log: `DVRCAftermath` transmission on hub
+        // return after a crack.
+        assert_eq!(
+            classify(&real("Game", "DVRCAftermath transmission")),
             Some(Event::RelicCrack)
         );
+        // transcribed-from-real-log:
+        // `ThemedProjectionManager.lua: PopulateInventoryGrid`.
         assert_eq!(
-            classify(&syn(
+            classify(&real(
                 "Script",
                 "ThemedProjectionManager.lua: PopulateInventoryGrid"
             )),
             Some(Event::RelicInventoryOpen)
         );
+        // transcribed-from-real-log: `InventoryTest.lua: PopulateGrid`.
         assert_eq!(
-            classify(&syn("Script", "InventoryTest.lua: PopulateGrid")),
+            classify(&real("Script", "InventoryTest.lua: PopulateGrid")),
             Some(Event::InventorySellOpen)
         );
+        // Synthetic (no verbatim exemplar in the catalog).
         assert_eq!(
-            classify(&syn("Game", "something HostMigration happened")),
+            classify(&real("Game", "something HostMigration happened")),
             Some(Event::HostMigration)
         );
-        // HostMigration on another subsystem does not count.
-        assert_eq!(classify(&syn("Script", "HostMigration x")), None);
-        // FrameworkCmd::OpenLevel is explicitly NOT relied on.
-        assert_eq!(classify(&syn("Game", "FrameworkCmd::OpenLevel x")), None);
+        assert_eq!(classify(&real("Script", "HostMigration x")), None);
+        // Explicitly NOT relied on (unreliable per wf-log).
+        assert_eq!(
+            classify(&real("Game", "FrameworkCmd::OpenLevel x")),
+            None
+        );
+        // Validated negative: a plain alert run logs NO reward-screen or
+        // reward-claim lines — Nightwave/vascular noise must not classify.
+        assert_eq!(
+            classify(&real("Game", "Mission progress XP: 33867")),
+            None
+        );
     }
 
     #[test]
@@ -384,21 +468,57 @@ mod tests {
     }
 
     #[test]
+    fn one_file_many_sessions_split_on_login_not_edges() {
+        // Confirmed rule: one file spans sessions/squads; a second
+        // `Logged in` restarts the session even on a SHORT gap, and a
+        // file edge (fresh lines, no login) never starts one.
+        let login = || {
+            classify(&real("Sys", "Logged in Jenterrobahne")).map(|e| e)
+        };
+        let mut t = SessionTracker::new();
+        // File edge: activity without login arms, never starts.
+        assert!(!t.feed(Some(&Event::MissionInfoSeen), 5));
+        assert!(!t.feed(Some(&Event::LevelConnected), 5));
+        assert_eq!(t.phase, SessionPhase::Arming);
+        // First login: session 1.
+        assert!(t.feed(login().as_ref(), 5));
+        assert!(!t.feed(Some(&Event::MissionInfoSeen), 60));
+        // Second login, short gap (same file): session 2.
+        assert!(
+            t.feed(login().as_ref(), 60),
+            "re-login always restarts the session"
+        );
+    }
+
+    #[test]
     fn hex24_ranking_prefers_display_name_lines() {
-        let id_a = "abcdef0123456789abcdef01";
+        // transcribed-from-real-log: `VoidProjections: Client got
+        // reward info from <24-hex account ID>` (×4, one per squad
+        // member); second name↔ID source: `SendSessionUpdate` params
+        // carry `"memberAccountId"`.
+        let id_a = "5420fba23846322173707618";
         let id_b = "1234567890abcdef12345678";
         let lines = vec![
-            syn("Game", &format!("squad {id_b} joined")),
-            syn(
+            real(
                 "Game",
-                &format!("Updated playerInfo for player {id_a} Host=true name=SethPrime"),
+                &format!("VoidProjections: Client got reward info from {id_b}"),
+            ),
+            real(
+                "Game",
+                &format!("VoidProjections: Client got reward info from {id_a}"),
+            ),
+            real(
+                "Game",
+                &format!(
+                    "SendSessionUpdate params {{\"memberAccountId\":\"{id_a}\",\"name\":\"Jenterrobahne\"}}"
+                ),
             ),
         ];
-        let ranked = rank_account_candidates(&lines, "SethPrime");
+        let ranked = rank_account_candidates(&lines, "Jenterrobahne");
         assert_eq!(ranked.len(), 2);
         assert_eq!(ranked[0].id, id_a);
         assert!(ranked[0].with_display_name);
-        assert!(ranked[0].updated_player_info_host);
+        assert!(ranked[0].void_projection_host);
     }
 
     #[test]

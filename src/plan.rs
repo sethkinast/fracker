@@ -58,6 +58,45 @@ pub struct PartRow {
     /// "rare — 2% Intact / 10% Radiant" for the best relic.
     pub best_odds: String,
     pub rarity: Rarity,
+    /// Terse backlog columns: best relic at the advised refinement.
+    pub deal: Option<PartDeal>,
+}
+
+/// Best-relic deal for one part at the stock-aware refinement tier:
+/// relic, its chance at that tier, expected cracks, advised refinement,
+/// and held stock (None = unknown).
+#[derive(Debug, Clone)]
+pub struct PartDeal {
+    pub relic: String,
+    pub vaulted: bool,
+    pub refinement: String,
+    pub chance: f64,
+    pub expected: f64,
+    pub owned: Option<u32>,
+}
+
+/// Best-relic deal for `part`: highest-Intact relic, stock-aware
+/// refinement tier, table chance at that tier (ladder fallback).
+pub fn best_deal_for_part(
+    part: &str,
+    relics: &RelicTables,
+    stock: &RelicStock,
+) -> Option<PartDeal> {
+    let (relic, intact) = relics.relics_for_part(part).into_iter().next()?;
+    let owned = stock.count(&relic.name);
+    let refinement = choose_refinement(intact, owned);
+    let mut chance = relic.chance_for(part, refinement);
+    if chance <= 0.0 {
+        chance = refine_chance(intact, refinement);
+    }
+    Some(PartDeal {
+        relic: relic.name.clone(),
+        vaulted: relic.vaulted,
+        refinement: refinement.name().to_owned(),
+        chance,
+        expected: expected_cracks(chance),
+        owned,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +188,78 @@ pub struct Plan {
     pub pruned: Vec<String>,
     pub farms: Vec<FarmHint>,
     pub notes: Vec<String>,
+    /// Do-Now focus: AT MOST 3 parts (Seth's rule), era-spread
+    /// preferred. The slate's crack chunks pursue only these parts;
+    /// everything else waits in Hunt/Backlog.
+    pub focus: Vec<FocusPart>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FocusPart {
+    pub part: String,
+    pub gear: String,
+    pub era: String,
+}
+
+/// Do-Now focus picker (brief #2 item 3): at most 3 parts by card
+/// priority (item 2), preferring a spread across relic eras — a live
+/// fissure almost always serves one of them, and an Omnia fissure can
+/// serve all three at once.
+pub fn pick_focus(cards: &[GoalCard], relics: &RelicTables) -> Vec<FocusPart> {
+    // Bottleneck (rarest) needed part per card, in card priority order.
+    let mut cands: Vec<(String, String, String)> = Vec::new();
+    for card in cards {
+        let mut needed: Vec<&PartRow> = card
+            .parts
+            .iter()
+            .filter(|p| p.state == PartState::Need)
+            .collect();
+        needed.sort_by(|a, b| {
+            (a.rarity as u8)
+                .cmp(&(b.rarity as u8))
+                .reverse()
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        for part in needed {
+            if let Some((relic, _)) = relics.relics_for_part(&part.name).into_iter().next() {
+                cands.push((
+                    part.name.clone(),
+                    card.gear.clone(),
+                    relic.era().to_owned(),
+                ));
+                break;
+            }
+        }
+    }
+    // Greedy pass 1: priority order, new eras first (spread).
+    let mut out: Vec<FocusPart> = Vec::new();
+    let mut eras: HashSet<String> = HashSet::new();
+    for (part, gear, era) in &cands {
+        if out.len() >= 3 {
+            break;
+        }
+        if eras.insert(era.clone()) {
+            out.push(FocusPart {
+                part: part.clone(),
+                gear: gear.clone(),
+                era: era.clone(),
+            });
+        }
+    }
+    // Pass 2: fill remaining slots by priority regardless of era.
+    for (part, gear, era) in &cands {
+        if out.len() >= 3 {
+            break;
+        }
+        if !out.iter().any(|f| f.part == *part) {
+            out.push(FocusPart {
+                part: part.clone(),
+                gear: gear.clone(),
+                era: era.clone(),
+            });
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -298,22 +409,26 @@ pub struct FissurePick {
     pub batch_minutes: f64,
 }
 
-/// Rank matching fissures for an era + batch:
+/// Rank matching fissures for a relic-era BATCH + planned batch size:
 /// 1. expiry (~15 min jumps first, if runnable — storms excluded here),
 /// 2. minutes per crack for the planned batch (dominant),
 /// 3. goal fit (bottleneck era first — caller pre-sorts eras),
 /// 4. Steel Path tiebreak for sprint missions (endless stays normal),
 /// 5. Void Storms last resort.
+///
+/// HARD gate first (brief #2 §0): only fissures accepting the ENTIRE
+/// batch's eras are candidates at all — mixed-era batches see solely
+/// live Omnia fissures.
 pub fn rank_fissures(
     fissures: &[crate::model::Fissure],
-    era: &str,
+    eras: &[&str],
     batch: u32,
     now: DateTime<Utc>,
     steel_path_tiebreak: bool,
 ) -> Vec<FissurePick> {
     let mut picks: Vec<FissurePick> = fissures
         .iter()
-        .filter(|f| f.matches_era(era))
+        .filter(|f| f.accepts_eras(eras))
         .filter_map(|f| {
             let expiry = parse_time(&f.expiry)?;
             if expiry <= now {
@@ -419,7 +534,7 @@ pub fn best_crack_for_part(
         let score = chance * (1.0 + coverage as f64) * stock_factor;
         let picks = rank_fissures(
             fissures,
-            relic.era(),
+            &[relic.era()],
             batch,
             now,
             steel_path_tiebreak,
@@ -511,7 +626,17 @@ pub fn norm_name(s: &str) -> String {
 
 fn gear_in_tokens(gear: &str, tokens: &HashSet<String>) -> bool {
     let g = norm_name(gear);
-    tokens.iter().any(|t| t.contains(&g) || g.contains(t))
+    let g_words: HashSet<&str> = g.split_whitespace().collect();
+    tokens.iter().any(|t| {
+        t.contains(&g)
+            || g.contains(t)
+            || {
+                let t_words: HashSet<&str> = t.split_whitespace().collect();
+                // Word-order independent: "baza prime" matches the
+                // rotation's "prime baza gun" ("Prime Baza Gun").
+                g_words.is_subset(&t_words) || t_words.is_subset(&g_words)
+            }
+    })
 }
 
 fn part_rows_for_gear(
@@ -567,12 +692,14 @@ fn part_rows_for_gear(
                 ),
                 None => "no relic source".to_owned(),
             };
+            let deal = best_deal_for_part(&part, relics, stock);
             PartRow {
                 name: part,
                 state,
                 relics: opts,
                 best_odds,
                 rarity,
+                deal,
             }
         })
         .collect()
@@ -666,8 +793,10 @@ fn goal_cards(input: &PlanInput<'_>, active: &[String]) -> Vec<GoalCard> {
             }
         })
         .collect();
-    // Ordering: pins first, then warframes before weapons, then fewest
-    // parts remaining (BRIEF §10).
+    // Ordering: pins first, then CURRENT (unvaulted, or vaulted but
+    // un-parked by the live Resurgence rotation) before vaulted
+    // (addendum #10), frames before weapons within a tier (BRIEF §10),
+    // then fewest parts remaining.
     cards.sort_by(|a, b| {
         let pin_a = input.pins.iter().position(|p| a.wants.contains(p));
         let pin_b = input.pins.iter().position(|p| b.wants.contains(p));
@@ -677,7 +806,10 @@ fn goal_cards(input: &PlanInput<'_>, active: &[String]) -> Vec<GoalCard> {
             (None, Some(_)) => std::cmp::Ordering::Greater,
             (None, None) => std::cmp::Ordering::Equal,
         };
+        let current_a = !a.vaulted || a.resurgence_live;
+        let current_b = !b.vaulted || b.resurgence_live;
         pin_ord
+            .then_with(|| current_b.cmp(&current_a))
             .then_with(|| b.is_warframe.cmp(&a.is_warframe))
             .then_with(|| {
                 (a.parts_total - a.parts_have).cmp(&(b.parts_total - b.parts_have))
@@ -954,14 +1086,14 @@ fn chunk_minutes_label(minutes: f64, endless: bool, batch: u32) -> String {
     }
 }
 
-fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String]) -> (Vec<Chunk>, Vec<FarmHint>, Vec<String>) {
+fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String], focus: &[FocusPart]) -> (Vec<Chunk>, Vec<FarmHint>, Vec<String>) {
     let mut chunks: Vec<Chunk> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
     let _ = pruned;
 
     // ---- Tier 1: expiring event value ----
     for alert in &input.world.alerts {
-        if alert.mission.counted_items.is_empty() {
+        if alert.mission.counted_items().is_empty() {
             continue;
         }
         let expiry = match parse_time(&alert.expiry) {
@@ -971,7 +1103,7 @@ fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String]) ->
         let mins = (expiry - input.now).num_seconds() / 60;
         let payout: Vec<String> = alert
             .mission
-            .counted_items
+            .counted_items()
             .iter()
             .map(|c| format!("{}× {}", c.count, c.kind))
             .collect();
@@ -1046,6 +1178,9 @@ fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String]) ->
 
     // ---- Tier 2: target-matched fissures ----
     // Greedy coverage: rank crack actions by score, take each relic once.
+    // Do-Now rule: crack chunks pursue ONLY the ≤3 focus parts.
+    let focus_set: HashSet<String> =
+        focus.iter().map(|f| f.part.clone()).collect();
     // Real ranked pass (owned values, no borrow tangle).
     let mut ranked: Vec<(String, CrackCandidate, FissurePick, String, String)> = Vec::new();
     for card in cards {
@@ -1057,7 +1192,7 @@ fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String]) ->
         let mut needed: Vec<&PartRow> = card
             .parts
             .iter()
-            .filter(|p| p.state == PartState::Need)
+            .filter(|p| p.state == PartState::Need && focus_set.contains(&p.name))
             .collect();
         needed.sort_by(|a, b| {
             (a.rarity as u8)
@@ -1141,8 +1276,14 @@ fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String]) ->
             },
             expiry: expiry_dt,
         });
-        if chunks.iter().filter(|c| c.tier == 2).count() >= 6 {
-            // Useful slate, not exhaustive (BRIEF §10).
+        if chunks
+            .iter()
+            .filter(|c| c.kind.contains("crack"))
+            .count()
+            >= 6
+        {
+            // Useful slate, not exhaustive (BRIEF §10). Expiring
+            // matches join tier 1 but share the same cap.
             break;
         }
     }
@@ -1169,16 +1310,12 @@ fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String]) ->
         }
     }
     if farms.is_empty() && !cards.is_empty() {
-        let any_unvaulted = cards.iter().flat_map(|g| g.wants.iter()).any(|w| {
-            input
-                .relics
-                .relics_for_part(w)
-                .iter()
-                .any(|(r, _)| !r.vaulted && !r.sources.is_empty())
-        });
-        if !any_unvaulted {
+        let any_farm_action = cards
+            .iter()
+            .any(|g| g.action.kind == ActionKind::Farm);
+        if !any_farm_action {
             notes.push(
-                "Relic sourcing: every current want sits in a vaulted relic — crack-or-park. \
+                "Relic sourcing: no farmable relic sources for current wants — crack-or-park. \
                  Sourcing activates for current-rotation goals and general relic farming."
                     .to_owned(),
             );
@@ -1347,13 +1484,15 @@ fn sanitize_id(s: &str) -> String {
 pub fn plan(input: &PlanInput<'_>) -> Plan {
     let (active, pruned) = prune_wants(input.owned, input.wants, input.roster);
     let cards = goal_cards_for(input, &active);
-    let (chunks, farms, notes) = build_chunks(input, &cards, &pruned);
+    let focus = pick_focus(&cards, input.relics);
+    let (chunks, farms, notes) = build_chunks(input, &cards, &pruned, &focus);
     Plan {
         goals: cards,
         chunks,
         pruned,
         farms,
         notes,
+        focus,
     }
 }
 
@@ -1465,7 +1604,7 @@ mod tests {
             syn_fissure("B", "Exterminate", "Neo", "2026-10-15T21:10:00Z"),
             storm,
         ];
-        let picks = rank_fissures(&fiss, "Neo", 2, now, true);
+        let picks = rank_fissures(&fiss, &["Neo"], 2, now, true);
         assert_eq!(picks.len(), 3);
         assert_eq!(picks[0].fissure.node, "B", "urgent runnable jumps first");
         assert!(picks[2].fissure.is_storm, "storms last");
@@ -1478,9 +1617,9 @@ mod tests {
             syn_fissure("A", "Exterminate", "Neo", "2026-10-15T23:00:00Z"),
             syn_fissure("B", "Survival", "Neo", "2026-10-15T23:00:00Z"),
         ];
-        let small = rank_fissures(&fiss, "Neo", 1, now, true);
+        let small = rank_fissures(&fiss, &["Neo"], 1, now, true);
         assert_eq!(small[0].fissure.node, "A", "sprint wins batch of 1");
-        let big = rank_fissures(&fiss, "Neo", 4, now, true);
+        let big = rank_fissures(&fiss, &["Neo"], 4, now, true);
         assert_eq!(big[0].fissure.node, "B", "endless wins batch of 4");
     }
 
@@ -1510,6 +1649,162 @@ mod tests {
             prune_wants(&owned, &["Khora Prime Blueprint".to_owned()], &roster);
         assert!(active.is_empty());
         assert_eq!(pruned.len(), 1);
+    }
+
+    #[test]
+    fn focus_caps_at_three_with_era_spread() {
+        // Brief #2 item 3: Do Now targets at most 3 parts, preferring
+        // a spread across relic eras.
+        let roster = Roster::from_json(
+            r#"[{"name": "A Prime", "vaulted": false, "type": "warframe",
+                  "parts": [{"name": "A Prime Blueprint"}]},
+                 {"name": "B Prime", "vaulted": false, "type": "warframe",
+                  "parts": [{"name": "B Prime Blueprint"}]},
+                 {"name": "C Prime", "vaulted": false, "type": "warframe",
+                  "parts": [{"name": "C Prime Blueprint"}]},
+                 {"name": "D Prime", "vaulted": false, "type": "warframe",
+                  "parts": [{"name": "D Prime Blueprint"}]}]"#,
+        )
+        .unwrap();
+        let text = r#"{
+            "relics": {
+                "Lith A1": {"name": "Lith A1",
+                    "rewards": [{"name": "A Prime Blueprint", "chance": {"Intact": 2, "Radiant": 10}}],
+                    "vaulted": false, "sources": {}},
+                "Meso B2": {"name": "Meso B2",
+                    "rewards": [{"name": "B Prime Blueprint", "chance": {"Intact": 2, "Radiant": 10}}],
+                    "vaulted": false, "sources": {}},
+                "Neo C3": {"name": "Neo C3",
+                    "rewards": [{"name": "C Prime Blueprint", "chance": {"Intact": 2, "Radiant": 10}}],
+                    "vaulted": false, "sources": {}},
+                "Axi D4": {"name": "Axi D4",
+                    "rewards": [{"name": "D Prime Blueprint", "chance": {"Intact": 2, "Radiant": 10}}],
+                    "vaulted": false, "sources": {}}
+            },
+            "sources": {}
+        }"#;
+        let tables = RelicTables::from_json(text).unwrap();
+        let world = WorldState::default();
+        let owned = OwnedEquipment::empty();
+        let stock = RelicStock::Unknown;
+        let wants = vec![
+            "A Prime Blueprint".to_owned(),
+            "B Prime Blueprint".to_owned(),
+            "C Prime Blueprint".to_owned(),
+            "D Prime Blueprint".to_owned(),
+        ];
+        let recent: HashSet<String> = HashSet::new();
+        let now: DateTime<Utc> = "2026-10-15T21:00:00Z".parse().unwrap();
+        let p = plan(&PlanInput {
+            now,
+            world: &world,
+            owned: &owned,
+            wants: &wants,
+            roster: &roster,
+            relics: &tables,
+            stock: &stock,
+            pins: &[],
+            recent_gear: &recent,
+            steel_path_tiebreak: true,
+        });
+        assert_eq!(p.focus.len(), 3, "at most 3 parts");
+        let eras: HashSet<&str> = p.focus.iter().map(|f| f.era.as_str()).collect();
+        assert_eq!(eras.len(), 3, "era spread: {eras:?}");
+    }
+
+    #[test]
+    fn persto_regression_era_gate_is_hard() {
+        // Brief #2 §0: the pass-1 demo paired Axi + Meso relics with
+        // Persto (Deimos) while its fissure was era-locked. Era
+        // compatibility gates BEFORE the cascade: an era-locked
+        // fissure never receives another era, and a mixed-era batch
+        // routes solely to live Omnia fissures.
+        let now: DateTime<Utc> = "2026-10-15T21:00:00Z".parse().unwrap();
+        let mut persto = syn_fissure(
+            "Persto (Deimos)",
+            "Survival",
+            "Meso",
+            "2026-10-15T23:00:00Z",
+        );
+        let _ = &mut persto;
+        let omnia = syn_fissure(
+            "Circulus (Lua)",
+            "Survival",
+            "Omnia",
+            "2026-10-15T23:00:00Z",
+        );
+        let fiss = vec![persto.clone(), omnia.clone()];
+        // Axi batch: the Meso-locked Persto is not a candidate.
+        let axi = rank_fissures(&fiss, &["Axi"], 4, now, true);
+        assert!(
+            !axi.is_empty() && axi.iter().all(|p| p.fissure.tier == "Omnia"),
+            "Axi batch sees only Omnia: {:?}",
+            axi.iter().map(|p| &p.fissure.node).collect::<Vec<_>>(),
+        );
+        // Mixed Axi+Meso batch: Omnia only.
+        let mixed = rank_fissures(&fiss, &["Axi", "Meso"], 4, now, true);
+        assert_eq!(mixed.len(), 1);
+        assert_eq!(mixed[0].fissure.node, "Circulus (Lua)");
+        // Compatible Meso batch still reaches the locked fissure.
+        let meso = rank_fissures(&fiss, &["Meso"], 4, now, true);
+        assert!(meso.iter().any(|p| p.fissure.node == "Persto (Deimos)"));
+    }
+
+    #[test]
+    fn resurgence_matches_regardless_of_word_order() {
+        // Live rotation lists "Prime Baza Gun" (token "prime baza gun");
+        // the goal is "Baza Prime". Word order must not matter.
+        let tokens: HashSet<String> =
+            ["prime baza gun".to_owned(), "ivara prime".to_owned()]
+                .into_iter()
+                .collect();
+        assert!(gear_in_tokens("Baza Prime", &tokens));
+        assert!(gear_in_tokens("Ivara Prime", &tokens));
+        assert!(!gear_in_tokens("Caliban Prime", &tokens));
+    }
+
+    #[test]
+    fn current_before_vaulted_frames_before_weapons() {
+        // Addendum #10: unvaulted/current ranks before vaulted; frames
+        // before weapons within a tier. Pins still override everything.
+        let roster = Roster::from_json(
+            r#"[{"name": "Vaulted Frame", "vaulted": true, "type": "warframe",
+                  "parts": [{"name": "Vaulted Frame Blueprint"}]},
+                 {"name": "Current Gun", "vaulted": false, "type": "weapon",
+                  "parts": [{"name": "Current Gun Barrel"}]},
+                 {"name": "Current Frame", "vaulted": false, "type": "warframe",
+                  "parts": [{"name": "Current Frame Blueprint"}]}]"#,
+        )
+        .unwrap();
+        let tables = mini_tables();
+        let world = WorldState::default();
+        let owned = OwnedEquipment::empty();
+        let stock = RelicStock::Unknown;
+        let wants = vec![
+            "Vaulted Frame Blueprint".to_owned(),
+            "Current Gun Barrel".to_owned(),
+            "Current Frame Blueprint".to_owned(),
+        ];
+        let recent: HashSet<String> = HashSet::new();
+        let now: DateTime<Utc> = "2026-10-15T21:00:00Z".parse().unwrap();
+        let p = plan(&PlanInput {
+            now,
+            world: &world,
+            owned: &owned,
+            wants: &wants,
+            roster: &roster,
+            relics: &tables,
+            stock: &stock,
+            pins: &[],
+            recent_gear: &recent,
+            steel_path_tiebreak: true,
+        });
+        let order: Vec<&str> = p.goals.iter().map(|g| g.gear.as_str()).collect();
+        assert_eq!(
+            order,
+            vec!["Current Frame", "Current Gun", "Vaulted Frame"],
+            "current first, frames before weapons: {order:?}"
+        );
     }
 
     #[test]

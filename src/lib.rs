@@ -6,6 +6,7 @@ pub mod config;
 pub mod elog;
 pub mod fetch;
 pub mod model;
+pub mod pack;
 pub mod plan;
 pub mod portal;
 pub mod render;

@@ -1,0 +1,47 @@
+# Taubound data pack v1 — Fracker event pack (TOML).
+#
+# Recorded from Seth's in-game shop screenshots (data/taubound-shop.md);
+# never invent prices not listed there. Income verified: 50 Moonflesh per
+# normal alert (EE.log MissionInfo countedItems), 75 on Steel Path.
+# Pack expires 2026-11-17 (event end); after that tier 1 falls back to
+# whatever `alerts`/`events` carry instead (planner is generic).
+
+[pack]
+name = "taubound"
+version = 1
+expires = "2026-11-17T16:00:00Z"
+
+[event]
+name = "Road To Tau"
+resource = "Road To Tau Event Resource"
+resource_type = "Road To Tau Event Resource"
+alert_payout = 50
+alert_payout_steel_path = 75
+
+# Contegorus set: gated on the COMMUNITY goal, not personal progress.
+# World state `/pc/events` "Road To Tau Event" carries `health` progress
+# (1.34 day one, 1.48 Oct 16); no milestone->piece mapping exists in the
+# feed, so Fracker shows progress, never predicts which piece opens next.
+[community_goal]
+description = "Road To Tau Event"
+gated_set = "Contegorus"
+gated_pieces = ["Contegorus Greaves", "Contegorus Pauldrons", "Contegorus Chest Plate"]
+gated_piece_price = 175
+
+[shop]
+page1_subtotal = 2950
+page2_priced_unowned_subtotal = 845
+page3_priced_unowned_subtotal = 275
+everything_priced_unowned = 4070
+excluding_consumables = 3650
+purchasable_now = 3545
+
+# Arcane shopping guidance (research 2026-10-15): none of the 11 is
+# event-only (Taubound is a discount, not exclusive access). A rank-5 set
+# takes 21 copies; at 5-8 Moonflesh each that is 105-168 per set.
+[arcanes]
+copies_per_rank5_set = 21
+finish = ["Melee Retaliation", "Melee Influence"]
+next = ["Melee Exposure", "Arcane Ice Storm", "Melee Afflictions", "Secondary Fortifier"]
+playstyle = ["Arcane Battery", "Melee Animosity"]
+skip = ["Melee Vortex", "Secondary Surge", "Melee Fortification"]
