@@ -120,11 +120,7 @@ async fn run_demo(args: &Args) -> Result<(), String> {
         outcome.icons_resolved,
         outcome.backlog_primes,
         outcome.mastery_rank,
-        if outcome.endpoint_failures.is_empty() {
-            "all live".to_owned()
-        } else {
-            outcome.endpoint_failures.join("; ")
-        },
+        outcome.endpoints_label(),
     );
     println!(
         "demo: self-contained icons: {} embedded thumbnails, {} hotlink fallbacks",

@@ -78,21 +78,33 @@ pub struct ReportOutcome {
     pub hotlinks: usize,
     pub mastery_rank: u32,
     pub endpoint_failures: Vec<String>,
+    /// The run skipped the network and read fixtures (`--offline`).
+    pub offline: bool,
     pub generated_at: DateTime<Utc>,
     pub out: PathBuf,
 }
 
 impl ReportOutcome {
+    /// Honest endpoints label: explicit failures, else "offline
+    /// (fixtures)" for a fixture-only run, else "all live".
+    pub fn endpoints_label(&self) -> String {
+        if !self.endpoint_failures.is_empty() {
+            self.endpoint_failures.join("; ")
+        } else if self.offline {
+            "offline (fixtures)".to_owned()
+        } else {
+            "all live".to_owned()
+        }
+    }
+
     /// One-line status ("61 goals · 11 chunks · live").
     pub fn summary(&self) -> String {
-        let endpoints = if self.endpoint_failures.is_empty() {
-            "all live".to_owned()
-        } else {
-            self.endpoint_failures.join("; ")
-        };
         format!(
-            "{} goals, {} chunks, {} bars ({endpoints})",
-            self.goals, self.chunks, self.bars
+            "{} goals, {} chunks, {} bars ({})",
+            self.goals,
+            self.chunks,
+            self.bars,
+            self.endpoints_label()
         )
     }
 }
@@ -316,6 +328,7 @@ pub async fn generate(cfg: &ReportConfig) -> Result<ReportOutcome, String> {
         hotlinks: hotlink_count,
         mastery_rank,
         endpoint_failures,
+        offline: cfg.offline,
         generated_at: now,
         out: cfg.out.clone(),
     })
@@ -480,6 +493,7 @@ mod tests {
         assert!(html.contains("<html"), "real HTML page");
         assert!(outcome.goals > 0, "goal cards from the backlog");
         assert!(!outcome.endpoint_failures.iter().any(|f| f.starts_with("worldstate")));
+        assert_eq!(outcome.endpoints_label(), "offline (fixtures)");
         // Product page keeps CDN hotlinks (embedded_icons None).
         assert!(html.contains("cdn.warframestat.us"), "product page hotlinks icons");
         // No leftover temp file after the atomic publish.
