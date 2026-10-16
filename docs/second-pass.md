@@ -7,6 +7,25 @@ original brief where they disagree), `BRIEF.md`, `WEEKLIES.md`,
 `data/backlog.json`, `data/wants-pruned.json`,
 `data/taubound-shop.md`, `fixtures/VALIDATION.md`.
 
+## 0. CORRECTNESS RULE — fissure era compatibility is a HARD gate
+
+(Added mid-flight 2026-10-15; Seth caught the pass-1 demo sending a
+mixed-era batch to Persto.) A void fissure accepts ONLY relics of
+its own era (Lith/Meso/Neo/Axi/Requiem) — the exception is an
+**Omnia** fissure (e.g. Conjunction Survival, and Omnia rotations
+elsewhere), which accepts every era. Therefore:
+
+- Filter fissure candidates by compatibility with the ENTIRE batch
+  BEFORE any cascade scoring (expiry / minutes-per-crack / goal fit
+  / SP tiebreak all operate only on compatible fissures).
+- A mixed-era batch may ONLY be routed to a live Omnia fissure.
+- If no compatible fissure is live, re-form the batch around a live
+  era — never emit an action line that sends a relic to a fissure
+  that cannot crack it.
+- Persto (Deimos) is the regression case: the pass-1 demo paired
+  Axi + Meso relics with it while its fissure was era-locked. Add a
+  planner test reproducing exactly this and asserting the gate.
+
 ## Scope of THIS pass
 
 1. **Targets = the reconciled backlog.** Goal cards derive from
