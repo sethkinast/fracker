@@ -1,6 +1,6 @@
 //! Event data packs (TOML): time-boxed event knowledge the planner
 //! consumes generically. Pack v1 is Taubound (`data/packs/taubound.toml`):
-//! alert payouts, shop totals, the community-gated Contegorus set, and
+//! alert payouts, shop totals, the community-gated set, and
 //! arcane shopping guidance. Packs expire; after expiry the planner
 //! falls back to whatever world state carries.
 
@@ -33,6 +33,8 @@ pub struct PackMeta {
 pub struct PackEvent {
     #[serde(default)]
     pub name: String,
+    #[serde(default, rename = "match")]
+    pub match_text: String,
     #[serde(default)]
     pub resource: String,
     #[serde(default)]
@@ -111,6 +113,7 @@ mod tests {
     fn pack_parses_with_brief_values() {
         let p = TauboundPack::from_toml(&pack_text()).unwrap();
         assert_eq!(p.pack.name, "taubound");
+        assert_eq!(p.event.match_text, "Road To Tau");
         assert_eq!(p.event.alert_payout, 50);
         assert_eq!(p.event.alert_payout_steel_path, 75);
         assert_eq!(p.community_goal.gated_pieces.len(), 3);

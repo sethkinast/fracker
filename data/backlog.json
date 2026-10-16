@@ -1,5 +1,5 @@
 {
- "note": "Mastery test: lifetime XP per item type in profile XPInfo >= 900k (suits/frames/companions) or 450k (weapons). Pets category excluded (dataset format). Exalted weapons excluded.",
+ "note": "Mastery test: lifetime XP per item type in profile XPInfo >= 900k (suits/frames/companions) or 450k (weapons). Pass-3 regen: companions wired via WFCD data/json/Pets.json + data/json/Sentinels.json (cached under data/cache/; manifest data/companions.toml) — 6 prime Sentinels in universe, 5 mastered per profile, Nautilus Prime unmastered; Kavasa Prime EXCLUDED (owned collar, not a weapon — addendum #22), 63 unmastered primes. Exalted weapons excluded.",
  "primes": {
   "roster": 163,
   "mastered": 99,

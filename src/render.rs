@@ -2,11 +2,18 @@
 //! Single self-contained file: inline CSS, no external assets except an
 //! optional Google Fonts link (clean offline fallback) and WFCD CDN
 //! icons that degrade to monograms when offline.
+//!
+//! All content (weekly board, caps, labels) arrives via the render
+//! context from the runtime tuning tables; this module holds no game
+//! content. Icon delivery is a mode: the product page hotlinks the CDN
+//! per BRIEF §4.2, while `--demo` embeds ≤128px data-URI thumbnails
+//! (see [`IconMode`]).
 
 use std::collections::{HashMap, HashSet};
 
 use crate::model::WorldState;
 use crate::plan::Plan;
+use crate::tuning::Tuning;
 
 // ---------------------------------------------------------------------------
 // Render context
@@ -25,10 +32,25 @@ pub struct RenderContext<'a> {
     pub mastery_rank: Option<u32>,
     /// Parent gear name -> WFCD `imageName` (addendum #14).
     pub icons: &'a HashMap<String, String>,
+    /// Parent gear name -> embedded data-URI thumbnail (demo mode).
+    /// When present for a gear, it replaces the CDN hotlink; the
+    /// product page passes None and keeps hotlinks per BRIEF §4.2.
+    pub embedded_icons: Option<&'a HashMap<String, String>>,
     /// Non-prime unmastered gear by category (list only, no routing).
     pub backlog_categories: &'a HashMap<String, Vec<String>>,
     pub daily: Option<DailyRender>,
     pub pack: Option<PackRender>,
+    /// Runtime tuning (weekly board, caps labels, sortie ledger).
+    pub tuning: &'a Tuning,
+}
+
+/// How item icons are delivered on the page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IconMode {
+    /// Product page: CDN hotlinks (BRIEF §4.2).
+    Hotlink,
+    /// Demo export: embedded ≤128px data-URI thumbnails.
+    Embedded,
 }
 
 /// Profile-backed daily bars: REMAINING caps from the live profile
@@ -46,49 +68,42 @@ pub struct DailyRender {
 pub struct PackRender {
     pub live: bool,
     pub expires_label: String,
-    /// Community-goal `health` on the Road To Tau event entry.
+    /// Community-goal `health` on the pack's event entry.
     pub contegorus_health: Option<f64>,
     pub arcane_line: String,
+    /// All display content below comes from the pack TOML, never Rust.
+    pub pack_name: String,
+    pub event_label: String,
+    pub payout_label: String,
+    pub gated_label: String,
 }
 
+#[derive(Debug, Clone)]
 pub struct WeeklyItem {
-    pub id: &'static str,
-    pub name: &'static str,
-    pub limit: &'static str,
-    pub time: &'static str,
-    pub obs: &'static str,
+    pub id: String,
+    pub name: String,
+    pub limit: String,
+    pub time: String,
+    pub obs: String,
+    pub deprioritized: bool,
 }
 
-/// All 24 tracked weeklies (WEEKLIES.md). Clem and Maroo are LAST —
-/// least important, "just there if you're passing by" (BRIEF §4.2).
-/// Copy is terse: labels, limits, times, 1-2 word sources.
-pub fn weekly_board() -> Vec<WeeklyItem> {
-    vec![
-        WeeklyItem { id: "archon", name: "Archon Hunt", limit: "1/wk", time: "30–45m", obs: "log" },
-        WeeklyItem { id: "netra", name: "Netracells", limit: "5 pulses shared", time: "10–15m", obs: "ledger" },
-        WeeklyItem { id: "deep", name: "Deep Archimedea", limit: "1×/wk · 2 pulses", time: "30–45m", obs: "manual" },
-        WeeklyItem { id: "temp", name: "Temporal Archimedea", limit: "1×/wk · 2 pulses", time: "30–45m", obs: "manual" },
-        WeeklyItem { id: "circuit", name: "Circuit", limit: "1 track/wk", time: "1.5–2h", obs: "manual" },
-        WeeklyItem { id: "circuit-sp", name: "Circuit SP", limit: "2 picks/wk", time: "1.5–2.5h", obs: "manual" },
-        WeeklyItem { id: "descendia", name: "Descendia N/SP", limit: "10 each/wk", time: "45–90m", obs: "manual" },
-        WeeklyItem { id: "kahl", name: "Kahl", limit: "1 set/wk · 115 Stock", time: "15–25m", obs: "manual" },
-        WeeklyItem { id: "nw-weekly", name: "Nightwave", limit: "5+2/wk", time: "passive", obs: "acts live" },
-        WeeklyItem { id: "cal1999", name: "1999 Calendar", limit: "1 page/wk", time: "passive", obs: "manual" },
-        WeeklyItem { id: "clan", name: "Clan Initiative", limit: "4 tiers/wk", time: "passive", obs: "manual" },
-        WeeklyItem { id: "conclave", name: "Conclave", limit: "3+bonus · Fri", time: "—", obs: "manual" },
-        WeeklyItem { id: "teshin-rot", name: "Teshin item", limit: "1/wk", time: "2m", obs: "world state" },
-        WeeklyItem { id: "teshin-cap", name: "Teshin caps", limit: "cipher 1 · Kuva/relic 25", time: "2m", obs: "manual" },
-        WeeklyItem { id: "palladino", name: "Palladino", limit: "1 ea/wk", time: "2m", obs: "manual" },
-        WeeklyItem { id: "acrithis", name: "Acrithis", limit: "5 wares · Sun", time: "2m", obs: "manual" },
-        WeeklyItem { id: "yonta", name: "Yonta Forma", limit: "3/wk", time: "2m", obs: "manual" },
-        WeeklyItem { id: "bird3", name: "Bird 3 shard", limit: "1/wk", time: "2m", obs: "manual" },
-        WeeklyItem { id: "chipper", name: "Chipper shard", limit: "1/wk R5", time: "2m", obs: "manual" },
-        WeeklyItem { id: "helminth", name: "Helminth", limit: "3 frames/wk", time: "2m", obs: "manual" },
-        WeeklyItem { id: "nw-shop", name: "NW Creds", limit: "rotation/wk", time: "2m", obs: "manual" },
-        WeeklyItem { id: "baro", name: "Baro", limit: "biweekly F–S", time: "5m", obs: "world state" },
-        WeeklyItem { id: "clem", name: "Clem", limit: "1/wk", time: "~10m", obs: "passing by" },
-        WeeklyItem { id: "maroo", name: "Maroo", limit: "1/wk", time: "~5m", obs: "passing by" },
-    ]
+/// The tracked weeklies, loaded from the data pack (file order =
+/// render order; flagged items render last and visually quiet).
+/// Copy stays terse: labels, limits, times, short sources.
+pub fn weekly_board(tuning: &Tuning) -> Vec<WeeklyItem> {
+    tuning
+        .weeklies
+        .iter()
+        .map(|w| WeeklyItem {
+            id: w.id.clone(),
+            name: w.name.clone(),
+            limit: w.limit.clone(),
+            time: w.time.clone(),
+            obs: w.obs.clone(),
+            deprioritized: w.deprioritized,
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -100,6 +115,15 @@ fn esc(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// Presentation-only capitalization for data-owned names.
+fn titlecase(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
 }
 
 fn world_age(world: &WorldState) -> String {
@@ -258,17 +282,19 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     }
     h.push_str("</section>\n</div>\n</div>\n");
 
-    // ---- Taubound strip (pack v1) ----
+    // ---- Event pack strip (content all from the pack TOML) ----
     if let Some(pack) = &ctx.pack {
         if pack.live {
-            h.push_str("<section><h2>Taubound</h2>\n");
+            h.push_str(&format!("<section><h2>{}</h2>\n", esc(&titlecase(&pack.pack_name))));
             let health = match pack.contegorus_health {
-                Some(v) => format!("Road To Tau {:.2}", v),
-                None => "Road To Tau —".to_owned(),
+                Some(v) => format!("{} {:.2}", pack.event_label, v),
+                None => format!("{} —", pack.event_label),
             };
             h.push_str(&format!(
-                "<div class=\"card tau\"><span class=\"tau-line\">Moonflesh 50 / 75 SP · ends {}</span><span class=\"tau-line\">Contegorus gated · {}</span><span class=\"tau-line\">{}</span></div>\n",
+                "<div class=\"card tau\"><span class=\"tau-line\">{} · ends {}</span><span class=\"tau-line\">{} · {}</span><span class=\"tau-line\">{}</span></div>\n",
+                esc(&pack.payout_label),
                 esc(&pack.expires_label),
+                esc(&pack.gated_label),
                 esc(&health),
                 esc(&pack.arcane_line),
             ));
@@ -297,8 +323,15 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     }
     h.push_str("</section>\n");
 
-    // ---- 4. nightwave ----
-    h.push_str("<section><h2>Nightwave</h2>\n");
+    // ---- 4. season acts (display name from the data pack) ----
+    let season_title = ctx
+        .tuning
+        .weeklies
+        .iter()
+        .find(|w| w.id == "nw-weekly")
+        .map(|w| w.name.as_str())
+        .unwrap_or("Season acts");
+    h.push_str(&format!("<section><h2>{}</h2>\n", esc(season_title)));
     match &ctx.world.nightwave {
         Some(nw) if !nw.active_challenges.is_empty() => {
             h.push_str(&format!("<div class=\"nw-season\">Season {} — acts, never a standing total.</div>\n", nw.season));
@@ -320,28 +353,29 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
             h.push_str("<div class=\"caveat\">Acts are a floor — Recovered backfill can exceed this list.</div>\n");
         }
         _ => {
-            h.push_str("<div class=\"card quiet\">No Nightwave season live in world state.</div>\n");
+            h.push_str(&format!(
+                "<div class=\"card quiet\">No {} season live in world state.</div>\n",
+                esc(season_title),
+            ));
         }
     }
     h.push_str("</section>\n");
 
     // ---- 5. this week ----
     h.push_str("<section><h2>This week</h2>\n<div class=\"wk-grid\">\n");
-    for w in weekly_board() {
-        let done_label = ctx.weekly_done.get(w.id).cloned().unwrap_or_default();
+    for w in weekly_board(ctx.tuning) {
+        let done_label = ctx.weekly_done.get(&w.id).cloned().unwrap_or_default();
         let done = !done_label.is_empty();
-        let small = (w.id == "clem" || w.id == "maroo") as u8;
-        let _ = small;
         h.push_str(&format!(
             "<label class=\"wk{item_class}{small_class}\"><input type=\"checkbox\" data-id=\"wk-{id}\"{checked}>\n<span class=\"wk-name\">{name}</span>\n<span class=\"wk-meta\">{limit} &middot; {time}</span>\n<span class=\"wk-obs\">{obs}{proven}</span></label>\n",
             item_class = if done { " done" } else { "" },
-            small_class = if w.id == "clem" || w.id == "maroo" { " wk-small" } else { "" },
+            small_class = if w.deprioritized { " wk-small" } else { "" },
             id = w.id,
             checked = if done { " checked" } else { "" },
-            name = esc(w.name),
-            limit = esc(w.limit),
-            time = esc(w.time),
-            obs = esc(w.obs),
+            name = esc(&w.name),
+            limit = esc(&w.limit),
+            time = esc(&w.time),
+            obs = esc(&w.obs),
             proven = if done { format!(" &middot; proven {}", esc(&done_label)) } else { String::new() },
         ));
     }
@@ -381,23 +415,31 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
             }
         }
         None => {
+            let caps = &ctx.tuning.planner.daily_caps;
             let (focus_cap, stand_cap) = match ctx.mastery_rank {
                 Some(mr) => (
-                    fmt_int(250_000 + 5_000 * mr),
-                    fmt_int(16_000 + 500 * mr),
+                    fmt_int(caps.focus_base + caps.focus_per_mr * mr),
+                    fmt_int(caps.standing_base + caps.standing_per_mr * mr),
                 ),
-                None => ("250k + 5k × MR".to_owned(), "16k + 500 × MR".to_owned()),
+                None => (
+                    caps.fallback_focus_label.clone(),
+                    caps.fallback_standing_label.clone(),
+                ),
             };
             h.push_str(&format!(
                 "<div class=\"card quiet\">Focus cap {focus_cap} · Standing cap {stand_cap} — profile offline.</div>\n"
             ));
         }
     }
-    let sortie_done = ctx.weekly_done.contains_key("sortie-daily");
+    let sortie = &ctx.tuning.planner.sortie;
+    let sortie_done = ctx.weekly_done.contains_key(&sortie.ledger_id);
     h.push_str(&format!(
-        "<label class=\"card bar\"><input type=\"checkbox\" data-id=\"sortie-daily\"{}>\n<span class=\"bar-name\">Sortie</span>\n<span class=\"bar-meta\">daily 17:00 UTC{}</span></label>\n",
-        if sortie_done { " checked" } else { "" },
-        if sortie_done { " · log" } else { "" },
+        "<label class=\"card bar\"><input type=\"checkbox\" data-id=\"{id}\"{checked}>\n<span class=\"bar-name\">{name}</span>\n<span class=\"bar-meta\">{reset}{proven}</span></label>\n",
+        id = esc(&sortie.ledger_id),
+        checked = if sortie_done { " checked" } else { "" },
+        name = esc(&sortie.name),
+        reset = esc(&sortie.reset_label),
+        proven = if sortie_done { " · log" } else { "" },
     ));
     h.push_str("</div>\n</section>\n");
 
@@ -406,10 +448,11 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     let live_resurg = plan.goals.iter().filter(|g| g.resurgence_live).count();
     h.push_str("<footer><section><h2>Targets</h2>\n");
     h.push_str(&format!(
-        "<div class=\"card snap\">{} goals · {} parts · {} Varzia-live</div>\n",
+        "<div class=\"card snap\">{} goals · {} parts · {} {}-live</div>\n",
         plan.goals.len(),
         total_wants,
         live_resurg,
+        ctx.tuning.planner.resurgence.contact,
     ));
     h.push_str("</section></footer>\n");
 
@@ -420,15 +463,25 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     h
 }
 
+/// Icon `src` for one parent gear: the embedded data-URI thumbnail
+/// when demo mode supplied one, else the CDN hotlink (product page).
+/// A prime part always shows its PARENT item's icon, never a generic
+/// part icon. Unresolved items keep the monogram (None).
+fn gear_icon_src(gear: &str, ctx: &RenderContext<'_>) -> Option<String> {
+    if let Some(embedded) = ctx.embedded_icons {
+        if let Some(uri) = embedded.get(gear) {
+            return Some(uri.clone());
+        }
+    }
+    crate::model::icon_url(gear, ctx.icons)
+}
+
 /// One parent group: icon + gear + pips, then aligned part rows
 /// (part | best relic + tier chance | stock | expected cracks).
-/// The icon is the PARENT ITEM's WFCD icon (addendum #14) — a prime
-/// part never shows a generic part icon. Unresolved items keep the
-/// monogram.
 fn backlog_group_html(g: &crate::plan::GoalCard, ctx: &RenderContext<'_>) -> String {
     let mut h = String::new();
     let initial = g.gear.chars().next().unwrap_or('?');
-    let icon = crate::model::icon_url(&g.gear, ctx.icons);
+    let icon = gear_icon_src(&g.gear, ctx);
     h.push_str("<article class=\"card bgroup\">\n");
     h.push_str("<div class=\"bhead\">");
     match &icon {
@@ -515,7 +568,7 @@ fn backlog_group_html(g: &crate::plan::GoalCard, ctx: &RenderContext<'_>) -> Str
 /// unmastered): icon, name, badges, pips, count, action kind.
 fn backlog_compact_html(g: &crate::plan::GoalCard, ctx: &RenderContext<'_>) -> String {
     let initial = g.gear.chars().next().unwrap_or('?');
-    let icon = crate::model::icon_url(&g.gear, ctx.icons);
+    let icon = gear_icon_src(&g.gear, ctx);
     let mut h = String::new();
     h.push_str("<div class=\"bline\">");
     match &icon {
@@ -561,6 +614,33 @@ fn backlog_compact_html(g: &crate::plan::GoalCard, ctx: &RenderContext<'_>) -> S
     h
 }
 
+/// Minimal base64 encoder (demo data-URI embedding). Dependency-free
+/// on purpose: the one external-asset path in the page needs no new
+/// crates.
+pub fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(ALPHABET[((triple >> 18) & 63) as usize] as char);
+        out.push(ALPHABET[((triple >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[((triple >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[(triple & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
 /// "Ivara Prime Chassis Blueprint" -> "Chassis" inside its parent group.
 fn short_part(part: &str, gear: &str) -> String {
     let s = part
@@ -816,6 +896,7 @@ mod tests {
 
     #[test]
     fn render_covers_settled_sections_and_dark_rules() {
+        let t = crate::tuning::Tuning::for_tests();
         let world = WorldState::default();
         let plan = Plan::default();
         // Lifetimes: build ctx inline to avoid borrow tangle.
@@ -832,9 +913,11 @@ mod tests {
             proven_done: &proven,
             mastery_rank: None,
             icons: &icons,
+            embedded_icons: None,
             backlog_categories: &cats,
             daily: None,
             pack: None,
+            tuning: &t,
         };
         let html = render_plan(&plan, &ctx);
         for section in [
@@ -856,6 +939,7 @@ mod tests {
     #[test]
     fn backlog_group_shows_parent_icon_not_part_icon() {
         use crate::plan::{GoalCard, GoalAction, ActionKind, PartRow, PartState, Rarity};
+        let t = crate::tuning::Tuning::for_tests();
         let weekly: HashMap<String, String> = HashMap::new();
         let proven: HashSet<String> = HashSet::new();
         let icons: HashMap<String, String> =
@@ -873,9 +957,11 @@ mod tests {
             proven_done: &proven,
             mastery_rank: None,
             icons: &icons,
+            embedded_icons: None,
             backlog_categories: &cats,
             daily: None,
             pack: None,
+            tuning: &t,
         };
         let plan = Plan {
             goals: vec![GoalCard {
@@ -912,10 +998,116 @@ mod tests {
     }
 
     #[test]
-    fn clem_and_maroo_render_last() {
-        let board = weekly_board();
-        let tail: Vec<&str> = board.iter().rev().take(2).map(|w| w.id).collect();
-        assert!(tail.contains(&"clem") && tail.contains(&"maroo"));
+    fn base64_encoder_matches_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        // Binary-transparent (PNG magic bytes).
+        assert_eq!(
+            base64_encode(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]),
+            "iVBORw0KGgo="
+        );
+    }
+
+    #[test]
+    fn least_important_weeklies_render_last() {
+        // Flagged in data, not code: the last board entries carry the
+        // deprioritized flag and the quiet style.
+        let t = crate::tuning::Tuning::for_tests();
+        let board = weekly_board(&t);
         assert_eq!(board.len(), 24);
+        let tail = &board[board.len() - 2..];
+        assert!(tail.iter().all(|w| w.deprioritized));
+        assert!(board[..board.len() - 2].iter().all(|w| !w.deprioritized));
+    }
+
+    #[test]
+    fn embedded_icons_replace_hotlinks() {
+        use crate::plan::{GoalCard, GoalAction, ActionKind, PartRow, PartState, Rarity};
+        let t = crate::tuning::Tuning::for_tests();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> =
+            [("Ivara Prime".to_owned(), "IvaraPrime.png".to_owned())]
+                .into_iter()
+                .collect();
+        let embedded: HashMap<String, String> = [(
+            "Ivara Prime".to_owned(),
+            "data:image/png;base64,iVBORw0KGgo=".to_owned(),
+        )]
+        .into_iter()
+        .collect();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let world = WorldState::default();
+        fn mk<'a>(
+            world: &'a WorldState,
+            weekly: &'a HashMap<String, String>,
+            proven: &'a HashSet<String>,
+            icons: &'a HashMap<String, String>,
+            embedded: Option<&'a HashMap<String, String>>,
+            cats: &'a HashMap<String, Vec<String>>,
+            t: &'a crate::tuning::Tuning,
+        ) -> RenderContext<'a> {
+            RenderContext {
+                world,
+                generated_label: "x".to_owned(),
+                targets_status: "t".to_owned(),
+                world_status: "w".to_owned(),
+                weekly_done: weekly,
+                proven_done: proven,
+                mastery_rank: None,
+                icons,
+                embedded_icons: embedded,
+                backlog_categories: cats,
+                daily: None,
+                pack: None,
+                tuning: t,
+            }
+        }
+        let plan = Plan {
+            goals: vec![GoalCard {
+                gear: "Ivara Prime".to_owned(),
+                is_warframe: true,
+                vaulted: true,
+                resurgence_live: false,
+                wants: vec![],
+                parts_have: 0,
+                parts_total: 0,
+                parts: vec![PartRow {
+                    name: "Ivara Prime Chassis Blueprint".to_owned(),
+                    state: PartState::Need,
+                    relics: vec![],
+                    best_odds: String::new(),
+                    rarity: Rarity::Rare,
+                    deal: None,
+                }],
+                action: GoalAction {
+                    text: "x".to_owned(),
+                    kind: ActionKind::Parked,
+                    relic: None,
+                    score: 0.0,
+                },
+            }],
+            ..Default::default()
+        };
+        let hotlinked = render_plan(&plan, &mk(&world, &weekly, &proven, &icons, None, &cats, &t));
+        assert!(
+            hotlinked.contains("https://cdn.warframestat.us/img/IvaraPrime.png"),
+            "product page keeps hotlinks"
+        );
+        let embedded_html = render_plan(
+            &plan,
+            &mk(&world, &weekly, &proven, &icons, Some(&embedded), &cats, &t),
+        );
+        assert!(
+            embedded_html.contains("data:image/png;base64,"),
+            "demo embeds data URIs"
+        );
+        assert!(
+            !embedded_html.contains("https://cdn.warframestat.us/img/IvaraPrime.png"),
+            "demo fetches no hotlinks for embedded gears"
+        );
     }
 }

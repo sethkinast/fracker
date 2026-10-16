@@ -1,0 +1,178 @@
+# Weekly board — the tracked weeklies (source: WEEKLIES.md summary table).
+#
+# DATA-PACK PRINCIPLE (addendum #20): this file is the ONLY place weekly
+# content lives. Rust only interprets it (`src/tuning.rs` loader,
+# `src/render.rs` board renderer). Render order = file order; the two
+# least-important items render LAST ("just there if you're passing by").
+# `obs` = observability source: log | ledger | manual | acts live | world state.
+
+[[weekly]]
+id = "archon"
+name = "Archon Hunt"
+limit = "1/wk"
+time = "30–45m"
+obs = "log"
+
+[[weekly]]
+id = "netra"
+name = "Netracells"
+limit = "5 pulses shared"
+time = "10–15m"
+obs = "ledger"
+
+[[weekly]]
+id = "deep"
+name = "Deep Archimedea"
+limit = "1×/wk · 2 pulses"
+time = "30–45m"
+obs = "manual"
+
+[[weekly]]
+id = "temp"
+name = "Temporal Archimedea"
+limit = "1×/wk · 2 pulses"
+time = "30–45m"
+obs = "manual"
+
+[[weekly]]
+id = "circuit"
+name = "Circuit"
+limit = "1 track/wk"
+time = "1.5–2h"
+obs = "manual"
+
+[[weekly]]
+id = "circuit-sp"
+name = "Circuit SP"
+limit = "2 picks/wk"
+time = "1.5–2.5h"
+obs = "manual"
+
+[[weekly]]
+id = "descendia"
+name = "Descendia N/SP"
+limit = "10 each/wk"
+time = "45–90m"
+obs = "manual"
+
+[[weekly]]
+id = "kahl"
+name = "Kahl"
+limit = "1 set/wk · 115 Stock"
+time = "15–25m"
+obs = "manual"
+
+[[weekly]]
+id = "nw-weekly"
+name = "Nightwave"
+limit = "5+2/wk"
+time = "passive"
+obs = "acts live"
+
+[[weekly]]
+id = "cal1999"
+name = "1999 Calendar"
+limit = "1 page/wk"
+time = "passive"
+obs = "manual"
+
+[[weekly]]
+id = "clan"
+name = "Clan Initiative"
+limit = "4 tiers/wk"
+time = "passive"
+obs = "manual"
+
+[[weekly]]
+id = "conclave"
+name = "Conclave"
+limit = "3+bonus · Fri"
+time = "—"
+obs = "manual"
+
+[[weekly]]
+id = "teshin-rot"
+name = "Teshin item"
+limit = "1/wk"
+time = "2m"
+obs = "world state"
+
+[[weekly]]
+id = "teshin-cap"
+name = "Teshin caps"
+limit = "cipher 1 · Kuva/relic 25"
+time = "2m"
+obs = "manual"
+
+[[weekly]]
+id = "palladino"
+name = "Palladino"
+limit = "1 ea/wk"
+time = "2m"
+obs = "manual"
+
+[[weekly]]
+id = "acrithis"
+name = "Acrithis"
+limit = "5 wares · Sun"
+time = "2m"
+obs = "manual"
+
+[[weekly]]
+id = "yonta"
+name = "Yonta Forma"
+limit = "3/wk"
+time = "2m"
+obs = "manual"
+
+[[weekly]]
+id = "bird3"
+name = "Bird 3 shard"
+limit = "1/wk"
+time = "2m"
+obs = "manual"
+
+[[weekly]]
+id = "chipper"
+name = "Chipper shard"
+limit = "1/wk R5"
+time = "2m"
+obs = "manual"
+
+[[weekly]]
+id = "helminth"
+name = "Helminth"
+limit = "3 frames/wk"
+time = "2m"
+obs = "manual"
+
+[[weekly]]
+id = "nw-shop"
+name = "NW Creds"
+limit = "rotation/wk"
+time = "2m"
+obs = "manual"
+
+[[weekly]]
+id = "baro"
+name = "Baro"
+limit = "biweekly F–S"
+time = "5m"
+obs = "world state"
+
+# Least important: render last, visually quiet.
+[[weekly]]
+id = "clem"
+name = "Clem"
+limit = "1/wk"
+time = "~10m"
+obs = "passing by"
+deprioritized = true
+
+[[weekly]]
+id = "maroo"
+name = "Maroo"
+limit = "1/wk"
+time = "~5m"
+obs = "passing by"
+deprioritized = true

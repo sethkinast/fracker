@@ -62,6 +62,8 @@ fn golden_plan_recompute() -> Golden {
     let stock: &'static RelicStock = Box::leak(Box::new(RelicStock::Unknown));
     let pins: &'static Vec<String> = Box::leak(Box::new(Vec::new()));
     let recent: &'static HashSet<String> = Box::leak(Box::new(HashSet::new()));
+    let tuning: &'static fracker::tuning::Tuning =
+        Box::leak(Box::new(fracker::tuning::Tuning::load(&root().join("data")).unwrap()));
     let input = PlanInput {
         now: golden_now(),
         world,
@@ -73,6 +75,7 @@ fn golden_plan_recompute() -> Golden {
         pins,
         recent_gear: recent,
         steel_path_tiebreak: true,
+        tuning,
     };
     let plan = plan::plan(&input);
     // Re-read the backlog for assertions (the leaked copies are 'static).
@@ -102,17 +105,26 @@ fn golden_fixture_parses_with_live_content() {
 
 #[test]
 fn golden_live_profile_prunes_newly_mastered_backlog() {
-    // The reconciled backlog (Oct 15) held 64 unmastered primes; the
-    // live profile fixture shows Shade Prime + Tipedo Prime (both
-    // in-progress then) now built in XPInfo = mastered since. The
-    // planner prunes them — profile-backed state working end to end.
+    // The reconciled backlog holds 63 unmastered primes (64 on Oct 15
+    // minus the excluded collar, addendum #22); the live profile
+    // fixture shows Shade Prime + Tipedo Prime (both in-progress then)
+    // now built in XPInfo = mastered since. The planner prunes them —
+    // profile-backed state working end to end.
     let g = golden_plan_recompute();
     assert_eq!(
         g.backlog.primes.unmastered.len(),
-        64,
-        "reconciled backlog size"
+        63,
+        "reconciled backlog size (collar excluded)"
     );
-    assert_eq!(g.plan.goals.len(), 62, "two gears mastered since");
+    assert!(
+        !g.backlog
+            .primes
+            .unmastered
+            .iter()
+            .any(|e| e.name == "Kavasa Prime"),
+        "excluded collar never regenerates into the backlog"
+    );
+    assert_eq!(g.plan.goals.len(), 61, "two gears mastered since");
     assert!(
         !g.plan.goals.iter().any(|c| c.gear == "Shade Prime"),
         "Shade Prime pruned (now mastered)"

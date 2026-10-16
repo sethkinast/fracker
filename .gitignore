@@ -12,3 +12,7 @@ fixtures/reallog/
 
 # Rust
 target/
+
+# Seth's real inventory screenshots: local capture-session input only,
+# never committed (see fixtures/ocr-samples/NOTES.md).
+fixtures/ocr-samples/
