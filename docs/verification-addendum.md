@@ -169,5 +169,7 @@ it refines the brief where they disagree. For the next worker pass.
 31. **Do Now gaps (Seth, 2026-10-16; pass 5):** (a) the Do Now
     tab renders NO icons — its target parts and chunk rows get
     the parent-item icons like everywhere else (addendum #14
-    applies there too); (b) "Do Now" is a boring tab title —
-    rename it (Graf's pick: "First Crack"; Seth may veto).
+    applies there too); (b) "Do Now" is renamed **First Crack**
+    (Seth approved the pun, 2026-10-16: "send it"). The tab,
+    its header, and any copy referencing "Do Now" as the tab
+    name change in pass 5.
