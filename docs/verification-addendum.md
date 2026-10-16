@@ -215,3 +215,8 @@ it refines the brief where they disagree. For the next worker pass.
     offset) and reconcile on startup by processing any
     unprocessed tail. Polling may exist only as a fallback with
     inode-change detection.
+36. **Dispatch needs no separate go-ahead (Seth, 2026-10-16).**
+    Once a pass brief is written and presented, Graf dispatches
+    the worker directly — no approval tap per pass. Steering
+    still lands as addendum items; passes still freeze at
+    dispatch (#24).
