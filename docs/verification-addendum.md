@@ -159,3 +159,10 @@ it refines the brief where they disagree. For the next worker pass.
     Embedding (item 23) is ONLY for demo/review exports into
     sandboxed surfaces. A local icon cache is a possible later
     robustness tweak, not a requirement.
+30. **OCR ships BUNDLED (Seth, 2026-10-16).** No separate install:
+    the Flatpak carries a static tesseract binary + eng tessdata
+    as a sidecar; Fracker's engine trait probes it first (the
+    pass-3 auto-probing CLI engine is the seam). Pass 5 validates
+    the binding against Seth's real screenshot fixtures using a
+    user-space static tesseract — the same binary the package
+    will carry.
