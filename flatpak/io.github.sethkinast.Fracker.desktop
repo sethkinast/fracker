@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Fracker
+Comment=Warframe session planner
+Exec=fracker
+Icon=io.github.sethkinast.Fracker
+Terminal=false
+Categories=Game;Utility;
+Keywords=Warframe;Planner;Relic;OCR;

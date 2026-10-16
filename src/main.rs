@@ -171,7 +171,7 @@ async fn run_demo(args: &Args) -> Result<(), String> {
 
     // 5. Parent-item icons (addendum #14).
     let icons_text =
-        std::fs::read_to_string("data/icons.json").map_err(|e| format!("icons: {e}"))?;
+        std::fs::read_to_string(data_file("icons.json")).map_err(|e| format!("icons: {e}"))?;
     let icons = model::load_icons(&icons_text)?;
     let icon_resolved = backlog
         .gear_names()
@@ -180,7 +180,7 @@ async fn run_demo(args: &Args) -> Result<(), String> {
         .count();
 
     // 6. Taubound pack strip.
-    let pack_text = std::fs::read_to_string("data/packs/taubound.toml")
+    let pack_text = std::fs::read_to_string(data_file("packs/taubound.toml"))
         .map_err(|e| format!("taubound pack: {e}"))?;
     let taubound = pack::TauboundPack::from_toml(&pack_text)?;
     let pack_render = render::PackRender {
@@ -385,7 +385,7 @@ fn profile_context(
     snap: &fetch::ProfileSnapshot,
 ) -> (OwnedEquipment, Option<render::DailyRender>) {
     let names: std::collections::HashMap<String, String> =
-        std::fs::read_to_string("data/cache/item-names.json")
+        std::fs::read_to_string(data_file("cache/item-names.json"))
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_default();
