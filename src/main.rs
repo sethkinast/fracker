@@ -254,7 +254,12 @@ async fn run_demo(args: &Args) -> Result<(), String> {
     let tmp = args.out.with_extension("html.tmp");
     std::fs::write(&tmp, html).map_err(|e| format!("write demo: {e}"))?;
     std::fs::rename(&tmp, &args.out).map_err(|e| format!("publish demo: {e}"))?;
-    let bars = if ctx.daily.is_some() { 2 } else { 0 };
+    // Pass-4 bars: one per standing pool (PvP excluded) + focus.
+    let bars = if let Some(d) = &ctx.daily {
+        2 + d.families.len()
+    } else {
+        0
+    };
     println!(
         "demo: {} goals, {} chunks, {} bars -> {}",
         plan.goals.len(),
@@ -380,8 +385,14 @@ fn profile_context(
         focus_remaining: snap.daily.focus_remaining,
         focus_cap: caps.focus_base + caps.focus_per_mr * mr,
         families: {
-            let mut f: Vec<(String, u32)> =
-                snap.daily.per_family.iter().map(|(k, v)| (k.clone(), *v)).collect();
+            // Pass 4 §28: PvP leaves with the Conclave cut — never a bar.
+            let mut f: Vec<(String, u32)> = snap
+                .daily
+                .per_family
+                .iter()
+                .filter(|(k, _)| !k.eq_ignore_ascii_case("pvp"))
+                .map(|(k, v)| (k.clone(), *v))
+                .collect();
             f.sort_by(|a, b| a.0.cmp(&b.0));
             f
         },

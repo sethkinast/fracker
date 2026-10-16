@@ -460,6 +460,8 @@ pub struct AlertReward {
 #[serde(rename_all = "camelCase")]
 pub struct AlertMission {
     #[serde(default)]
+    pub description: String,
+    #[serde(default)]
     pub node: String,
     #[serde(default, rename = "type")]
     pub mission_type: String,
@@ -491,9 +493,29 @@ pub struct Alert {
     #[serde(default)]
     pub id: String,
     #[serde(default)]
+    pub tag: String,
+    #[serde(default)]
     pub expiry: String,
     #[serde(default)]
     pub mission: AlertMission,
+}
+
+impl Alert {
+    /// Time-limited EVENT alert (pass 4 Do Now §a): carries a counted
+    /// event-resource payout. Gift-of-the-Lotus alerts (no counted
+    /// payout, tag/description match) are a separate section.
+    pub fn is_event(&self) -> bool {
+        !self.mission.counted_items().is_empty() && !self.is_lotus()
+    }
+
+    /// Gift-of-the-Lotus alert (pass 4 Do Now §b): the feed tags them
+    /// (`tag` carries the Lotus gift marker) or the mission
+    /// description names the gift. Protocol heuristic, not content:
+    /// match text is the feed's own vocabulary.
+    pub fn is_lotus(&self) -> bool {
+        let hay = format!("{} {}", self.tag, self.mission.description).to_lowercase();
+        hay.contains("lotus") || hay.contains("gift")
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -599,7 +621,14 @@ pub struct NightWaveChallenge {
     pub id: String,
     #[serde(default)]
     pub title: String,
+    /// Act description: the name alone doesn't say what to do, so the
+    /// page renders name + description everywhere acts render
+    /// (pass 4 Do Now §e).
     #[serde(default)]
+    pub desc: String,
+    /// The feed's key is `reputation`; `standing` stays as the alias
+    /// so both shapes parse.
+    #[serde(default, alias = "reputation")]
     pub standing: u32,
     #[serde(default)]
     pub is_daily: bool,
@@ -629,11 +658,35 @@ pub struct SortieVariant {
 #[serde(rename_all = "camelCase")]
 pub struct VoidTrader {
     #[serde(default)]
+    pub activation: String,
+    #[serde(default)]
     pub expiry: String,
     #[serde(default)]
     pub location: String,
     #[serde(default)]
     pub active: bool,
+}
+
+impl VoidTrader {
+    /// Live window check (pass 4 Baro section): the feed's `active`
+    /// flag when present, else now inside [activation, expiry). The
+    /// section renders only while a trader is around — gone when he
+    /// leaves.
+    pub fn is_live(&self, now: &chrono::DateTime<chrono::Utc>) -> bool {
+        if self.active {
+            return true;
+        }
+        let open = self
+            .activation
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .ok();
+        let close = self.expiry.parse::<chrono::DateTime<chrono::Utc>>().ok();
+        match (open, close) {
+            (Some(a), Some(e)) => *now >= a && *now < e,
+            (None, Some(e)) => *now < e,
+            _ => self.active,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -666,11 +719,27 @@ pub struct WorldState {
     pub sortie: Option<Sortie>,
     #[serde(default, rename = "voidTrader")]
     pub baro: Option<VoidTrader>,
+    /// Full trader rotation (the feed carries both the singular and
+    /// the list; either shape proves Baro is around).
+    #[serde(default, rename = "voidTraders")]
+    pub void_traders: Vec<VoidTrader>,
 }
 
 impl WorldState {
     pub fn from_json(text: &str) -> Result<Self, String> {
         serde_json::from_str(text).map_err(|e| format!("worldstate: {e}"))
+    }
+
+    /// The live void trader, if any (pass 4 Baro section): the
+    /// singular entry when its window is live, else the first live
+    /// entry of the rotation list. None when he is gone.
+    pub fn active_trader(&self, now: &chrono::DateTime<chrono::Utc>) -> Option<&VoidTrader> {
+        if let Some(b) = &self.baro {
+            if b.is_live(now) {
+                return Some(b);
+            }
+        }
+        self.void_traders.iter().find(|t| t.is_live(now))
     }
 }
 
@@ -901,5 +970,106 @@ mod tests {
         assert!(!meso.accepts_eras(&["Axi", "Meso"]));
         assert!(!meso.accepts_eras(&[]));
         assert!(!omnia.accepts_eras(&[]));
+    }
+
+    #[test]
+    fn alert_sections_split_event_from_lotus() {
+        // Pass 4 Do Now §§a–b: counted-payout alerts are events; tagged
+        // gift alerts are their own section; bare alerts are neither.
+        let event = Alert {
+            tag: "RoadToTauEvent".to_owned(),
+            mission: AlertMission {
+                description: "Event Alert Title".to_owned(),
+                reward: AlertReward {
+                    counted_items: vec![CountedItem {
+                        kind: "Road To Tau Event Resource".to_owned(),
+                        count: 50,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(event.is_event());
+        assert!(!event.is_lotus());
+        let gift = Alert {
+            tag: "GiftOfTheLotus".to_owned(),
+            mission: AlertMission {
+                description: "Gift of the Lotus".to_owned(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(gift.is_lotus());
+        assert!(!gift.is_event());
+        assert!(!Alert::default().is_event());
+        assert!(!Alert::default().is_lotus());
+    }
+
+    #[test]
+    fn live_fixture_alerts_parse_tags_and_payouts() {
+        let text = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/worldstate.json"),
+        )
+        .unwrap();
+        let world = WorldState::from_json(&text).unwrap();
+        assert!(!world.alerts.is_empty());
+        assert!(
+            world.alerts.iter().all(|a| a.is_event()),
+            "fixture alerts all carry the event payout"
+        );
+        assert!(
+            !world.alerts.iter().any(|a| a.is_lotus()),
+            "no gift alerts live in this fixture — section hides"
+        );
+    }
+
+    #[test]
+    fn live_fixture_nightwave_carries_descriptions() {
+        // Pass 4 §e: name + description everywhere acts render.
+        let text = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/worldstate.json"),
+        )
+        .unwrap();
+        let world = WorldState::from_json(&text).unwrap();
+        let nw = world.nightwave.expect("recorded nightwave");
+        assert!(!nw.active_challenges.is_empty());
+        for act in &nw.active_challenges {
+            assert!(!act.title.is_empty());
+            assert!(!act.desc.is_empty(), "missing description: {}", act.id);
+            assert!(act.standing > 0, "reputation parses: {}", act.id);
+        }
+    }
+
+    #[test]
+    fn trader_section_follows_the_live_window() {
+        // Pass 4 Baro section: live only while a trader window covers
+        // now (singular or list shape); gone when he leaves.
+        let text = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/worldstate.json"),
+        )
+        .unwrap();
+        let world = WorldState::from_json(&text).unwrap();
+        assert_eq!(world.void_traders.len(), 1, "rotation list parses");
+        let before: chrono::DateTime<chrono::Utc> =
+            "2026-10-16T02:55:00Z".parse().unwrap();
+        assert!(
+            world.active_trader(&before).is_none(),
+            "window opens 13:00 — section hides at 02:55"
+        );
+        let during: chrono::DateTime<chrono::Utc> =
+            "2026-10-17T12:00:00Z".parse().unwrap();
+        assert!(
+            world.active_trader(&during).is_some(),
+            "section renders mid-window"
+        );
+        let after: chrono::DateTime<chrono::Utc> =
+            "2026-10-19T00:00:00Z".parse().unwrap();
+        assert!(
+            world.active_trader(&after).is_none(),
+            "gone when he leaves"
+        );
     }
 }

@@ -88,6 +88,35 @@ pub struct WeeklyItem {
     pub deprioritized: bool,
 }
 
+/// Do Now alert subsection (pass 4 §§a–b): one card per live alert —
+/// node, type, payout, countdown. The whole subsection hides when
+/// empty; headers arrive from the tuning tables, never Rust.
+fn donow_alert_section(
+    h: &mut String,
+    header: &str,
+    alerts: &[crate::plan::AlertView],
+    tuning: &Tuning,
+    cls: &str,
+) {
+    if alerts.is_empty() {
+        return;
+    }
+    h.push_str(&format!("<h3 class=\"donow-sub\">{}</h3>\n<div class=\"expiring\">\n", esc(header)));
+    for a in alerts {
+        let est = tuning.missions.base_minutes(&a.mission_type) as u32
+            + tuning.missions.overhead as u32;
+        h.push_str(&format!(
+            "<div class=\"card exp {cls}\"><span class=\"exp-title\">{} ({}) — {}</span>\n<span class=\"exp-sub\">{} left · ~{}m</span></div>\n",
+            esc(&a.node),
+            esc(&a.mission_type),
+            esc(&a.payout),
+            esc(&a.left),
+            est,
+        ));
+    }
+    h.push_str("</div>\n");
+}
+
 /// The tracked weeklies, loaded from the data pack (file order =
 /// render order; flagged items render last and visually quiet).
 /// Copy stays terse: labels, limits, times, short sources.
@@ -149,8 +178,13 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     // every repaint dark (root background + color-scheme: dark).
     h.push_str("<meta http-equiv=\"refresh\" content=\"60\">\n");
     h.push_str("<title>Fracker — session plan</title>\n");
-    h.push_str("<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">\n");
-    h.push_str("<link rel=\"stylesheet\" href=\"https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&display=swap\">\n");
+    // Demo exports are self-contained (addendum #23: zero CDN
+    // references): no font links, no hotlinks — system type only.
+    // The product page keeps the display type + CDN icons.
+    if ctx.embedded_icons.is_none() {
+        h.push_str("<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">\n");
+        h.push_str("<link rel=\"stylesheet\" href=\"https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&display=swap\">\n");
+    }
     h.push_str("<style>\n");
     h.push_str(CSS);
     h.push_str("\n</style>\n</head>\n<body>\n<div class=\"wrap\">\n");
@@ -173,10 +207,24 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     h.push_str("<input type=\"radio\" name=\"tab\" id=\"tab-backlog\"><label class=\"tab\" for=\"tab-backlog\">Backlog</label>\n");
 
     // ---- tab 1: do now ----
-    // Exactly ONE loud element (the current instruction); everything
-    // else on the page stays quiet. Crack chunks pursue only the
-    // ≤3 focus parts.
+    // Pass-4 band, top to bottom: time-limited event alerts (§a),
+    // the separate gift section (§b, hides when empty), the
+    // first-class rotation element (§d), then the ≤3 focus relics
+    // with what they give (§c) + the slate. Exactly ONE loud element
+    // (the current instruction); everything else stays quiet.
     h.push_str("<div class=\"tabpage\" id=\"page-donow\">\n<section><h2>Do now</h2>\n");
+    donow_alert_section(&mut h, &ctx.tuning.planner.alert_sections.event_header, &plan.event_alerts, ctx.tuning, "evt");
+    donow_alert_section(&mut h, &ctx.tuning.planner.alert_sections.lotus_header, &plan.lotus_alerts, ctx.tuning, "lotus");
+    if let Some(r) = &plan.resurgence {
+        h.push_str(&format!(
+            "<div class=\"card resurg-first\"><span class=\"resurg-line\">{} — {} ({}) · ends {}</span>\n<span class=\"resurg-sub\">Vaulted relics for {} while the rotation is live.</span></div>\n",
+            esc(&r.contact),
+            esc(&r.gears.join(", ")),
+            esc(&r.location),
+            esc(&r.ends_in),
+            esc(&r.currency),
+        ));
+    }
     if !plan.focus.is_empty() {
         h.push_str("<div class=\"focus\">\n");
         for f in &plan.focus {
@@ -282,6 +330,18 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     }
     h.push_str("</section>\n</div>\n</div>\n");
 
+    // ---- Trader section (pass 4): his OWN section, present only
+    // while a trader window covers now — gone when he leaves. ----
+    if let Some(b) = &plan.baro {
+        h.push_str(&format!("<section><h2>{}</h2>\n", esc(&b.vendor)));
+        h.push_str(&format!(
+            "<div class=\"card vendor\"><span class=\"vendor-line\">{} · ends {}</span>\n<span class=\"vendor-sub\">Biweekly window — check inventory.</span></div>\n",
+            esc(&b.location),
+            esc(&b.ends_in),
+        ));
+        h.push_str("</section>\n");
+    }
+
     // ---- Event pack strip (content all from the pack TOML) ----
     if let Some(pack) = &ctx.pack {
         if pack.live {
@@ -323,14 +383,10 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     }
     h.push_str("</section>\n");
 
-    // ---- 4. season acts (display name from the data pack) ----
-    let season_title = ctx
-        .tuning
-        .weeklies
-        .iter()
-        .find(|w| w.id == "nw-weekly")
-        .map(|w| w.name.as_str())
-        .unwrap_or("Season acts");
+    // ---- 4. season acts (pass 4: own section; name + DESCRIPTION
+    // everywhere acts render — the name alone doesn't say what to
+    // do; header from the tuning tables, never Rust) ----
+    let season_title = ctx.tuning.planner.nightwave.name.as_str();
     h.push_str(&format!("<section><h2>{}</h2>\n", esc(season_title)));
     match &ctx.world.nightwave {
         Some(nw) if !nw.active_challenges.is_empty() => {
@@ -340,11 +396,12 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
                 let tag = if a.is_daily { "daily" } else if a.is_elite { "elite" } else { "weekly" };
                 let done = ctx.proven_done.contains(&a.id);
                 h.push_str(&format!(
-                    "<label class=\"nw{item_class}\"><input type=\"checkbox\" data-id=\"nw-{id}\"{checked}>\n<span class=\"nw-title\">{title}</span>\n<span class=\"nw-meta\">{tag} &middot; {standing} standing</span></label>\n",
+                    "<label class=\"nw{item_class}\"><input type=\"checkbox\" data-id=\"nw-{id}\"{checked}>\n<span class=\"nw-title\">{title}</span>\n<span class=\"nw-desc\">{desc}</span>\n<span class=\"nw-meta\">{tag} &middot; {standing} standing</span></label>\n",
                     item_class = if done { " done" } else { "" },
                     id = esc(&a.id),
                     checked = if done { " checked" } else { "" },
                     title = esc(&a.title),
+                    desc = esc(&a.desc),
                     tag = tag,
                     standing = a.standing,
                 ));
@@ -381,37 +438,40 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     }
     h.push_str("</div>\n</section>\n");
 
-    // ---- 6. today's bars (profile REMAINING values, never estimated) ----
+    // ---- 6. today's bars (pass 4 §28: one slim bar per standing
+    // pool — profile REMAINING values, never estimated — plus the
+    // focus bar. Terse labels; full pools dim (the pattern is the
+    // information). PvP is dropped with the Conclave cut.)
+    // ----
     h.push_str("<section><h2>Today</h2>\n<div class=\"bars\">\n");
     match &ctx.daily {
         Some(d) => {
-            let focus_pct = (100.0 * (1.0 - d.focus_remaining as f64 / d.focus_cap as f64))
-                .clamp(0.0, 100.0);
-            let aff_pct = (100.0
-                * (1.0 - d.affiliation_remaining as f64 / d.affiliation_cap as f64))
-            .clamp(0.0, 100.0);
-            h.push_str(&format!(
-                "<div class=\"card bar\"><div class=\"bar-name\">Focus · {} / {} left</div>\n<div class=\"bar-track\"><div class=\"bar-fill\" style=\"width:{:.0}%\"></div></div></div>\n",
-                fmt_int(d.focus_remaining),
-                fmt_int(d.focus_cap),
-                focus_pct,
+            h.push_str(&pool_bar(
+                "Focus",
+                d.focus_remaining,
+                d.focus_cap,
+                false,
             ));
-            h.push_str(&format!(
-                "<div class=\"card bar\"><div class=\"bar-name\">Standing · {} / {} left</div>\n<div class=\"bar-track\"><div class=\"bar-fill\" style=\"width:{:.0}%\"></div></div></div>\n",
-                fmt_int(d.affiliation_remaining),
-                fmt_int(d.affiliation_cap),
-                aff_pct,
+            h.push_str(&pool_bar(
+                "Standing",
+                d.affiliation_remaining,
+                d.affiliation_cap,
+                false,
             ));
-            if !d.families.is_empty() {
-                let fams: Vec<String> = d
-                    .families
-                    .iter()
-                    .map(|(k, v)| format!("{} {}", short_family(k), fmt_int(*v)))
-                    .collect();
-                h.push_str(&format!(
-                    "<div class=\"card quiet fam\">{}</div>\n",
-                    esc(&fams.join(" · ")),
-                ));
+            let have: HashMap<&str, u32> =
+                d.families.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+            for fam in &ctx.tuning.planner.daily_caps.families {
+                if fam.eq_ignore_ascii_case("pvp") {
+                    continue;
+                }
+                if let Some(remaining) = have.get(fam.as_str()).copied() {
+                    h.push_str(&pool_bar(
+                        fam,
+                        remaining,
+                        d.affiliation_cap,
+                        true,
+                    ));
+                }
             }
         }
         None => {
@@ -467,11 +527,14 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
 /// when demo mode supplied one, else the CDN hotlink (product page).
 /// A prime part always shows its PARENT item's icon, never a generic
 /// part icon. Unresolved items keep the monogram (None).
+///
+/// Demo strictness (addendum #23: zero CDN references): when the
+/// caller passes an embed map (demo export), gears missing from the
+/// map fall back to the monogram — never to a hotlink — so the
+/// exported file fetches nothing.
 fn gear_icon_src(gear: &str, ctx: &RenderContext<'_>) -> Option<String> {
     if let Some(embedded) = ctx.embedded_icons {
-        if let Some(uri) = embedded.get(gear) {
-            return Some(uri.clone());
-        }
+        return embedded.get(gear).cloned();
     }
     crate::model::icon_url(gear, ctx.icons)
 }
@@ -682,9 +745,25 @@ fn fmt_int(n: u32) -> String {
     out.chars().rev().collect()
 }
 
-/// "DailyAffiliationCavia" -> "Cavia".
-fn short_family(key: &str) -> &str {
-    key.strip_prefix("DailyAffiliation").unwrap_or(key)
+/// One standing/focus pool bar: remaining-of-cap, terse label. Full
+/// pools dim (`bar-full`) — the pattern is the information. Family
+/// pools render slim; Focus + main Standing render full-size.
+fn pool_bar(name: &str, remaining: u32, cap: u32, slim: bool) -> String {
+    let pct = if cap == 0 {
+        0.0
+    } else {
+        (100.0 * (1.0 - remaining as f64 / cap as f64)).clamp(0.0, 100.0)
+    };
+    let full = cap > 0 && remaining >= cap;
+    format!(
+        "<div class=\"card bar{slim}{full}\"><div class=\"bar-name\">{} · {} / {} left</div>\n<div class=\"bar-track\"><div class=\"bar-fill\" style=\"width:{:.0}%\"></div></div></div>\n",
+        esc(name),
+        fmt_int(remaining),
+        fmt_int(cap),
+        pct,
+        slim = if slim { " slim" } else { "" },
+        full = if full { " bar-full" } else { "" },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -860,7 +939,25 @@ details.alt { margin-top: 6px; font-size: 13px; color: #7e8898; }
 .npcat-name { color: #bfa05a; font-weight: 600; white-space: nowrap; }
 .npcat-items { color: #7e8898; }
 .tau { display: flex; flex-direction: column; gap: 2px; font-size: 14px; border-color: #bfa05a; }
-.fam { font-size: 12px; }
+/* pass 4: do-now alert subsections (hide when empty — never rendered) */
+.donow-sub { font-size: 11px; letter-spacing: .18em; text-transform: uppercase; color: #7e8898; margin: 16px 0 6px; font-weight: 600; }
+/* pass 4: first-class rotation element */
+.resurg-first { border-color: #bfa05a; display: flex; flex-direction: column; gap: 2px; }
+.resurg-line { font-family: Rajdhani, sans-serif; font-weight: 700; font-size: 19px; color: #e8d9ae; }
+.resurg-sub { color: #7e8898; font-size: 13px; }
+/* pass 4: act descriptions (name alone doesn't say what to do) */
+.nw-title { font-weight: 600; }
+.nw-desc { font-size: 13px; }
+/* pass 4: per-pool slim bars; full pools dim */
+.bar.slim { padding: 10px 14px; }
+.bar.slim .bar-name { font-size: 13px; font-weight: 600; }
+.bar.slim .bar-track { height: 4px; margin: 6px 0 2px; }
+.bar.slim .bar-fill { height: 4px; }
+.bar-full { opacity: .45; }
+/* pass 4: live trader window */
+.vendor { border-color: #bfa05a; display: flex; flex-direction: column; gap: 2px; }
+.vendor-line { font-family: Rajdhani, sans-serif; font-weight: 700; font-size: 19px; color: #e8d9ae; }
+.vendor-sub { color: #7e8898; font-size: 13px; }
 "#;
 
 const JS: &str = r#"
@@ -1014,10 +1111,11 @@ mod tests {
     #[test]
     fn least_important_weeklies_render_last() {
         // Flagged in data, not code: the last board entries carry the
-        // deprioritized flag and the quiet style.
+        // deprioritized flag and the quiet style. Pass-4 slimming: 16
+        // tracked (acts own their section; dropped rows are gone).
         let t = crate::tuning::Tuning::for_tests();
         let board = weekly_board(&t);
-        assert_eq!(board.len(), 24);
+        assert_eq!(board.len(), 16);
         let tail = &board[board.len() - 2..];
         assert!(tail.iter().all(|w| w.deprioritized));
         assert!(board[..board.len() - 2].iter().all(|w| !w.deprioritized));
@@ -1109,5 +1207,262 @@ mod tests {
             !embedded_html.contains("https://cdn.warframestat.us/img/IvaraPrime.png"),
             "demo fetches no hotlinks for embedded gears"
         );
+    }
+
+    /// Minimal context for section-visibility tests (world + plan
+    /// supplied per case; everything else empty).
+    fn section_ctx<'a>(
+        world: &'a WorldState,
+        t: &'a crate::tuning::Tuning,
+        weekly: &'a HashMap<String, String>,
+        proven: &'a HashSet<String>,
+        icons: &'a HashMap<String, String>,
+        cats: &'a HashMap<String, Vec<String>>,
+        daily: Option<DailyRender>,
+    ) -> RenderContext<'a> {
+        RenderContext {
+            world,
+            generated_label: "x".to_owned(),
+            targets_status: "t".to_owned(),
+            world_status: "w".to_owned(),
+            weekly_done: weekly,
+            proven_done: proven,
+            mastery_rank: Some(30),
+            icons,
+            embedded_icons: None,
+            backlog_categories: cats,
+            daily,
+            pack: None,
+            tuning: t,
+        }
+    }
+
+    #[test]
+    fn donow_alert_sections_hide_when_empty() {
+        let t = crate::tuning::Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let ctx = section_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
+        let html = render_plan(&Plan::default(), &ctx);
+        assert!(
+            !html.contains(&t.planner.alert_sections.event_header),
+            "event section hides with no live alerts"
+        );
+        assert!(
+            !html.contains(&t.planner.alert_sections.lotus_header),
+            "gift section hides with no live alerts"
+        );
+        assert!(!html.contains("resurg-first\">"), "no rotation element without coverage");
+        assert!(!html.contains("card vendor\">"), "no trader section without a live window");
+    }
+
+    #[test]
+    fn donow_alert_sections_render_split_with_countdowns() {
+        use crate::plan::{AlertView, BaroView, ResurgenceView};
+        let t = crate::tuning::Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let ctx = section_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
+        let plan = Plan {
+            event_alerts: vec![AlertView {
+                node: "Nimus (Eris)".to_owned(),
+                mission_type: "Survival".to_owned(),
+                payout: "50× Road To Tau Event Resource".to_owned(),
+                left: "25m".to_owned(),
+            }],
+            lotus_alerts: vec![AlertView {
+                node: "Larunda (Mercury)".to_owned(),
+                mission_type: "Capture".to_owned(),
+                payout: "Orokin Catalyst".to_owned(),
+                left: "1h05m".to_owned(),
+            }],
+            resurgence: Some(ResurgenceView {
+                contact: "Varzia".to_owned(),
+                location: "Maroo's Bazaar".to_owned(),
+                ends_in: "in 13d".to_owned(),
+                gears: vec!["Ivara Prime".to_owned()],
+                currency: "Aya".to_owned(),
+            }),
+            baro: Some(BaroView {
+                vendor: "Baro".to_owned(),
+                location: "Orcus Relay (Pluto)".to_owned(),
+                ends_in: "in 20h".to_owned(),
+            }),
+            ..Default::default()
+        };
+        let html = render_plan(&plan, &ctx);
+        // Separate sections, each with node + payout + countdown.
+        assert!(html.contains(&t.planner.alert_sections.event_header));
+        assert!(html.contains(&t.planner.alert_sections.lotus_header));
+        assert!(html.contains("Nimus (Eris)"));
+        assert!(html.contains("50× Road To Tau Event Resource"));
+        assert!(html.contains("25m left"));
+        assert!(html.contains("Larunda (Mercury)"));
+        let evt_pos = html.find("Nimus (Eris)").unwrap();
+        let lotus_pos = html.find("Larunda (Mercury)").unwrap();
+        assert!(evt_pos < lotus_pos, "events render before gifts");
+        // First-class rotation element names covered gear + window.
+        assert!(html.contains("resurg-first"));
+        assert!(html.contains("Ivara Prime"));
+        assert!(html.contains("in 13d"));
+        // Trader owns a section with location + countdown.
+        assert!(html.contains("card vendor"));
+        assert!(html.contains("Orcus Relay (Pluto)"));
+    }
+
+    #[test]
+    fn nightwave_acts_render_name_plus_description() {
+        use crate::model::{NightWave, NightWaveChallenge};
+        let t = crate::tuning::Tuning::for_tests();
+        let mut world = WorldState::default();
+        world.nightwave = Some(NightWave {
+            season: 18,
+            active_challenges: vec![NightWaveChallenge {
+                id: "a1".to_owned(),
+                title: "Accelerator".to_owned(),
+                desc: "Kill 10 Enemies while Sliding".to_owned(),
+                standing: 1000,
+                is_daily: true,
+                is_elite: false,
+            }],
+        });
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let ctx = section_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
+        let html = render_plan(&Plan::default(), &ctx);
+        assert!(html.contains(&t.planner.nightwave.name));
+        assert!(html.contains("Accelerator"));
+        assert!(
+            html.contains("Kill 10 Enemies while Sliding"),
+            "description renders with the name"
+        );
+    }
+
+    #[test]
+    fn today_renders_one_slim_bar_per_pool() {
+        let t = crate::tuning::Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        // Untouched pools read full caps; one pool partly used; a PvP
+        // value must never become a bar.
+        let families: Vec<(String, u32)> = t
+            .planner
+            .daily_caps
+            .families
+            .iter()
+            .map(|f| {
+                let left = if f == "Cetus" { 6_300 } else { 31_000 };
+                (f.clone(), left)
+            })
+            .chain(std::iter::once(("Pvp".to_owned(), 0)))
+            .collect();
+        let daily = DailyRender {
+            affiliation_remaining: 0,
+            affiliation_cap: 31_000,
+            focus_remaining: 214_545,
+            focus_cap: 400_000,
+            families,
+        };
+        let ctx = section_ctx(&world, &t, &weekly, &proven, &icons, &cats, Some(daily));
+        let html = render_plan(&Plan::default(), &ctx);
+        // Focus + main standing + one slim bar per family (12).
+        assert_eq!(html.matches("card bar slim").count(), 12);
+        assert!(html.contains("Focus · 214,545 / 400,000 left"));
+        assert!(html.contains("Standing · 0 / 31,000 left"));
+        assert!(html.contains("Cetus · 6,300 / 31,000 left"));
+        assert!(html.contains("Cavia · 31,000 / 31,000 left"));
+        assert!(!html.contains("Pvp"), "PvP leaves with the Conclave cut");
+        // Full pools dim; the used pool does not.
+        assert!(html.contains("bar-full"), "untouched pools dim");
+        let cetus_bar = html.find("Cetus · 6,300").unwrap();
+        let window = &html[cetus_bar.saturating_sub(60)..cetus_bar];
+        assert!(!window.contains("bar-full"), "used pool stays loud");
+    }
+
+    #[test]
+    fn demo_export_carries_zero_external_references() {
+        // Addendum #23: the review surface fetches nothing — no icon
+        // hotlinks, no font links. Strict mode: gears missing from the
+        // embed map keep the monogram, never a hotlink.
+        use crate::plan::{GoalCard, GoalAction, ActionKind, PartRow, PartState, Rarity};
+        let t = crate::tuning::Tuning::for_tests();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = [
+            ("Ivara Prime".to_owned(), "IvaraPrime.png".to_owned()),
+            ("Baza Prime".to_owned(), "BazaPrime.png".to_owned()),
+        ]
+        .into_iter()
+        .collect();
+        let embedded: HashMap<String, String> = [(
+            "Ivara Prime".to_owned(),
+            "data:image/png;base64,iVBORw0KGgo=".to_owned(),
+        )]
+        .into_iter()
+        .collect();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let world = WorldState::default();
+        let ctx = RenderContext {
+            world: &world,
+            generated_label: "x".to_owned(),
+            targets_status: "t".to_owned(),
+            world_status: "w".to_owned(),
+            weekly_done: &weekly,
+            proven_done: &proven,
+            mastery_rank: None,
+            icons: &icons,
+            embedded_icons: Some(&embedded),
+            backlog_categories: &cats,
+            daily: None,
+            pack: None,
+            tuning: &t,
+        };
+        // Ivara embeds; Baza resolves in the icon map but missed the
+        // embed download — strict mode keeps its monogram, never a
+        // hotlink.
+        let mk_goal = |gear: &str, part: &str| GoalCard {
+            gear: gear.to_owned(),
+            is_warframe: false,
+            vaulted: true,
+            resurgence_live: false,
+            wants: vec![],
+            parts_have: 0,
+            parts_total: 0,
+            parts: vec![PartRow {
+                name: part.to_owned(),
+                state: PartState::Need,
+                relics: vec![],
+                best_odds: String::new(),
+                rarity: Rarity::Rare,
+                deal: None,
+            }],
+            action: GoalAction {
+                text: "x".to_owned(),
+                kind: ActionKind::Parked,
+                relic: None,
+                score: 0.0,
+            },
+        };
+        let plan = Plan {
+            goals: vec![
+                mk_goal("Ivara Prime", "Ivara Prime Chassis Blueprint"),
+                mk_goal("Baza Prime", "Baza Prime Blueprint"),
+            ],
+            ..Default::default()
+        };
+        let html = render_plan(&plan, &ctx);
+        assert!(!html.contains("https://"), "demo fetches nothing external");
+        assert!(html.contains("data:image/png;base64,"), "embedded icons stay");
     }
 }

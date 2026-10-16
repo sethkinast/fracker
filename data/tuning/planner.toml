@@ -52,6 +52,16 @@ steel_path_label = " Steel Path"
 [vendor]
 name = "Baro"
 
+# Pass 4: the act board left the weekly box for its own section —
+# the header stays data-owned, never hardcoded.
+[nightwave]
+name = "Nightwave"
+
+# Pass 4 Do Now §§a–b: separate alert sections (each hides when empty).
+[alert_sections]
+event_header = "Events"
+lotus_header = "Gift of the Lotus"
+
 [resurgence]
 contact = "Varzia"
 currency = "Aya"
@@ -67,7 +77,7 @@ focus_base = 250000
 focus_per_mr = 5000
 fallback_standing_label = "16k + 500 × MR"
 fallback_focus_label = "250k + 5k × MR"
-families = ["Cavia", "Cetus", "Quills", "Solaris", "Ventkids", "Vox", "Entrati", "Necraloid", "Zariman", "Kahl", "Hex", "Library", "Pvp"]
+families = ["Cavia", "Cetus", "Quills", "Solaris", "Ventkids", "Vox", "Entrati", "Necraloid", "Zariman", "Kahl", "Hex", "Library"]
 
 [sortie]
 name = "Sortie"
