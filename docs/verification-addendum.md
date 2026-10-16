@@ -43,3 +43,29 @@ it refines the brief where they disagree. For the next worker pass.
    worker box (not on crates.io; no public warframe-lite repo
    found). The vendored §7.2 catalog with attribution stands until
    the upstream surfaces; keep the `classify()` swap-in seam.
+8. **Demo review (Seth, 2026-10-15): way too many words.** Page copy
+   goes terse: labels, numbers, pips — not sentences. The one Do-Now
+   instruction stays a single line.
+9. **Tabs:** a "do these right now" view vs the full wanted/backlog
+   list — two tabs over the same data, not one long page.
+10. **Priority inversion: unvaulted BEFORE vaulted.** Current items
+    are time-bound (they vault eventually); vaulted items wait,
+    except when Prime Resurgence un-parks them (that exception
+    stands — Ivara now). The first pass had this backwards.
+11. **Scannability:** the color scheme/palette is RIGHT (keep it);
+    the lines are not scannable — rows need alignment, consistent
+    columns, and grouping so the eye can sweep. Refine iteratively,
+    bit by bit, with Seth reviewing passes.
+12. **Backlog source of truth = profile-derived, NOT Xuerian.**
+    `data/backlog.json` (2026-10-15): prime roster 163, mastered
+    99, unmastered 64 — and 37 of the 64 are NOT on Seth's Xuerian
+    list at all, including all seven current frames (Caliban,
+    Citrine, Gyre, Lavos, Styanax, Voruna, Yareli) and 14 current
+    weapons. Total unmastered across all gear: ~229 items. Xuerian
+    is demoted to an input (his relic-stock tracking); Fracker's
+    backlog derives from the profile vs the WFCD item universe.
+    (Known gap: the pets category file failed to load — companion
+    backlog incomplete; Kavasa Prime's status unverified.)
+13. **Inventory bootstrap still owed:** relic stock + loose parts
+    via the guided OCR scroll (brief design stands). Queued with
+    the second worker pass.
