@@ -93,3 +93,10 @@ it refines the brief where they disagree. For the next worker pass.
     pass branches merge straight into master (raw push) when a pass
     completes; Graf does the merge. Pass 1 merged 2026-10-15
     (master 1920d92).
+20. **No game data hardcoded in Rust (Seth, 2026-10-15; queued for
+    pass 3, do NOT retrofit into the running pass 2).** The pass-1
+    code baked the weeklies into the source — that violates the
+    data-pack principle. ALL content — weeklies, rotations, event
+    packs, thresholds, target lists — lives in YAML/TOML/JSON files
+    loaded at runtime; Rust only interprets. Updating game content
+    must never require a code change.
