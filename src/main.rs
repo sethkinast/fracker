@@ -536,15 +536,31 @@ fn run_ocr_ingest(args: &Args, dir: &std::path::Path) -> Result<(), String> {
             format!(
                 "ocr layout {:?} not in {}",
                 args.ocr_layout,
-                args.ocr_layouts.display()
+                layouts_path.display()
             )
         })?;
 
-    // Item universe: roster parts + gear + relic names from the seed
-    // datasets (the same names the planner reasons about).
-    let rel_text = std::fs::read_to_string("data/cache/relictables.json")
+    // Data-owned universe corrections apply here too (sixth pass §1):
+    // excluded entries and duplicate spellings never reach the OCR
+    // universe.
+    let scrub_path = data_file("exclusions.toml");
+    let scrub = model::UniverseScrub::from_toml(
+        &std::fs::read_to_string(&scrub_path)
+            .map_err(|e| format!("exclusions {}: {e}", scrub_path.display()))?,
+    )?;
+    // Arcane set (sixth pass §5): labeled stopgap until the first Arcanes
+    // capture; the screen is the steady-state arcane source (#34).
+    let arcane_path = data_file("arcanes.toml");
+    let arcanes = model::ArcaneManifest::from_toml(
+        &std::fs::read_to_string(&arcane_path)
+            .map_err(|e| format!("arcanes {}: {e}", arcane_path.display()))?,
+    )?;
+
+    // Item universe: roster parts + gear + relic names + the arcane set,
+    // scrubbed (the same names the planner reasons about).
+    let rel_text = std::fs::read_to_string(data_file("cache/relictables.json"))
         .map_err(|e| format!("seed relictables: {e}"))?;
-    let wish_text = std::fs::read_to_string("data/cache/wishlist.json")
+    let wish_text = std::fs::read_to_string(data_file("cache/wishlist.json"))
         .map_err(|e| format!("seed wishlist: {e}"))?;
     let relics = model::RelicTables::from_json(&rel_text)?;
     let roster = model::Roster::from_json(&wish_text)?;
@@ -558,10 +574,13 @@ fn run_ocr_ingest(args: &Args, dir: &std::path::Path) -> Result<(), String> {
     for name in relics.relics.keys() {
         names.push(name.clone());
     }
+    names.extend(arcanes.names.iter().cloned());
+    let mut names = scrub.scrub_names(&names);
     names.sort();
     names.dedup();
     let universe = ocr::Universe::from_names(&names);
     let relic_names: HashSet<String> = relics.relics.keys().cloned().collect();
+    let arcane_names = arcanes.name_set();
 
     // Engine: tesseract when the binary exists, else the stub (empty
     // stock, never guesses) — status printed honestly either way.
@@ -582,16 +601,18 @@ fn run_ocr_ingest(args: &Args, dir: &std::path::Path) -> Result<(), String> {
         &layout,
         &universe,
         &relic_names,
+        &arcane_names,
         0.5,
     )?;
     stock.write_to(&args.stock_out)?;
     let held = results.iter().filter(|r| r.held).count();
     println!(
-        "ocr: {} cells, {} held ({} relics, {} parts) -> {}",
+        "ocr: {} cells, {} held ({} relics, {} parts, {} arcanes) -> {}",
         results.len(),
         held,
         stock.relics.values().sum::<u32>(),
         stock.parts.values().sum::<u32>(),
+        stock.arcanes.values().sum::<u32>(),
         args.stock_out.display(),
     );
     Ok(())

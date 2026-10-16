@@ -470,6 +470,52 @@ impl UniverseScrub {
 }
 
 // ---------------------------------------------------------------------------
+// Arcane item set (data/arcanes.toml — sixth pass §5)
+// ---------------------------------------------------------------------------
+
+/// Arcane universe (`data/arcanes.toml`). A LABELED stopgap: the names
+/// are transcribed from Seth's spoken debrief until his first Arcanes
+/// inventory capture lands. Consumed as the arcane-name set for OCR
+/// validation/routing (neither the profile nor EE.log carries arcane
+/// state — addendum #34).
+#[derive(Debug, Clone, Default)]
+pub struct ArcaneManifest {
+    /// Human-readable provenance label ("stopgap, not a capture").
+    pub label: String,
+    pub names: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ArcaneFile {
+    #[serde(default)]
+    stopgap: ArcaneStopgap,
+    #[serde(default)]
+    arcanes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ArcaneStopgap {
+    #[serde(default)]
+    label: String,
+}
+
+impl ArcaneManifest {
+    pub fn from_toml(text: &str) -> Result<Self, String> {
+        let file: ArcaneFile =
+            toml::from_str(text).map_err(|e| format!("arcanes: {e}"))?;
+        Ok(Self {
+            label: file.stopgap.label,
+            names: file.arcanes,
+        })
+    }
+
+    /// Names as a lookup set (for OCR universe + bucket routing).
+    pub fn name_set(&self) -> std::collections::HashSet<String> {
+        self.names.iter().cloned().collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Targets (Xuerian /api/load or seed data/targets.json)
 // ---------------------------------------------------------------------------
 
@@ -1070,6 +1116,28 @@ mod tests {
         // Re-scrubbing is idempotent: the edited data already reflects it.
         let again = scrub.scrub_categories(&scrubbed);
         assert_eq!(again, scrubbed);
+    }
+
+    #[test]
+    fn arcane_manifest_loads_labeled_stopgap() {
+        // Sixth pass §5: the arcane set is data, LABELED as a stopgap
+        // until Seth's first Arcanes capture.
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let m = ArcaneManifest::from_toml(
+            &std::fs::read_to_string(base.join("data/arcanes.toml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(m.names.len(), 11, "the Taubound arcane set");
+        assert!(
+            m.label.to_lowercase().contains("stopgap"),
+            "must be labeled a stopgap: {}",
+            m.label
+        );
+        assert!(m.name_set().contains("Melee Influence"));
+        // The three still below rank 5 per the pack.
+        for n in ["Melee Animosity", "Melee Vortex", "Secondary Surge"] {
+            assert!(m.name_set().contains(n), "missing {n}");
+        }
     }
 
     #[test]
