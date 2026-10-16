@@ -1,0 +1,1228 @@
+{
+ "note": "Mastery test: lifetime XP per item type in profile XPInfo >= 900k (suits/frames/companions) or 450k (weapons). Pets category excluded (dataset format). Exalted weapons excluded.",
+ "primes": {
+  "roster": 163,
+  "mastered": 99,
+  "unmastered": [
+   {
+    "name": "Caliban Prime",
+    "vaulted": false,
+    "type": "warframe",
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Caliban Prime Blueprint",
+     "Caliban Prime Chassis Blueprint",
+     "Caliban Prime Neuroptics Blueprint",
+     "Caliban Prime Systems Blueprint"
+    ]
+   },
+   {
+    "name": "Citrine Prime",
+    "vaulted": false,
+    "type": "warframe",
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Citrine Prime Blueprint",
+     "Citrine Prime Chassis Blueprint",
+     "Citrine Prime Neuroptics Blueprint",
+     "Citrine Prime Systems Blueprint"
+    ]
+   },
+   {
+    "name": "Gyre Prime",
+    "vaulted": false,
+    "type": "warframe",
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Gyre Prime Blueprint",
+     "Gyre Prime Chassis Blueprint",
+     "Gyre Prime Neuroptics Blueprint",
+     "Gyre Prime Systems Blueprint"
+    ]
+   },
+   {
+    "name": "Lavos Prime",
+    "vaulted": false,
+    "type": "warframe",
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Lavos Prime Blueprint",
+     "Lavos Prime Chassis Blueprint",
+     "Lavos Prime Neuroptics Blueprint",
+     "Lavos Prime Systems Blueprint"
+    ]
+   },
+   {
+    "name": "Styanax Prime",
+    "vaulted": false,
+    "type": "warframe",
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Styanax Prime Blueprint",
+     "Styanax Prime Chassis Blueprint",
+     "Styanax Prime Neuroptics Blueprint",
+     "Styanax Prime Systems Blueprint"
+    ]
+   },
+   {
+    "name": "Voruna Prime",
+    "vaulted": false,
+    "type": "warframe",
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Voruna Prime Blueprint",
+     "Voruna Prime Chassis Blueprint",
+     "Voruna Prime Neuroptics Blueprint",
+     "Voruna Prime Systems Blueprint"
+    ]
+   },
+   {
+    "name": "Yareli Prime",
+    "vaulted": false,
+    "type": "warframe",
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Yareli Prime Blueprint",
+     "Yareli Prime Chassis Blueprint",
+     "Yareli Prime Neuroptics Blueprint",
+     "Yareli Prime Systems Blueprint"
+    ]
+   },
+   {
+    "name": "Afentis Prime",
+    "vaulted": false,
+    "type": null,
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Afentis Prime Blueprint",
+     "Afentis Prime Barrel",
+     "Afentis Prime Blade",
+     "Afentis Prime Handle"
+    ]
+   },
+   {
+    "name": "Alternox Prime",
+    "vaulted": false,
+    "type": null,
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Alternox Prime Blueprint",
+     "Alternox Prime Barrel",
+     "Alternox Prime Receiver",
+     "Alternox Prime Stock"
+    ]
+   },
+   {
+    "name": "Athodai Prime",
+    "vaulted": false,
+    "type": null,
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Athodai Prime Blueprint",
+     "Athodai Prime Barrel",
+     "Athodai Prime Receiver"
+    ]
+   },
+   {
+    "name": "Cedo Prime",
+    "vaulted": false,
+    "type": null,
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Cedo Prime Blueprint",
+     "Cedo Prime Barrel",
+     "Cedo Prime Receiver",
+     "Cedo Prime Stock"
+    ]
+   },
+   {
+    "name": "Corufell Prime",
+    "vaulted": false,
+    "type": null,
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Corufell Prime Blueprint",
+     "Corufell Prime Handle",
+     "Corufell Prime Receiver",
+     "Corufell Prime Stock"
+    ]
+   },
+   {
+    "name": "Daikyu Prime",
+    "vaulted": false,
+    "type": null,
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Daikyu Prime Blueprint",
+     "Daikyu Prime Grip",
+     "Daikyu Prime Lower Limb",
+     "Daikyu Prime String",
+     "Daikyu Prime Upper Limb"
+    ]
+   },
+   {
+    "name": "Dual Zoren Prime",
+    "vaulted": false,
+    "type": null,
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Dual Zoren Prime Blueprint",
+     "Dual Zoren Prime Blade",
+     "Dual Zoren Prime Handle"
+    ]
+   },
+   {
+    "name": "Kestrel Prime",
+    "vaulted": false,
+    "type": null,
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Kestrel Prime Blueprint",
+     "Kestrel Prime Blade",
+     "Kestrel Prime Grip"
+    ]
+   },
+   {
+    "name": "Kompressa Prime",
+    "vaulted": false,
+    "type": null,
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Kompressa Prime Blueprint",
+     "Kompressa Prime Barrel",
+     "Kompressa Prime Receiver"
+    ]
+   },
+   {
+    "name": "Perigale Prime",
+    "vaulted": false,
+    "type": null,
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Perigale Prime Blueprint",
+     "Perigale Prime Barrel",
+     "Perigale Prime Receiver",
+     "Perigale Prime Stock"
+    ]
+   },
+   {
+    "name": "Sarofang Prime",
+    "vaulted": false,
+    "type": null,
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Sarofang Prime Blueprint",
+     "Sarofang Prime Blade",
+     "Sarofang Prime Handle"
+    ]
+   },
+   {
+    "name": "Steflos Prime",
+    "vaulted": false,
+    "type": null,
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Steflos Prime Blueprint",
+     "Steflos Prime Barrel",
+     "Steflos Prime Receiver",
+     "Steflos Prime Stock"
+    ]
+   },
+   {
+    "name": "Vadarya Prime",
+    "vaulted": false,
+    "type": null,
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Vadarya Prime Blueprint",
+     "Vadarya Prime Barrel",
+     "Vadarya Prime Receiver",
+     "Vadarya Prime Stock"
+    ]
+   },
+   {
+    "name": "Venato Prime",
+    "vaulted": false,
+    "type": null,
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Venato Prime Blueprint",
+     "Venato Prime Blade",
+     "Venato Prime Handle"
+    ]
+   },
+   {
+    "name": "Gauss Prime",
+    "vaulted": true,
+    "type": "warframe",
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Gauss Prime Blueprint",
+     "Gauss Prime Chassis Blueprint",
+     "Gauss Prime Neuroptics Blueprint",
+     "Gauss Prime Systems Blueprint"
+    ]
+   },
+   {
+    "name": "Grendel Prime",
+    "vaulted": true,
+    "type": "warframe",
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Grendel Prime Blueprint",
+     "Grendel Prime Chassis Blueprint",
+     "Grendel Prime Neuroptics Blueprint",
+     "Grendel Prime Systems Blueprint"
+    ]
+   },
+   {
+    "name": "Inaros Prime",
+    "vaulted": true,
+    "type": "warframe",
+    "status": "never",
+    "wants": "live",
+    "parts_wanted": [
+     "Inaros Prime Blueprint"
+    ],
+    "all_parts": [
+     "Inaros Prime Blueprint",
+     "Inaros Prime Chassis Blueprint",
+     "Inaros Prime Neuroptics Blueprint",
+     "Inaros Prime Systems Blueprint"
+    ]
+   },
+   {
+    "name": "Ivara Prime",
+    "vaulted": true,
+    "type": "warframe",
+    "status": "never",
+    "wants": "live",
+    "parts_wanted": [
+     "Ivara Prime Chassis Blueprint"
+    ],
+    "all_parts": [
+     "Ivara Prime Blueprint",
+     "Ivara Prime Chassis Blueprint",
+     "Ivara Prime Neuroptics Blueprint",
+     "Ivara Prime Systems Blueprint"
+    ]
+   },
+   {
+    "name": "Octavia Prime",
+    "vaulted": true,
+    "type": "warframe",
+    "status": "never",
+    "wants": "live",
+    "parts_wanted": [
+     "Octavia Prime Blueprint"
+    ],
+    "all_parts": [
+     "Octavia Prime Blueprint",
+     "Octavia Prime Chassis Blueprint",
+     "Octavia Prime Neuroptics Blueprint",
+     "Octavia Prime Systems Blueprint"
+    ]
+   },
+   {
+    "name": "Protea Prime",
+    "vaulted": true,
+    "type": "warframe",
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Protea Prime Blueprint",
+     "Protea Prime Chassis Blueprint",
+     "Protea Prime Neuroptics Blueprint",
+     "Protea Prime Systems Blueprint"
+    ]
+   },
+   {
+    "name": "Sevagoth Prime",
+    "vaulted": true,
+    "type": "warframe",
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Sevagoth Prime Blueprint",
+     "Sevagoth Prime Chassis Blueprint",
+     "Sevagoth Prime Neuroptics Blueprint",
+     "Sevagoth Prime Systems Blueprint"
+    ]
+   },
+   {
+    "name": "Wukong Prime",
+    "vaulted": true,
+    "type": "warframe",
+    "status": "never",
+    "wants": "live",
+    "parts_wanted": [
+     "Wukong Prime Blueprint"
+    ],
+    "all_parts": [
+     "Wukong Prime Blueprint",
+     "Wukong Prime Chassis Blueprint",
+     "Wukong Prime Neuroptics Blueprint",
+     "Wukong Prime Systems Blueprint"
+    ]
+   },
+   {
+    "name": "Xaku Prime",
+    "vaulted": true,
+    "type": "warframe",
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Xaku Prime Blueprint",
+     "Xaku Prime Chassis Blueprint",
+     "Xaku Prime Neuroptics Blueprint",
+     "Xaku Prime Systems Blueprint"
+    ]
+   },
+   {
+    "name": "Nautilus Prime",
+    "vaulted": true,
+    "type": "sentinel",
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Nautilus Prime Blueprint",
+     "Nautilus Prime Carapace",
+     "Nautilus Prime Cerebrum",
+     "Nautilus Prime Systems"
+    ]
+   },
+   {
+    "name": "Shade Prime",
+    "vaulted": true,
+    "type": "sentinel",
+    "status": "inprogress",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Shade Prime Blueprint",
+     "Shade Prime Carapace",
+     "Shade Prime Cerebrum",
+     "Shade Prime Systems"
+    ]
+   },
+   {
+    "name": "Acceltra Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Acceltra Prime Blueprint",
+     "Acceltra Prime Barrel",
+     "Acceltra Prime Receiver",
+     "Acceltra Prime Stock"
+    ]
+   },
+   {
+    "name": "Afuris Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "never",
+    "wants": "live",
+    "parts_wanted": [
+     "Afuris Prime Barrel",
+     "Afuris Prime Receiver"
+    ],
+    "all_parts": [
+     "Afuris Prime Blueprint",
+     "Afuris Prime Barrel",
+     "Afuris Prime Link",
+     "Afuris Prime Receiver"
+    ]
+   },
+   {
+    "name": "Akarius Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "never",
+    "wants": "live",
+    "parts_wanted": [
+     "Akarius Prime Blueprint",
+     "Akarius Prime Barrel",
+     "Akarius Prime Receiver"
+    ],
+    "all_parts": [
+     "Akarius Prime Blueprint",
+     "Akarius Prime Barrel",
+     "Akarius Prime Link",
+     "Akarius Prime Receiver"
+    ]
+   },
+   {
+    "name": "Akbolto Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "never",
+    "wants": "live",
+    "parts_wanted": [
+     "Akbolto Prime Receiver"
+    ],
+    "all_parts": [
+     "Akbolto Prime Blueprint",
+     "Akbolto Prime Barrel",
+     "Akbolto Prime Link",
+     "Akbolto Prime Receiver"
+    ]
+   },
+   {
+    "name": "Akjagara Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "never",
+    "wants": "live",
+    "parts_wanted": [
+     "Akjagara Prime Barrel"
+    ],
+    "all_parts": [
+     "Akjagara Prime Blueprint",
+     "Akjagara Prime Barrel",
+     "Akjagara Prime Link",
+     "Akjagara Prime Receiver"
+    ]
+   },
+   {
+    "name": "Akmagnus Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Akmagnus Prime Blueprint",
+     "Akmagnus Prime Link"
+    ]
+   },
+   {
+    "name": "Aksomati Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "never",
+    "wants": "live",
+    "parts_wanted": [
+     "Aksomati Prime Barrel",
+     "Aksomati Prime Link",
+     "Aksomati Prime Receiver"
+    ],
+    "all_parts": [
+     "Aksomati Prime Blueprint",
+     "Aksomati Prime Barrel",
+     "Aksomati Prime Link",
+     "Aksomati Prime Receiver"
+    ]
+   },
+   {
+    "name": "Baza Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "never",
+    "wants": "live",
+    "parts_wanted": [
+     "Baza Prime Blueprint",
+     "Baza Prime Stock"
+    ],
+    "all_parts": [
+     "Baza Prime Blueprint",
+     "Baza Prime Barrel",
+     "Baza Prime Receiver",
+     "Baza Prime Stock"
+    ]
+   },
+   {
+    "name": "Corinth Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "never",
+    "wants": "live",
+    "parts_wanted": [
+     "Corinth Prime Stock"
+    ],
+    "all_parts": [
+     "Corinth Prime Blueprint",
+     "Corinth Prime Barrel",
+     "Corinth Prime Receiver",
+     "Corinth Prime Stock"
+    ]
+   },
+   {
+    "name": "Corvas Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "never",
+    "wants": "live",
+    "parts_wanted": [
+     "Corvas Prime Barrel"
+    ],
+    "all_parts": [
+     "Corvas Prime Blueprint",
+     "Corvas Prime Barrel",
+     "Corvas Prime Receiver",
+     "Corvas Prime Stock"
+    ]
+   },
+   {
+    "name": "Dual Keres Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "never",
+    "wants": "live",
+    "parts_wanted": [
+     "Dual Keres Prime Blueprint",
+     "Dual Keres Prime Handle"
+    ],
+    "all_parts": [
+     "Dual Keres Prime Blueprint",
+     "Dual Keres Prime Blade",
+     "Dual Keres Prime Handle"
+    ]
+   },
+   {
+    "name": "Epitaph Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Epitaph Prime Blueprint",
+     "Epitaph Prime Barrel",
+     "Epitaph Prime Receiver"
+    ]
+   },
+   {
+    "name": "Guandao Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "never",
+    "wants": "live",
+    "parts_wanted": [
+     "Guandao Prime Blade",
+     "Guandao Prime Handle"
+    ],
+    "all_parts": [
+     "Guandao Prime Blueprint",
+     "Guandao Prime Blade",
+     "Guandao Prime Handle"
+    ]
+   },
+   {
+    "name": "Gunsen Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "never",
+    "wants": "live",
+    "parts_wanted": [
+     "Gunsen Prime Blueprint",
+     "Gunsen Prime Blade",
+     "Gunsen Prime Handle"
+    ],
+    "all_parts": [
+     "Gunsen Prime Blueprint",
+     "Gunsen Prime Blade",
+     "Gunsen Prime Handle"
+    ]
+   },
+   {
+    "name": "Hystrix Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "never",
+    "wants": "live",
+    "parts_wanted": [
+     "Hystrix Prime Blueprint"
+    ],
+    "all_parts": [
+     "Hystrix Prime Blueprint",
+     "Hystrix Prime Barrel",
+     "Hystrix Prime Receiver"
+    ]
+   },
+   {
+    "name": "Kavasa Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "unknown",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Kavasa Prime Band",
+     "Kavasa Prime Buckle",
+     "Kavasa Prime Kubrow Collar Blueprint"
+    ]
+   },
+   {
+    "name": "Kogake Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "never",
+    "wants": "live",
+    "parts_wanted": [
+     "Kogake Prime Gauntlet"
+    ],
+    "all_parts": [
+     "Kogake Prime Blueprint",
+     "Kogake Prime Boot",
+     "Kogake Prime Gauntlet"
+    ]
+   },
+   {
+    "name": "Larkspur Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "never",
+    "wants": "live",
+    "parts_wanted": [
+     "Larkspur Prime Barrel"
+    ],
+    "all_parts": [
+     "Larkspur Prime Blueprint",
+     "Larkspur Prime Barrel",
+     "Larkspur Prime Receiver",
+     "Larkspur Prime Stock"
+    ]
+   },
+   {
+    "name": "Nami Skyla Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "never",
+    "wants": "live",
+    "parts_wanted": [
+     "Nami Skyla Prime Blade"
+    ],
+    "all_parts": [
+     "Nami Skyla Prime Blueprint",
+     "Nami Skyla Prime Blade",
+     "Nami Skyla Prime Handle"
+    ]
+   },
+   {
+    "name": "Ninkondi Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "never",
+    "wants": "live",
+    "parts_wanted": [
+     "Ninkondi Prime Handle"
+    ],
+    "all_parts": [
+     "Ninkondi Prime Blueprint",
+     "Ninkondi Prime Chain",
+     "Ninkondi Prime Handle"
+    ]
+   },
+   {
+    "name": "Okina Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Okina Prime Blueprint",
+     "Okina Prime Blade",
+     "Okina Prime Handle"
+    ]
+   },
+   {
+    "name": "Pangolin Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "never",
+    "wants": "live",
+    "parts_wanted": [
+     "Pangolin Prime Handle"
+    ],
+    "all_parts": [
+     "Pangolin Prime Blueprint",
+     "Pangolin Prime Blade",
+     "Pangolin Prime Handle"
+    ]
+   },
+   {
+    "name": "Panthera Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "never",
+    "wants": "live",
+    "parts_wanted": [
+     "Panthera Prime Barrel",
+     "Panthera Prime Receiver"
+    ],
+    "all_parts": [
+     "Panthera Prime Blueprint",
+     "Panthera Prime Barrel",
+     "Panthera Prime Receiver",
+     "Panthera Prime Stock"
+    ]
+   },
+   {
+    "name": "Quassus Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Quassus Prime Blueprint",
+     "Quassus Prime Blade",
+     "Quassus Prime Handle"
+    ]
+   },
+   {
+    "name": "Stradavar Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "never",
+    "wants": "live",
+    "parts_wanted": [
+     "Stradavar Prime Blueprint",
+     "Stradavar Prime Receiver"
+    ],
+    "all_parts": [
+     "Stradavar Prime Blueprint",
+     "Stradavar Prime Barrel",
+     "Stradavar Prime Receiver",
+     "Stradavar Prime Stock"
+    ]
+   },
+   {
+    "name": "Tatsu Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "never",
+    "wants": "live",
+    "parts_wanted": [
+     "Tatsu Prime Handle"
+    ],
+    "all_parts": [
+     "Tatsu Prime Blueprint",
+     "Tatsu Prime Blade",
+     "Tatsu Prime Handle"
+    ]
+   },
+   {
+    "name": "Tekko Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "never",
+    "wants": "live",
+    "parts_wanted": [
+     "Tekko Prime Blade"
+    ],
+    "all_parts": [
+     "Tekko Prime Blueprint",
+     "Tekko Prime Blade",
+     "Tekko Prime Gauntlet"
+    ]
+   },
+   {
+    "name": "Tipedo Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "inprogress",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Tipedo Prime Blueprint",
+     "Tipedo Prime Handle",
+     "Tipedo Prime Ornament"
+    ]
+   },
+   {
+    "name": "Trumna Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Trumna Prime Blueprint",
+     "Trumna Prime Barrel",
+     "Trumna Prime Receiver",
+     "Trumna Prime Stock"
+    ]
+   },
+   {
+    "name": "Velox Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "never",
+    "wants": "none",
+    "parts_wanted": [],
+    "all_parts": [
+     "Velox Prime Blueprint",
+     "Velox Prime Barrel",
+     "Velox Prime Receiver"
+    ]
+   },
+   {
+    "name": "Zakti Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "never",
+    "wants": "live",
+    "parts_wanted": [
+     "Zakti Prime Blueprint"
+    ],
+    "all_parts": [
+     "Zakti Prime Blueprint",
+     "Zakti Prime Barrel",
+     "Zakti Prime Receiver"
+    ]
+   },
+   {
+    "name": "Zhuge Prime",
+    "vaulted": true,
+    "type": null,
+    "status": "never",
+    "wants": "live",
+    "parts_wanted": [
+     "Zhuge Prime Receiver",
+     "Zhuge Prime String"
+    ],
+    "all_parts": [
+     "Zhuge Prime Blueprint",
+     "Zhuge Prime Barrel",
+     "Zhuge Prime Grip",
+     "Zhuge Prime Receiver",
+     "Zhuge Prime String"
+    ]
+   }
+  ]
+ },
+ "unmastered_by_category": {
+  "Arch-Gun": [
+   "Arbucep",
+   "Cortege",
+   "Kuva Ayanga",
+   "Kuva Grattler",
+   "Larkspur",
+   "Mandonel",
+   "Morgha",
+   "Prisma Dual Decurions"
+  ],
+  "Melee": [
+   "Amanata",
+   "Argo & Vel",
+   "Arum Spinosa",
+   "Balla",
+   "Balla",
+   "Cyath",
+   "Cyath",
+   "Dehtat",
+   "Dehtat",
+   "Dorrclave",
+   "Edun",
+   "Ekhein",
+   "Ekwana Ii Jai",
+   "Ekwana Ii Ruhang",
+   "Ekwana Jai",
+   "Ekwana Jai Ii",
+   "Ekwana Ruhang",
+   "Ekwana Ruhang Ii",
+   "Galariak Prime",
+   "Hespar",
+   "Jai",
+   "Jai Ii",
+   "Jayap",
+   "Korb",
+   "Korrudo",
+   "Korumm",
+   "Kreska",
+   "Kronsh",
+   "Kronsh",
+   "Kroostra",
+   "Kuva Ghoulsaw",
+   "Kuva Shildeg",
+   "Kwath",
+   "Laka",
+   "Mewan",
+   "Mewan",
+   "Nepheri",
+   "Ooltha",
+   "Ooltha",
+   "Pathocyst",
+   "Peye",
+   "Plague Akwin",
+   "Plague Bokwin",
+   "Plague Keewar",
+   "Plague Keewar",
+   "Plague Kripath",
+   "Plague Kripath",
+   "Praedos",
+   "Pride",
+   "Quassus",
+   "Rabvee",
+   "Ruhang",
+   "Ruhang Ii",
+   "Ruvox",
+   "Sampotes",
+   "Seekalla",
+   "Sepfahn",
+   "Shtung",
+   "Skana Prime",
+   "Spinnerex",
+   "Stropha",
+   "Syam",
+   "Tenet Agendus",
+   "Tenet Livia",
+   "Thalys",
+   "Vargeet Ii Jai",
+   "Vargeet Ii Ruhang",
+   "Vargeet Jai",
+   "Vargeet Jai Ii",
+   "Vargeet Ruhang",
+   "Vargeet Ruhang Ii",
+   "Venato",
+   "Verdilac",
+   "War Prime",
+   "Wrath"
+  ],
+  "Primary": [
+   "Acceltra",
+   "Aeolak",
+   "Afentis",
+   "Alternox",
+   "Ambassador",
+   "Braton Vandal",
+   "Carmine Penta",
+   "Cedo",
+   "Cinta",
+   "Coda Bubonico",
+   "Coda Hema",
+   "Coda Sporothrix",
+   "Coda Synapse",
+   "Enkaus",
+   "Evensong",
+   "Haalvu",
+   "Higasa",
+   "Kuva Chakkhurr",
+   "Kuva Drakgoon",
+   "Kuva Hind",
+   "Kuva Karak",
+   "Kuva Kohm",
+   "Kuva Ogris",
+   "Kuva Quartakk",
+   "Kuva Sobek",
+   "Kuva Tonkor",
+   "Kuva Zarr",
+   "Nunchasa",
+   "Shedu",
+   "Sporothrix",
+   "Stahlta",
+   "Steflos",
+   "Tenet Arca Plasmor",
+   "Tenet Envoy",
+   "Tenet Ferrox",
+   "Tenet Glaxion",
+   "Tenet Quanta",
+   "Tenet Tetra",
+   "Thornbak",
+   "Trumna",
+   "Vinquibus"
+  ],
+  "Primes": [
+   "Acceltra Prime",
+   "Afentis Prime",
+   "Afuris Prime",
+   "Akarius Prime",
+   "Akbolto Prime",
+   "Akjagara Prime",
+   "Akmagnus Prime",
+   "Aksomati Prime",
+   "Alternox Prime",
+   "Athodai Prime",
+   "Baza Prime",
+   "Caliban Prime",
+   "Cedo Prime",
+   "Citrine Prime",
+   "Corinth Prime",
+   "Corufell Prime",
+   "Corvas Prime",
+   "Daikyu Prime",
+   "Dual Keres Prime",
+   "Dual Zoren Prime",
+   "Epitaph Prime",
+   "Gauss Prime",
+   "Grendel Prime",
+   "Guandao Prime",
+   "Gunsen Prime",
+   "Gyre Prime",
+   "Hystrix Prime",
+   "Inaros Prime",
+   "Ivara Prime",
+   "Kestrel Prime",
+   "Kogake Prime",
+   "Kompressa Prime",
+   "Larkspur Prime",
+   "Lavos Prime",
+   "Nami Skyla Prime",
+   "Nautilus Prime",
+   "Ninkondi Prime",
+   "Octavia Prime",
+   "Okina Prime",
+   "Pangolin Prime",
+   "Panthera Prime",
+   "Perigale Prime",
+   "Protea Prime",
+   "Quassus Prime",
+   "Sarofang Prime",
+   "Sevagoth Prime",
+   "Shade Prime",
+   "Steflos Prime",
+   "Stradavar Prime",
+   "Styanax Prime",
+   "Tatsu Prime",
+   "Tekko Prime",
+   "Tipedo Prime",
+   "Trumna Prime",
+   "Vadarya Prime",
+   "Velox Prime",
+   "Venato Prime",
+   "Voruna Prime",
+   "Wukong Prime",
+   "Xaku Prime",
+   "Yareli Prime",
+   "Zakti Prime",
+   "Zhuge Prime"
+  ],
+  "Secondary": [
+   "Aegrit",
+   "Aksondol",
+   "Coda Pox",
+   "Cyanex",
+   "Dual Coda Torxica",
+   "Grimoire",
+   "Kompressa",
+   "Kuva Brakk",
+   "Kuva Kraken",
+   "Kuva Seer",
+   "Kuva Twin Stubbas",
+   "Lato Prime",
+   "Onos",
+   "Plinx",
+   "Riot-848",
+   "Sagek Prime",
+   "Sepulcrum",
+   "Tenet Cycron",
+   "Tenet Detron",
+   "Tenet Diplos",
+   "Tenet Plinx",
+   "Tenet Spirex"
+  ],
+  "SentinelWeapons": [
+   "Batoten",
+   "Cryotra",
+   "Helstrum",
+   "Lacerten",
+   "Tazicor",
+   "Verglas",
+   "Verglas Prime",
+   "Vulcax"
+  ],
+  "Sentinels": [
+   "Nautilus"
+  ],
+  "Warframes": [
+   "Baruuk",
+   "Bonewidow",
+   "Excalibur Prime",
+   "Follie",
+   "Helminth",
+   "Narin",
+   "Nokko",
+   "Orion & Sirius",
+   "Qorvex",
+   "Sirius & Orion",
+   "Uriel"
+  ]
+ },
+ "in_progress": [
+  {
+   "name": "Shade Prime",
+   "cat": "Sentinels",
+   "xp": 722234
+  },
+  {
+   "name": "Venato",
+   "cat": "Melee",
+   "xp": 442547
+  },
+  {
+   "name": "Thalys",
+   "cat": "Melee",
+   "xp": 397364
+  },
+  {
+   "name": "Prisma Dual Decurions",
+   "cat": "Arch-Gun",
+   "xp": 276097
+  },
+  {
+   "name": "Bonewidow",
+   "cat": "Warframes",
+   "xp": 207735
+  },
+  {
+   "name": "Tipedo Prime",
+   "cat": "Melee",
+   "xp": 165854
+  }
+ ]
+}

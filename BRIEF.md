@@ -972,3 +972,62 @@ identification; crammed edges → whitespace as a layout material.
   ONE loud element (the Do Now instruction); alternates collapsed
   via <details>; Clem/Maroo smallest and last (§4.2); no charts,
   no dashboards, nothing that asks him to interpret instead of act.
+
+## 20. Information architecture: content is data (Seth, 2026-10-15)
+
+Seth's structural requirement, stated while pass 1 was already
+running: Warframe changes constantly, and the repo must NOT need
+its guts pulled apart every three months. New events, new farms,
+new mechanics slot in; they do not get welded in.
+
+**The engine knows four things, and only four:**
+1. **Activities** — candidate runs, each carrying a facet set
+   (§17 data-model addendum: mission type, era, node, planet,
+   region, Steel Path, endless, faction…). Activities are built in
+   ONE place (an activity factory over world state + static node
+   data); nothing downstream touches raw world-state JSON. This is
+   the collation seam: facets are what obligations intersect with.
+2. **Obligations** — wants, acts, weeklies, caps, event goals —
+   each a predicate over facets + a weight + an expiry. (Same
+   addendum; this section makes it load-bearing architecture
+   rather than a planner trick.)
+3. **Scoring** — weighted, expiry-aware coverage of obligations by
+   activities (§10/§17 rules are the current scoring policy).
+4. **Sections** — the page is a declared layout: ordered slots,
+   each with a renderer kind (instruction / cards / board / bars).
+   A new section is a layout entry + an existing renderer kind in
+   almost every case.
+
+**Everything game-specific is content:** TOML packs in a `content/`
+directory, bundled with the binary and overridable from the config
+dir. A pack declares: id, validity window, obligations, how
+world-state items map to activities/facets, copy, section
+placement. The facet vocabulary itself stays small, closed, and
+versioned; content referencing an unknown facet degrades to
+display-only, never breaks planning.
+
+**Canonical example — Taubound/Moonflesh is a pack, not code:**
+~30 lines declaring: match live alerts whose counted item is the
+event resource; payout 50 (75 Steel Path); weight high and
+expiry-weighted; renders in Do Now; `valid_to = 2026-11-17`. When
+the date passes, the pack self-retires — no code removal, no
+zombie event in December, nothing to remember to clean up. The
+pass-1 planner's "tier 1 with Taubound as the configured instance"
+(§10) is the seed of this; the pack is its proper form.
+
+**On "plugins":** a dynamic plugin system (dylib/wasm) is
+explicitly NOT the mechanism — single-user app, and DE's actual
+change pattern (new event, new frame, new node, new resource) is
+data-shaped, which packs cover entirely. A genuinely new BEHAVIOR
+(a scoring verb or activity source the engine has never seen) is
+the rare code case, and it lands as one new provider module behind
+the activity/obligation traits — bounded addition, not
+rearchitecture. If that boundary starts getting crossed often, the
+design gets revisited with evidence, not before.
+
+**Pass-1 consequence:** the Oracle worker is building against the
+pre-refinement brief (hardcoded-ish event tier). That's accepted
+for a first cut whose job is to be reacted to. The content-pack
+refactor is pass 2's first item and the standing law for all
+structure decisions from here: when in doubt, it's content until
+proven behavior.

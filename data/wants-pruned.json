@@ -1,0 +1,265 @@
+{
+ "pruned": [
+  {
+   "parent": "Cobra & Crane Prime",
+   "uniqueName": "/Lotus/Weapons/Tenno/Melee/SwordsAndBoards/PrimeCobraAndCrane/PrimeCobraAndCraneWeapon",
+   "parts": [
+    "Cobra & Crane Prime Guard"
+   ]
+  },
+  {
+   "parent": "Equinox Prime",
+   "uniqueName": "/Lotus/Powersuits/YinYang/EquinoxPrime",
+   "parts": [
+    "Equinox Prime Blueprint"
+   ]
+  },
+  {
+   "parent": "Fulmin Prime",
+   "uniqueName": "/Lotus/Weapons/Tenno/LongGuns/PrimeFulmin/PrimeFulmin",
+   "parts": [
+    "Fulmin Prime Barrel",
+    "Fulmin Prime Receiver"
+   ]
+  },
+  {
+   "parent": "Hildryn Prime",
+   "uniqueName": "/Lotus/Powersuits/IronFrame/IronFramePrime",
+   "parts": [
+    "Hildryn Prime Neuroptics Blueprint"
+   ]
+  },
+  {
+   "parent": "Khora Prime",
+   "uniqueName": "/Lotus/Powersuits/Khora/KhoraPrime",
+   "parts": [
+    "Khora Prime Blueprint"
+   ]
+  },
+  {
+   "parent": "Nidus Prime",
+   "uniqueName": "/Lotus/Powersuits/Infestation/InfestationPrime",
+   "parts": [
+    "Nidus Prime Chassis Blueprint"
+   ]
+  },
+  {
+   "parent": "Scourge Prime",
+   "uniqueName": "/Lotus/Weapons/Tenno/LongGuns/PrimeScourge/PrimeScourgeWeapon",
+   "parts": [
+    "Scourge Prime Barrel"
+   ]
+  },
+  {
+   "parent": "Tipedo Prime",
+   "uniqueName": "/Lotus/Weapons/Tenno/Melee/Staff/TipedoPrime/TipedoPrimeWeapon",
+   "parts": [
+    "Tipedo Prime Ornament"
+   ]
+  }
+ ],
+ "live": [
+  {
+   "parent": "Afuris Prime",
+   "uniqueName": "/Lotus/Weapons/Tenno/Pistols/PrimeAfuris/PrimeAFurisWeapon",
+   "parts": [
+    "Afuris Prime Barrel",
+    "Afuris Prime Receiver"
+   ]
+  },
+  {
+   "parent": "Akarius Prime",
+   "uniqueName": "/Lotus/Weapons/Tenno/Pistols/PrimeAkarius/PrimeAkariusWeapon",
+   "parts": [
+    "Akarius Prime Blueprint",
+    "Akarius Prime Barrel",
+    "Akarius Prime Receiver"
+   ]
+  },
+  {
+   "parent": "Akbolto Prime",
+   "uniqueName": "/Lotus/Weapons/Tenno/Pistols/PrimeAkbolto/PrimeAkBoltoWeapon",
+   "parts": [
+    "Akbolto Prime Receiver"
+   ]
+  },
+  {
+   "parent": "Akjagara Prime",
+   "uniqueName": "/Lotus/Weapons/Tenno/Pistols/PrimeAkjagara/AkJagaraPrime",
+   "parts": [
+    "Akjagara Prime Barrel"
+   ]
+  },
+  {
+   "parent": "Aksomati Prime",
+   "uniqueName": "/Lotus/Weapons/Tenno/Pistols/PrimeAksomati/PrimeAksomati",
+   "parts": [
+    "Aksomati Prime Barrel",
+    "Aksomati Prime Link",
+    "Aksomati Prime Receiver"
+   ]
+  },
+  {
+   "parent": "Baza Prime",
+   "uniqueName": "/Lotus/Weapons/Tenno/LongGuns/PrimeBaza/PrimeBazaGun",
+   "parts": [
+    "Baza Prime Blueprint",
+    "Baza Prime Stock"
+   ]
+  },
+  {
+   "parent": "Corinth Prime",
+   "uniqueName": "/Lotus/Weapons/Tenno/LongGuns/PrimeCorinth/PrimeCorinth",
+   "parts": [
+    "Corinth Prime Stock"
+   ]
+  },
+  {
+   "parent": "Corvas Prime",
+   "uniqueName": "/Lotus/Weapons/Tenno/Archwing/Primary/PrimeCorvas/PrimeCorvasWeapon",
+   "parts": [
+    "Corvas Prime Barrel"
+   ]
+  },
+  {
+   "parent": "Dual Keres Prime",
+   "uniqueName": "/Lotus/Weapons/Tenno/Melee/Swords/PrimeDualKeres/PrimeDualKeresWeapon",
+   "parts": [
+    "Dual Keres Prime Blueprint",
+    "Dual Keres Prime Handle"
+   ]
+  },
+  {
+   "parent": "Guandao Prime",
+   "uniqueName": "/Lotus/Weapons/Tenno/Melee/Polearms/PrimeGuandao/PrimeGuandaoWeapon",
+   "parts": [
+    "Guandao Prime Blade",
+    "Guandao Prime Handle"
+   ]
+  },
+  {
+   "parent": "Gunsen Prime",
+   "uniqueName": "/Lotus/Weapons/Tenno/Melee/Warfan/PrimeGunsen/PrimeGunsenWeapon",
+   "parts": [
+    "Gunsen Prime Blueprint",
+    "Gunsen Prime Blade",
+    "Gunsen Prime Handle"
+   ]
+  },
+  {
+   "parent": "Hystrix Prime",
+   "uniqueName": "/Lotus/Weapons/Tenno/Pistols/PrimeHystrix/PrimeHystrixWeapon",
+   "parts": [
+    "Hystrix Prime Blueprint"
+   ]
+  },
+  {
+   "parent": "Inaros Prime",
+   "uniqueName": "/Lotus/Powersuits/Sandman/InarosPrime",
+   "parts": [
+    "Inaros Prime Blueprint"
+   ]
+  },
+  {
+   "parent": "Ivara Prime",
+   "uniqueName": "/Lotus/Powersuits/Ranger/IvaraPrime",
+   "parts": [
+    "Ivara Prime Chassis Blueprint"
+   ]
+  },
+  {
+   "parent": "Kogake Prime",
+   "uniqueName": "/Lotus/Weapons/Tenno/Melee/PrimeKogake/KogakePrimeKnuckles",
+   "parts": [
+    "Kogake Prime Gauntlet"
+   ]
+  },
+  {
+   "parent": "Larkspur Prime",
+   "uniqueName": "/Lotus/Weapons/Tenno/Archwing/Primary/PrimeLarkspur/PrimeLarkspurWeapon",
+   "parts": [
+    "Larkspur Prime Barrel"
+   ]
+  },
+  {
+   "parent": "Nami Skyla Prime",
+   "uniqueName": "/Lotus/Weapons/Tenno/Melee/Swords/PrimeNamiSkyla/PrimeNamiSkyla",
+   "parts": [
+    "Nami Skyla Prime Blade"
+   ]
+  },
+  {
+   "parent": "Ninkondi Prime",
+   "uniqueName": "/Lotus/Weapons/Tenno/Melee/PrimeNinkondi/PrimeNikondi",
+   "parts": [
+    "Ninkondi Prime Handle"
+   ]
+  },
+  {
+   "parent": "Octavia Prime",
+   "uniqueName": "/Lotus/Powersuits/Bard/OctaviaPrime",
+   "parts": [
+    "Octavia Prime Blueprint"
+   ]
+  },
+  {
+   "parent": "Pangolin Prime",
+   "uniqueName": "/Lotus/Weapons/Tenno/Melee/Swords/PrimePangolinSword/PrimePangolinSword",
+   "parts": [
+    "Pangolin Prime Handle"
+   ]
+  },
+  {
+   "parent": "Panthera Prime",
+   "uniqueName": "/Lotus/Weapons/Tenno/LongGuns/PrimePanthera/PrimePanthera",
+   "parts": [
+    "Panthera Prime Barrel",
+    "Panthera Prime Receiver"
+   ]
+  },
+  {
+   "parent": "Stradavar Prime",
+   "uniqueName": "/Lotus/Weapons/Tenno/LongGuns/PrimeStradavar/PrimeStradavarGun",
+   "parts": [
+    "Stradavar Prime Blueprint",
+    "Stradavar Prime Receiver"
+   ]
+  },
+  {
+   "parent": "Tatsu Prime",
+   "uniqueName": "/Lotus/Weapons/Tenno/Melee/Swords/PrimeTatsu/PrimeTatsuWeapon",
+   "parts": [
+    "Tatsu Prime Handle"
+   ]
+  },
+  {
+   "parent": "Tekko Prime",
+   "uniqueName": "/Lotus/Weapons/Tenno/Melee/PrimeTekko/PrimeTekko",
+   "parts": [
+    "Tekko Prime Blade"
+   ]
+  },
+  {
+   "parent": "Wukong Prime",
+   "uniqueName": "/Lotus/Powersuits/MonkeyKing/WukongPrime",
+   "parts": [
+    "Wukong Prime Blueprint"
+   ]
+  },
+  {
+   "parent": "Zakti Prime",
+   "uniqueName": "/Lotus/Weapons/Tenno/Pistols/PrimeZakti/PrimeZaktiPistol",
+   "parts": [
+    "Zakti Prime Blueprint"
+   ]
+  },
+  {
+   "parent": "Zhuge Prime",
+   "uniqueName": "/Lotus/Weapons/Tenno/LongGuns/PrimeZhuge/PrimeZhugeCrossbow",
+   "parts": [
+    "Zhuge Prime Receiver",
+    "Zhuge Prime String"
+   ]
+  }
+ ]
+}
