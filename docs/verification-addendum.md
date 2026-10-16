@@ -135,3 +135,12 @@ it refines the brief where they disagree. For the next worker pass.
     unowned vaulted items" is the tool's showcase value (Seth's
     words); (e) Nightwave acts render their DESCRIPTIONS, not just
     names — the name alone doesn't say what to do.
+27. **Weekly box slimming + Baro (Seth, 2026-10-16; pass 4):**
+    - Nightwave LEAVES the big weekly box entirely — it lives in
+      its own section; no duplication.
+    - Ditched outright (do not track): Conclave, Clan, Teshin,
+      Helminth, and the NW-creds row.
+    - Baro Ki'Teer gets his OWN section, present only when he's
+      around (world state voidTraders) — gone when he leaves.
+    - Pass 4 reconciles WEEKLIES.md and the weeklies data file
+      against this list.
