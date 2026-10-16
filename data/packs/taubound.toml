@@ -43,9 +43,17 @@ purchasable_now = 3545
 # Arcane shopping guidance (research 2026-10-15): none of the 11 is
 # event-only (Taubound is a discount, not exclusive access). A rank-5 set
 # takes 21 copies; at 5-8 Moonflesh each that is 105-168 per set.
+#
+# STATE 2026-10-16 (per Seth, after his Moonflesh round-out): rank 5
+# COMPLETE for eight — Melee Fortification, Melee Retaliation, Arcane
+# Battery, Arcane Ice Storm, Melee Afflictions, Melee Exposure, Melee
+# Influence, Secondary Fortifier. Only the three in `finish` remain
+# below rank 5; they are the entire arcane shopping list now. Last
+# known counts (2026-10-15): Animosity x7 (14 to go), Vortex x6 (15),
+# Surge x5 (16).
 [arcanes]
 copies_per_rank5_set = 21
-finish = ["Melee Retaliation", "Melee Influence"]
-next = ["Melee Exposure", "Arcane Ice Storm", "Melee Afflictions", "Secondary Fortifier"]
-playstyle = ["Arcane Battery", "Melee Animosity"]
-skip = ["Melee Vortex", "Secondary Surge", "Melee Fortification"]
+finish = ["Melee Animosity", "Melee Vortex", "Secondary Surge"]
+next = []
+playstyle = []
+skip = []

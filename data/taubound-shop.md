@@ -99,6 +99,16 @@ retroactively settles the page-2 shard numbers: Crimson ×4, Azure
 ×5, Amber ×2 are owned counts, not stock. A rank-5 arcane set takes
 21 copies; at 5–8 Moonflesh that's 105–168 per set from zero.
 
+## Arcane state (2026-10-16, per Seth)
+
+After tonight's Moonflesh round-out, he holds **rank 5 of every
+Taubound arcane except three**: Melee Animosity, Melee Vortex, and
+Secondary Surge are still below rank 5 — those three are the whole
+remaining arcane shopping list. Rank-5 complete: Melee
+Fortification, Melee Retaliation, Arcane Battery, Arcane Ice Storm,
+Melee Afflictions, Melee Exposure, Melee Influence, Secondary
+Fortifier. Plans must not recommend buying any of the eight.
+
 Page 3 priced-and-unowned subtotal: **275** (sigils 50+50, Honoria
 175; arcanes excluded — see research).
 
@@ -109,14 +119,18 @@ Page 3 priced-and-unowned subtotal: **275** (sigils 50+50, Honoria
 - Excluding consumables (Kuva 20 + Credits 100 + Endo 300): 3,650.
 - Excluding also the community-gated Contegorus set (525): 3,545
   actually purchasable right now.
-- Arcane completions (known counts): Fortification needs 17,
-  Retaliation 3, Ice Storm 19, Afflictions 14, Animosity 14,
-  Exposure 19, Vortex 15, Surge 16 = 117 copies ≈ 585–936 Moonflesh
-  depending on the 5/8 split (Battery/Influence/Fortifier counts
-  unknown). Shards: owned counts are NOT stock — repeat-purchase
-  limits for shards/core, if any, are still unknown.
+- Arcane completions: as of 2026-10-16 only three remain (see
+  Arcane state above) — Animosity 14, Vortex 15, Surge 16 copies by
+  the last known counts = 45 copies ≈ 225–360 Moonflesh depending
+  on the 5/8 split. Shards: owned counts are NOT stock —
+  repeat-purchase limits for shards/core, if any, are still
+  unknown.
 
 ## Arcane verdicts (research, 2026-10-15 — wiki + 2024–26 guides)
+
+(Superseded as shopping guidance by the 2026-10-16 state above:
+Seth maxed eight of the eleven, including two of the three "skip"
+picks. Kept for the sourcing notes.)
 
 None of the 11 is event-only: the six melee arcanes are Cavia
 (Bird 3 shop / Loid dissolution / drops), the other five are
