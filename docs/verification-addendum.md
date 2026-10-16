@@ -188,3 +188,18 @@ it refines the brief where they disagree. For the next worker pass.
     inventory, incl. the live capture session). The IA /
     scannability pass is explicitly deferred until that exists —
     using the tool with real stock data is what informs the IA.
+34. **Arcane state source — VERIFIED GAP (Seth's direction
+    2026-10-16: reconcile from data, not debriefs).** Checked
+    2026-10-16 against the real payloads: (a) the public profile
+    carries NO arcane ownership/rank data — its only "Arcane"
+    strings are a challenge name and his Arcane Collector title;
+    arcanes grant no XP, so XPInfo never sees them, and
+    LoadOutInventory is equipped-gear only. (b) EE.log arcane
+    mentions are resource-loader noise; MissionInfo would only
+    ever show DROP-acquired copies, and Taubound arcanes are SHOP
+    purchases, which no elog marker covers. CONCLUSION: neither
+    clean source reconciles arcanes. Steady state = the OCR
+    bootstrap extended to the Arcanes inventory screen (same
+    capture class as relics/parts) in the runnable-here phase.
+    Until then, Seth's debriefs are the stopgap — labeled as
+    such, never silently presented as data-derived.
