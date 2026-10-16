@@ -52,10 +52,26 @@ fn py_yaml_parse(rel: &str) -> bool {
 #[test]
 fn flatpak_manifest_builds_binary_and_ocr_sidecar() {
     let manifest = read("io.github.sethkinast.Fracker.yml");
-    // App identity + runtime + the Rust SDK extension.
+    // App identity + runtime + the Rust SDK extension. The canonical
+    // extension id is `ruststable` (mount /usr/lib/sdk/ruststable/bin);
+    // the hyphenated `rust-stable` id does not exist.
     assert!(manifest.contains(&format!("app-id: {APP_ID}")));
     assert!(manifest.contains("runtime: org.freedesktop.Platform"));
-    assert!(manifest.contains("org.freedesktop.Sdk.Extension.rust-stable"));
+    assert!(manifest.contains("org.freedesktop.Sdk.Extension.ruststable"));
+    assert!(manifest.contains("/usr/lib/sdk/ruststable/bin"));
+    assert!(!manifest.contains("rust-stable"));
+    // The C modules build out-of-tree via explicit cmake: leptonica 1.85
+    // refuses in-source generation, so the builder's cmake-ninja
+    // buildsystem (which landed in-source) must not be used.
+    assert!(!manifest.contains("buildsystem: cmake-ninja"));
+    for needle in [
+        "buildsystem: simple",
+        "cmake -S . -B _build",
+        "cmake --build _build",
+        "cmake --install _build",
+    ] {
+        assert!(manifest.contains(needle), "manifest missing: {needle}");
+    }
     // No OCR = packaging failure: leptonica + tesseract + eng data are
     // all built/bundled, and the binary is compiled from source.
     for needle in [
@@ -69,6 +85,42 @@ fn flatpak_manifest_builds_binary_and_ocr_sidecar() {
     if py_yaml_parse("io.github.sethkinast.Fracker.yml") {
         eprintln!("manifest parsed as YAML");
     }
+}
+
+#[test]
+fn manifest_builds_cargo_offline_from_vendored_sources() {
+    // Failure 3: flatpak-builder has no network, so the fracker module
+    // must compile from vendored crates. The manifest references the
+    // generated source list, forces cargo offline, and the command
+    // passes --offline.
+    let manifest = read("io.github.sethkinast.Fracker.yml");
+    assert!(manifest.contains("cargo-sources.json"));
+    assert!(manifest.contains("CARGO_NET_OFFLINE"));
+    assert!(manifest.contains("cargo build --release --locked --offline"));
+    // The generated list vendors every lockfile crate into cargo/vendor
+    // and wires cargo's `vendored-sources` replacement to that dir.
+    let sources: serde_json::Value =
+        serde_json::from_str(&read("cargo-sources.json")).expect("cargo-sources.json JSON");
+    let entries = sources.as_array().expect("cargo-sources.json is an array");
+    let vendored = entries
+        .iter()
+        .filter(|e| {
+            e.get("dest")
+                .and_then(|d| d.as_str())
+                .is_some_and(|d| d.starts_with("cargo/vendor/"))
+        })
+        .count();
+    assert!(vendored >= 1, "no vendored crate archives in cargo-sources.json");
+    let config = entries
+        .iter()
+        .find_map(|e| {
+            (e.get("dest").and_then(|d| d.as_str()) == Some("cargo")
+                && e.get("dest-filename").and_then(|d| d.as_str()) == Some("config"))
+            .then(|| e.get("contents").and_then(|c| c.as_str()).unwrap_or(""))
+        })
+        .expect("generated cargo config inline source");
+    assert!(config.contains("directory = \"cargo/vendor\""));
+    assert!(config.contains("replace-with = \"vendored-sources\""));
 }
 
 #[test]
