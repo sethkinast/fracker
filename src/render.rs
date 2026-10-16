@@ -200,9 +200,9 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     ));
     h.push_str("</header>\n");
 
-    // ---- tabs: Do Now (≤3-part slate) / Hunt (all primes) / Backlog (all gear) ----
+    // ---- tabs: First Crack (≤3-part slate) / Hunt (all primes) / Backlog (all gear) ----
     h.push_str("<div class=\"tabs\">\n");
-    h.push_str("<input type=\"radio\" name=\"tab\" id=\"tab-donow\" checked><label class=\"tab\" for=\"tab-donow\">Do Now</label>\n");
+    h.push_str("<input type=\"radio\" name=\"tab\" id=\"tab-donow\" checked><label class=\"tab\" for=\"tab-donow\">First Crack</label>\n");
     h.push_str("<input type=\"radio\" name=\"tab\" id=\"tab-hunt\"><label class=\"tab\" for=\"tab-hunt\">Hunt</label>\n");
     h.push_str("<input type=\"radio\" name=\"tab\" id=\"tab-backlog\"><label class=\"tab\" for=\"tab-backlog\">Backlog</label>\n");
 
@@ -212,7 +212,7 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     // first-class rotation element (§d), then the ≤3 focus relics
     // with what they give (§c) + the slate. Exactly ONE loud element
     // (the current instruction); everything else stays quiet.
-    h.push_str("<div class=\"tabpage\" id=\"page-donow\">\n<section><h2>Do now</h2>\n");
+    h.push_str("<div class=\"tabpage\" id=\"page-donow\">\n<section><h2>First crack</h2>\n");
     donow_alert_section(&mut h, &ctx.tuning.planner.alert_sections.event_header, &plan.event_alerts, ctx.tuning, "evt");
     donow_alert_section(&mut h, &ctx.tuning.planner.alert_sections.lotus_header, &plan.lotus_alerts, ctx.tuning, "lotus");
     if let Some(r) = &plan.resurgence {
@@ -229,7 +229,8 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
         h.push_str("<div class=\"focus\">\n");
         for f in &plan.focus {
             h.push_str(&format!(
-                "<span class=\"focus-part\">{} · {} · {}</span>\n",
+                "<span class=\"focus-part\">{}&nbsp;{} · {} · {}</span>\n",
+                icon_span(&f.gear, ctx, "focus-icon"),
                 esc(&f.part),
                 esc(&f.gear),
                 esc(&f.era),
@@ -244,7 +245,8 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     } else {
         let first = top[0];
         h.push_str(&format!(
-            "<div class=\"card donow\"><div class=\"do-text\">{}</div>\n<div class=\"do-sub\">{} &middot; {}</div></div>\n",
+            "<div class=\"card donow\"><div class=\"do-text\">{}<span class=\"do-label\">{}</span></div>\n<div class=\"do-sub\">{} &middot; {}</div></div>\n",
+            chunk_icon(first, ctx),
             esc(&first.title),
             esc(&first.minutes_label),
             esc(&first.why),
@@ -253,7 +255,8 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
             h.push_str("<div class=\"expiring\">\n");
             for c in &top[1..] {
                 h.push_str(&format!(
-                    "<div class=\"card exp\"><span class=\"exp-title\">{}</span>\n<span class=\"exp-sub\">{} &middot; {}</span></div>\n",
+                    "<div class=\"card exp\">{}<span class=\"exp-title\">{}</span>\n<span class=\"exp-sub\">{} &middot; {}</span></div>\n",
+                    chunk_icon(c, ctx),
                     esc(&c.title),
                     esc(&c.minutes_label),
                     esc(&c.why),
@@ -272,10 +275,11 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
         for c in &slate {
             let proven = ctx.proven_done.contains(&c.id);
             h.push_str(&format!(
-                "<label class=\"card chunk{}\"><input type=\"checkbox\" data-id=\"{}\"{}>\n<span class=\"chunk-body\"><span class=\"chunk-title\">{}</span>\n<span class=\"chunk-meta\">{} &middot; {}</span>\n<span class=\"chunk-why\">{}</span></span></label>\n",
+                "<label class=\"card chunk{}\"><input type=\"checkbox\" data-id=\"{}\"{}>\n<span class=\"chunk-body\"><span class=\"chunk-head\">{}<span class=\"chunk-title\">{}</span></span>\n<span class=\"chunk-meta\">{} &middot; {}</span>\n<span class=\"chunk-why\">{}</span></span></label>\n",
                 if proven { " done" } else { "" },
                 esc(&c.id),
                 if proven { " checked" } else { "" },
+                chunk_icon(c, ctx),
                 esc(&c.title),
                 esc(&c.minutes_label),
                 esc(&c.kind),
@@ -537,6 +541,34 @@ fn gear_icon_src(gear: &str, ctx: &RenderContext<'_>) -> Option<String> {
         return embedded.get(gear).cloned();
     }
     crate::model::icon_url(gear, ctx.icons)
+}
+
+/// One icon chip for a parent gear (sixth pass §2): the parent-item
+/// image when resolved, else the monogram. Demo strictness carries over
+/// through [`gear_icon_src`] — a gear missing from the embed map keeps
+/// its monogram, never a hotlink.
+fn icon_span(gear: &str, ctx: &RenderContext<'_>, class: &str) -> String {
+    let initial = gear.chars().next().unwrap_or('?');
+    match gear_icon_src(gear, ctx) {
+        Some(url) => format!(
+            "<span class=\"{class}\"><img src=\"{}\" alt=\"\" loading=\"lazy\" onerror=\"this.remove()\">{initial}</span>",
+            esc(&url),
+            initial = initial,
+        ),
+        None => format!(
+            "<span class=\"{class}\" aria-hidden=\"true\">{initial}</span>",
+            initial = initial,
+        ),
+    }
+}
+
+/// First Crack chunk-row icon: the goal's parent gear when the chunk
+/// carries one (crack chunks), else nothing.
+fn chunk_icon(c: &crate::plan::Chunk, ctx: &RenderContext<'_>) -> String {
+    match &c.gear {
+        Some(gear) => icon_span(gear, ctx, "chunk-icon"),
+        None => String::new(),
+    }
 }
 
 /// One parent group: icon + gear + pips, then aligned part rows
@@ -807,7 +839,7 @@ section { margin-bottom: 6px; }
 }
 .quiet { color: #7e8898; }
 .donow { border-color: #bfa05a; }
-.do-text { font-size: 31px; font-weight: 700; color: #aee3ef; line-height: 1.2; }
+.do-text { font-size: 31px; font-weight: 700; color: #aee3ef; line-height: 1.2; display: flex; align-items: center; gap: 12px; }
 .do-sub { color: #7e8898; margin-top: 6px; }
 .expiring { display: grid; gap: 2px; margin-top: 8px; }
 .exp { padding: 12px 16px; }
@@ -880,7 +912,7 @@ section { margin-bottom: 6px; }
 .snap { color: #c9d2de; }
 footer { margin-top: 10px; }
 details.alt { margin-top: 6px; font-size: 13px; color: #7e8898; }
-/* v2 tabs: Do Now vs Backlog (same palette, no new colors) */
+/* v2 tabs: First Crack vs Backlog (same palette, no new colors) */
 .tabs { margin-top: 8px; }
 .tabs input[name=tab] { display: none; }
 .tab {
@@ -899,7 +931,17 @@ details.alt { margin-top: 6px; font-size: 13px; color: #7e8898; }
 #tab-backlog:checked ~ label[for=tab-backlog] { color: #aee3ef; border-color: #aee3ef; }
 /* do-now focus trio (≤3 parts, terse) */
 .focus { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
-.focus-part { font-size: 13px; color: #bfa05a; border: 1px solid #bfa05a; padding: 2px 10px; }
+.focus-part { font-size: 13px; color: #bfa05a; border: 1px solid #bfa05a; padding: 2px 10px; display: inline-flex; align-items: center; gap: 6px; }
+/* sixth pass §2: First Crack parent icons (focus parts + chunk rows) */
+.focus-icon, .chunk-icon {
+  width: 22px; height: 22px; flex: none; position: relative; overflow: hidden;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-family: Rajdhani, sans-serif; font-size: 12px; font-weight: 700; color: #bfa05a;
+  background: #0d1117; border: 1px solid #232b38;
+}
+.focus-icon img, .chunk-icon img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #0d1117; }
+.do-text .chunk-icon { width: 32px; height: 32px; font-size: 18px; border-color: #bfa05a; }
+.chunk-head { display: inline-flex; align-items: center; gap: 10px; }
 /* backlog compact lines */
 .bline {
   display: flex; gap: 10px; align-items: center; font-size: 13px;
@@ -1018,11 +1060,13 @@ mod tests {
         };
         let html = render_plan(&plan, &ctx);
         for section in [
-            "Do now", "Hunt", "Backlog", "Farms", "Nightwave", "This week",
+            "First crack", "Hunt", "Backlog", "Farms", "Nightwave", "This week",
             "Today", "Targets",
         ] {
             assert!(html.contains(section), "missing section: {section}");
         }
+        assert!(!html.contains("Do now"), "tab renamed to First Crack (sixth pass §2)");
+        assert!(!html.contains("Do Now"), "no user-visible Do Now copy");
         assert!(html.contains("color-scheme: dark"), "refresh-flash rule");
         assert!(html.contains("http-equiv=\"refresh\""), "meta refresh");
         assert!(html.contains("localStorage"), "checkbox persistence");
@@ -1092,6 +1136,67 @@ mod tests {
             "parent icon URL"
         );
         assert!(!html.contains("IvaraPrimeChassis"), "no part icon");
+    }
+
+    #[test]
+    fn first_crack_renders_parent_icons_for_parts_and_chunks() {
+        // Sixth pass §2: the First Crack tab shows parent-item icons on
+        // its focus parts AND its chunk rows (addendum #14/#31).
+        use crate::plan::{Chunk, FocusPart};
+        let t = crate::tuning::Tuning::for_tests();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> =
+            [("Ivara Prime".to_owned(), "IvaraPrime.png".to_owned())]
+                .into_iter()
+                .collect();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let world = WorldState::default();
+        let ctx = RenderContext {
+            world: &world,
+            generated_label: "x".to_owned(),
+            targets_status: "t".to_owned(),
+            world_status: "w".to_owned(),
+            weekly_done: &weekly,
+            proven_done: &proven,
+            mastery_rank: None,
+            icons: &icons,
+            embedded_icons: None,
+            backlog_categories: &cats,
+            daily: None,
+            pack: None,
+            tuning: &t,
+        };
+        let plan = Plan {
+            focus: vec![FocusPart {
+                part: "Ivara Prime Chassis Blueprint".to_owned(),
+                gear: "Ivara Prime".to_owned(),
+                era: "Neo".to_owned(),
+            }],
+            chunks: vec![Chunk {
+                id: "t1-crack-neo-c5".to_owned(),
+                tier: 1,
+                title: "Crack 4 Ivory Prime Chassis at Hepit (Void).".to_owned(),
+                minutes_label: "~3m".to_owned(),
+                why: "w".to_owned(),
+                kind: "expiring crack".to_owned(),
+                expiry: None,
+                gear: Some("Ivara Prime".to_owned()),
+            }],
+            ..Default::default()
+        };
+        // A goal must exist or the focus/chunk lookups would be empty
+        // strings anyway; the plan above is enough for rendering.
+        let html = render_plan(&plan, &ctx);
+        let url = "https://cdn.warframestat.us/img/IvaraPrime.png";
+        assert!(
+            html.contains(&format!("<span class=\"focus-icon\"><img src=\"{url}\"")),
+            "focus part renders the parent icon"
+        );
+        assert!(
+            html.contains(&format!("<span class=\"chunk-icon\"><img src=\"{url}\"")),
+            "chunk row renders the parent icon"
+        );
     }
 
     #[test]

@@ -151,6 +151,10 @@ pub struct Chunk {
     pub why: String,
     pub kind: String,
     pub expiry: Option<DateTime<Utc>>,
+    /// Parent gear for the First Crack icon (sixth pass §2). Crack
+    /// chunks carry their goal's gear; alert/rotation/vendor/farm/
+    /// sortie/filler chunks have no single parent (None).
+    pub gear: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1126,6 +1130,7 @@ fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String], fo
             why: format!("Live payout: {}.", payout.join(", ")),
             kind: "event alert".to_owned(),
             expiry: Some(expiry),
+            gear: None,
         });
     }
     // Prime Resurgence rotation ends: time-boxed value for covered goals.
@@ -1151,6 +1156,7 @@ fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String], fo
                 why: format!("Vaulted relics purchasable for {} while the rotation is live.", input.tuning.planner.resurgence.currency),
                 kind: "prime resurgence".to_owned(),
                 expiry: parse_time(&vt.expiry),
+                gear: None,
             });
         }
     }
@@ -1172,6 +1178,7 @@ fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String], fo
                     why: "Biweekly vendor window closing.".to_owned(),
                     kind: "vendor".to_owned(),
                     expiry: Some(expiry),
+                    gear: None,
                 });
             }
         }
@@ -1281,6 +1288,7 @@ fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String], fo
                 "target crack".to_owned()
             },
             expiry: expiry_dt,
+            gear: Some(gear.clone()),
         });
         if chunks
             .iter()
@@ -1312,6 +1320,7 @@ fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String], fo
                 why: format!("Relics: {}.", f.relics.join(", ")),
                 kind: "relic farm".to_owned(),
                 expiry: None,
+                gear: None,
             });
         }
     }
@@ -1344,6 +1353,7 @@ fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String], fo
                 why: format!("Legs: {}.", legs.join(" → ")),
                 kind: "sortie (daily)".to_owned(),
                 expiry: parse_time(&sortie.expiry),
+                gear: None,
             });
         }
     }
@@ -1365,6 +1375,7 @@ fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String], fo
                 .to_owned(),
             kind: "filler".to_owned(),
             expiry: parse_time(&fill.expiry),
+            gear: None,
         });
     }
 
