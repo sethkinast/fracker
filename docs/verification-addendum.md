@@ -203,3 +203,15 @@ it refines the brief where they disagree. For the next worker pass.
     capture class as relics/parts) in the runnable-here phase.
     Until then, Seth's debriefs are the stopgap — labeled as
     such, never silently presented as data-derived.
+36. **EE.log is UNLINKED and recreated every session (Seth,
+    confirmed 2026-10-16).** The live watch must NOT be a naive
+    timer-poll or path-tail: the final lines of a session (the
+    mission-end picks!) can be lost when the file is replaced.
+    Required design: (a) watch the containing DIRECTORY for file
+    events (the folder read grant is what makes this possible —
+    it is the primary grant, not a fallback); (b) on recreation,
+    DRAIN the old inode to EOF via its still-open FD before
+    letting go, then open the new file; (c) persist (inode,
+    offset) and reconcile on startup by processing any
+    unprocessed tail. Polling may exist only as a fallback with
+    inode-change detection.
