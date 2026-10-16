@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use crate::model::{RelicTables, Roster, Targets, WorldState};
+use crate::model::{OwnedEquipment, RelicTables, Roster, Targets, WorldState};
 
 pub const WORLD_STATE_URL: &str = "https://api.warframestat.us/pc/";
 pub const PROFILE_URL: &str =
@@ -151,12 +151,41 @@ pub async fn fetch_worldstate(
 // Public profile
 // ---------------------------------------------------------------------------
 
-/// Raw profile payload: `Results[0].LoadOutInventory.XPInfo[]`.
+/// Raw profile payload: `Results[0].LoadOutInventory.XPInfo[]` plus
+/// standing/focus state (addendum #2: daily bars render from the
+/// profile's REMAINING-cap fields, never estimated).
+#[derive(Debug, Clone, Default)]
+pub struct Affiliation {
+    pub tag: String,
+    pub standing: i64,
+    pub title: i64,
+}
+
+/// Remaining daily caps straight from the profile response.
+#[derive(Debug, Clone, Default)]
+pub struct DailyCaps {
+    /// `DailyAffiliation`: faction-pool standing REMAINING of the
+    /// 16,000 + 500 × MR cap.
+    pub affiliation_remaining: u32,
+    /// `DailyFocus`: focus REMAINING of the 250,000 + 5,000 × MR cap.
+    pub focus_remaining: u32,
+    /// Per-family `DailyAffiliation*` remaining values (Cavia, Cetus,
+    /// Quills, Solaris, Ventkids, Vox, Entrati, Necraloid, Zariman,
+    /// Kahl, Hex, Library, Pvp).
+    pub per_family: std::collections::HashMap<String, u32>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ProfileSnapshot {
     /// Equipment uniqueNames (`ItemType`).
     pub item_types: Vec<String>,
     pub display_name: String,
+    /// The response's own account id (`AccountId.$oid`).
+    pub account_id: String,
+    /// Mastery rank (`PlayerLevel`).
+    pub mastery_rank: u32,
+    pub affiliations: Vec<Affiliation>,
+    pub daily: DailyCaps,
 }
 
 pub async fn fetch_profile(
@@ -217,6 +246,16 @@ pub fn parse_profile(text: &str) -> Result<ProfileSnapshot, String> {
         .and_then(|d| d.as_str())
         .unwrap_or("")
         .to_owned();
+    let account_id = first
+        .get("AccountId")
+        .and_then(|a| a.get("$oid"))
+        .and_then(|o| o.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let mastery_rank = first
+        .get("PlayerLevel")
+        .and_then(|p| p.as_u64())
+        .unwrap_or(0) as u32;
     let xp = first
         .get("LoadOutInventory")
         .and_then(|l| l.get("XPInfo"))
@@ -226,10 +265,70 @@ pub fn parse_profile(text: &str) -> Result<ProfileSnapshot, String> {
         .iter()
         .filter_map(|e| e.get("ItemType")?.as_str().map(str::to_owned))
         .collect();
+    let affiliations = first
+        .get("Affiliations")
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|e| Affiliation {
+                    tag: e
+                        .get("Tag")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("")
+                        .to_owned(),
+                    standing: e.get("Standing").and_then(|s| s.as_i64()).unwrap_or(0),
+                    title: e.get("Title").and_then(|t| t.as_i64()).unwrap_or(0),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let num = |key: &str| -> u32 {
+        first.get(key).and_then(|x| x.as_u64()).unwrap_or(0) as u32
+    };
+    let mut per_family = std::collections::HashMap::new();
+    if let Some(obj) = v
+        .get("Results")
+        .and_then(|r| r.get(0))
+        .and_then(|f| f.as_object())
+    {
+        for (k, val) in obj {
+            if let Some(fam) = k.strip_prefix("DailyAffiliation") {
+                if !fam.is_empty() {
+                    if let Some(n) = val.as_u64() {
+                        per_family.insert(fam.to_owned(), n as u32);
+                    }
+                }
+            }
+        }
+    }
     Ok(ProfileSnapshot {
         item_types,
         display_name,
+        account_id,
+        mastery_rank,
+        affiliations,
+        daily: DailyCaps {
+            affiliation_remaining: num("DailyAffiliation"),
+            focus_remaining: num("DailyFocus"),
+            per_family,
+        },
     })
+}
+
+/// Resolve profile XPInfo uniqueNames to display names via the
+/// uniqueName -> name map (`data/cache/item-names.json`, built from the
+/// WFCD items dataset). Unresolvable entries are skipped, never guessed.
+pub fn owned_names_from_profile(
+    snap: &ProfileSnapshot,
+    names: &std::collections::HashMap<String, String>,
+) -> OwnedEquipment {
+    OwnedEquipment {
+        names: snap
+            .item_types
+            .iter()
+            .filter_map(|u| names.get(u).cloned())
+            .collect(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -479,10 +578,63 @@ mod tests {
 
     #[test]
     fn parses_profile_shape() {
-        let text = r#"{"Results": [{"DisplayName": "SethPrime", "LoadOutInventory": {"XPInfo": [{"ItemType": "/Lotus/Powersuits/Excalibur", "XP": 1000}]}}]}"#;
+        let text = r#"{"Results": [{"DisplayName": "SethPrime", "AccountId": {"$oid": "abcdef0123456789abcdef01"}, "PlayerLevel": 30, "LoadOutInventory": {"XPInfo": [{"ItemType": "/Lotus/Powersuits/Excalibur", "XP": 1000}]}}]}"#;
         let snap = parse_profile(text).unwrap();
         assert_eq!(snap.display_name, "SethPrime");
+        assert_eq!(snap.account_id, "abcdef0123456789abcdef01");
+        assert_eq!(snap.mastery_rank, 30);
         assert_eq!(snap.item_types.len(), 1);
+    }
+
+    /// Golden test against the REAL account (addendum #1:
+    /// 5420fba23846322173707618, DisplayName Jenterrobahne, MR 30).
+    /// Fixture recorded live; asserts XPInfo, Affiliations, and the
+    /// daily-cap REMAINING fields (addendum #2) all parse.
+    #[test]
+    fn live_profile_fixture_parses_caps_and_affiliations() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+            "fixtures/profile-5420fba23846322173707618.json",
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        let snap = parse_profile(&text).unwrap();
+        assert!(
+            snap.display_name.contains("Jenterrobahne"),
+            "DisplayName confirms the account: {}",
+            snap.display_name
+        );
+        assert_eq!(snap.account_id, "5420fba23846322173707618");
+        assert_eq!(snap.mastery_rank, 30);
+        assert!(
+            snap.item_types.len() >= 600,
+            "XPInfo equipment entries: {}",
+            snap.item_types.len()
+        );
+        assert!(
+            !snap.affiliations.is_empty(),
+            "Affiliations (syndicate standings) parse"
+        );
+        assert!(
+            snap.affiliations
+                .iter()
+                .any(|a| a.tag.contains("Cetus")),
+            "known syndicate present"
+        );
+        // Daily REMAINING caps exist and are within their maxima
+        // (faction pool 31,000 at MR30; focus 400,000 at MR30).
+        assert!(
+            snap.daily.affiliation_remaining <= 31_000,
+            "DailyAffiliation remaining: {}",
+            snap.daily.affiliation_remaining
+        );
+        assert!(
+            snap.daily.focus_remaining <= 400_000,
+            "DailyFocus remaining: {}",
+            snap.daily.focus_remaining
+        );
+        assert!(
+            !snap.daily.per_family.is_empty(),
+            "per-family DailyAffiliation* values parse"
+        );
     }
 
     #[test]

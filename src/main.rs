@@ -12,8 +12,12 @@ use std::path::PathBuf;
 use chrono::Utc;
 use clap::Parser;
 
-use fracker::{config, fetch, model, plan, render};
+use fracker::{config, fetch, model, pack, plan, render};
 use model::{OwnedEquipment, RelicStock};
+
+/// Live profile account (addendum #1: resolved from a real fissure log's
+/// reward relay and confirmed by the profile endpoint).
+pub const PROFILE_ACCOUNT_ID: &str = "5420fba23846322173707618";
 
 #[derive(Parser, Debug)]
 #[command(name = "fracker", about = "Warframe session planner (first pass)")]
@@ -64,26 +68,30 @@ async fn main() {
     }
 }
 
-/// Demo: fixture world state + seed targets + EMPTY profile + UNKNOWN
-/// stock -> plan -> single HTML file.
+/// Demo: LIVE world state + reconciled backlog + fresh profile pull ->
+/// plan -> single HTML file.
+///
+/// Fail-soft chain (brief: report endpoint failures, never die on them):
+/// world state falls back to `fixtures/worldstate.json`, the profile to
+/// `fixtures/profile-<id>.json`. Stock stays UNKNOWN (OCR bootstrap is
+/// pass 3); refinement advice treats unknown stock as scarce.
 async fn run_demo(args: &Args) -> Result<(), String> {
-    // Demo "now" is the fixture's own timestamp: the page shows the
-    // recorded world state faithfully (a live clock would expire the
-    // recorded fissures and misrepresent the fixture).
-    let world_text = match std::fs::read_to_string(args.fixtures.join("worldstate.json")) {
-        Ok(t) => t,
-        Err(_) => {
-            let client = fetch::client()?;
-            let cache = config::cache_dir();
-            let fetched = fetch::fetch_worldstate(&client, &cache).await?;
+    let client = fetch::client()?;
+    let cache = config::cache_dir();
+    let mut endpoint_failures: Vec<String> = Vec::new();
+
+    // 1. World state: live, else recorded fixture.
+    let (world_text, world_status) = match fetch::fetch_worldstate(&client, &cache).await {
+        Ok(fetched) => {
             let text = std::fs::read_to_string(fetch::cache_file(&cache, "worldstate.json"))
                 .map_err(|e| format!("reading recorded worldstate: {e}"))?;
-            let _ = fetched;
-            std::fs::create_dir_all(&args.fixtures)
-                .map_err(|e| format!("fixtures dir: {e}"))?;
-            let fixture_path = args.fixtures.join("worldstate.json");
-            std::fs::write(&fixture_path, &text).map_err(|e| format!("fixture: {e}"))?;
-            text
+            (text, fetched.status.label())
+        }
+        Err(e) => {
+            endpoint_failures.push(format!("worldstate: {e}"));
+            let text = std::fs::read_to_string(args.fixtures.join("worldstate.json"))
+                .map_err(|e| format!("fixture worldstate: {e}"))?;
+            (text, "fixture".to_owned())
         }
     };
     let world = model::WorldState::from_json(&world_text)?;
@@ -92,10 +100,11 @@ async fn run_demo(args: &Args) -> Result<(), String> {
         .parse::<chrono::DateTime<Utc>>()
         .unwrap_or_else(|_| Utc::now());
 
-    // 2. Seed targets (49 wants).
-    let seed_text = std::fs::read_to_string("data/targets.json")
-        .map_err(|e| format!("seed targets data/targets.json: {e}"))?;
-    let targets = model::Targets::from_seed_json(&seed_text)?;
+    // 2. Reconciled backlog (64 unmastered primes), not raw Xuerian wants.
+    let backlog_text = std::fs::read_to_string("data/backlog.json")
+        .map_err(|e| format!("backlog data/backlog.json: {e}"))?;
+    let backlog = model::Backlog::from_json(&backlog_text)?;
+    let wants = backlog.wants();
 
     // 3. Seed relic/roster data.
     let rel_text = std::fs::read_to_string("data/cache/relictables.json")
@@ -105,8 +114,51 @@ async fn run_demo(args: &Args) -> Result<(), String> {
     let relics = model::RelicTables::from_json(&rel_text)?;
     let roster = model::Roster::from_json(&wish_text)?;
 
-    // 4. EMPTY profile + UNKNOWN stock.
-    let owned = OwnedEquipment::empty();
+    // 4. Fresh profile pull -> owned equipment + daily REMAINING caps.
+    let (owned, mastery_rank, daily, profile_status) =
+        match fetch::fetch_profile(&client, &cache, PROFILE_ACCOUNT_ID).await {
+            Ok(fetched) => {
+                let snap = fetched.value;
+                let (o, d) = profile_context(&snap);
+                (o, snap.mastery_rank, d, fetched.status.label())
+            }
+            Err(e) => {
+                endpoint_failures.push(format!("profile: {e}"));
+                let fixture = args.fixtures.join(format!("profile-{PROFILE_ACCOUNT_ID}.json"));
+                let text = std::fs::read_to_string(&fixture)
+                    .map_err(|e| format!("fixture profile: {e}"))?;
+                let snap = fetch::parse_profile(&text)?;
+                let (o, d) = profile_context(&snap);
+                (o, snap.mastery_rank, d, "fixture".to_owned())
+            }
+        };
+
+    // 5. Parent-item icons (addendum #14).
+    let icons_text =
+        std::fs::read_to_string("data/icons.json").map_err(|e| format!("icons: {e}"))?;
+    let icons = model::load_icons(&icons_text)?;
+    let icon_resolved = backlog
+        .gear_names()
+        .iter()
+        .filter(|g| icons.contains_key(*g))
+        .count();
+
+    // 6. Taubound pack strip.
+    let pack_text = std::fs::read_to_string("data/packs/taubound.toml")
+        .map_err(|e| format!("taubound pack: {e}"))?;
+    let taubound = pack::TauboundPack::from_toml(&pack_text)?;
+    let pack_render = render::PackRender {
+        live: taubound.is_live(now),
+        expires_label: "Nov 17".to_owned(),
+        contegorus_health: world
+            .events
+            .iter()
+            .filter(|e| e.is_community && e.is_road_to_tau())
+            .filter_map(|e| e.health)
+            .next(),
+        arcane_line: taubound.arcane_line(),
+    };
+
     let stock = RelicStock::Unknown;
 
     let cfg_path = args.config.clone().unwrap_or_else(config::config_file);
@@ -117,7 +169,7 @@ async fn run_demo(args: &Args) -> Result<(), String> {
         now,
         world: &world,
         owned: &owned,
-        wants: &targets.wants,
+        wants: &wants,
         roster: &roster,
         relics: &relics,
         stock: &stock,
@@ -132,11 +184,20 @@ async fn run_demo(args: &Args) -> Result<(), String> {
     let ctx = render::RenderContext {
         world: &world,
         generated_label: now.format("%Y-%m-%d %H:%M UTC").to_string(),
-        targets_status: "seed (Xuerian token not set — targets may go stale)".to_owned(),
-        world_status: "fixture".to_owned(),
+        targets_status: format!(
+            "backlog {} primes · profile {} (MR{})",
+            backlog.primes.unmastered.len(),
+            profile_status,
+            mastery_rank,
+        ),
+        world_status,
         weekly_done: &weekly_done,
         proven_done: &proven_done,
-        mastery_rank: None,
+        mastery_rank: Some(mastery_rank),
+        icons: &icons,
+        backlog_categories: &backlog.unmastered_by_category,
+        daily,
+        pack: Some(pack_render),
     };
     let html = render::render_plan(&plan, &ctx);
 
@@ -148,11 +209,53 @@ async fn run_demo(args: &Args) -> Result<(), String> {
     let tmp = args.out.with_extension("html.tmp");
     std::fs::write(&tmp, html).map_err(|e| format!("write demo: {e}"))?;
     std::fs::rename(&tmp, &args.out).map_err(|e| format!("publish demo: {e}"))?;
+    let bars = if ctx.daily.is_some() { 2 } else { 0 };
     println!(
-        "demo: {} goals, {} chunks -> {}",
+        "demo: {} goals, {} chunks, {} bars -> {}",
         plan.goals.len(),
         plan.chunks.len(),
+        bars,
         args.out.display()
     );
+    println!(
+        "demo: icons {}/{} · profile MR{} · endpoints: {}",
+        icon_resolved,
+        backlog.primes.unmastered.len(),
+        mastery_rank,
+        if endpoint_failures.is_empty() {
+            "all live".to_owned()
+        } else {
+            endpoint_failures.join("; ")
+        },
+    );
     Ok(())
+}
+
+/// Owned equipment + profile-backed daily bars from one snapshot.
+/// Name resolution uses `data/cache/item-names.json` (uniqueName ->
+/// display name, built from the WFCD items dataset); unresolvable
+/// entries are skipped, never guessed.
+fn profile_context(
+    snap: &fetch::ProfileSnapshot,
+) -> (OwnedEquipment, Option<render::DailyRender>) {
+    let names: std::collections::HashMap<String, String> =
+        std::fs::read_to_string("data/cache/item-names.json")
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
+    let owned = fetch::owned_names_from_profile(snap, &names);
+    let mr = snap.mastery_rank;
+    let daily = render::DailyRender {
+        affiliation_remaining: snap.daily.affiliation_remaining,
+        affiliation_cap: 16_000 + 500 * mr,
+        focus_remaining: snap.daily.focus_remaining,
+        focus_cap: 250_000 + 5_000 * mr,
+        families: {
+            let mut f: Vec<(String, u32)> =
+                snap.daily.per_family.iter().map(|(k, v)| (k.clone(), *v)).collect();
+            f.sort_by(|a, b| a.0.cmp(&b.0));
+            f
+        },
+    };
+    (owned, Some(daily))
 }
