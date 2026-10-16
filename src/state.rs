@@ -51,7 +51,8 @@ pub struct AppState {
     /// Daily gauge id ("focus", "standing:<syndicate>", "sortie") -> value + date.
     #[serde(default)]
     pub daily_ledger: HashMap<String, DailyEntry>,
-    /// Estimated Moonflesh from Taubound alert-mission completions.
+    /// Estimated event-resource earnings from event alert-mission
+    /// completions (pack-defined resource).
     #[serde(default)]
     pub moonflesh_estimate: u32,
 }

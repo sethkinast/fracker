@@ -4,7 +4,10 @@
 //!
 //! Ordering: strict tiers; within a tier, earliest expiry first, then
 //! highest value density. Weekly-cycle content never appears here at
-//! any tier — it is board-only (rendered by `render` from WEEKLIES.md).
+//! any tier — it is board-only.
+//!
+//! All estimates, thresholds, and windows come from the runtime tuning
+//! tables (`crate::tuning`); this module holds no game content.
 
 use std::collections::{HashMap, HashSet};
 
@@ -13,6 +16,9 @@ use chrono::{DateTime, Utc};
 use crate::model::{
     OwnedEquipment, Refinement, RelicStock, RelicTables, Roster, WorldState,
 };
+use crate::tuning::{MissionTuning, PlannerTuning, Tuning};
+
+pub use crate::tuning::Rarity;
 
 // ---------------------------------------------------------------------------
 // Inputs / outputs
@@ -31,6 +37,8 @@ pub struct PlanInput<'a> {
     /// Normalized gear names of the last two prime releases (radshare gate).
     pub recent_gear: &'a HashSet<String>,
     pub steel_path_tiebreak: bool,
+    /// Runtime estimates/thresholds (loaded from `data/`).
+    pub tuning: &'a Tuning,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,13 +89,14 @@ pub fn best_deal_for_part(
     part: &str,
     relics: &RelicTables,
     stock: &RelicStock,
+    tuning: &Tuning,
 ) -> Option<PartDeal> {
     let (relic, intact) = relics.relics_for_part(part).into_iter().next()?;
     let owned = stock.count(&relic.name);
-    let refinement = choose_refinement(intact, owned);
+    let refinement = choose_refinement(tuning, intact, owned);
     let mut chance = relic.chance_for(part, refinement);
     if chance <= 0.0 {
-        chance = refine_chance(intact, refinement);
+        chance = tuning.refinement.fallback_chance(intact, refinement);
     }
     Some(PartDeal {
         relic: relic.name.clone(),
@@ -99,37 +108,10 @@ pub fn best_deal_for_part(
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Rarity {
-    Common,
-    Uncommon,
-    Rare,
-}
-
-impl Rarity {
-    pub fn of(intact_chance: f64) -> Self {
-        if intact_chance >= 25.0 {
-            Rarity::Common
-        } else if intact_chance >= 11.0 {
-            Rarity::Uncommon
-        } else {
-            Rarity::Rare
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Rarity::Common => "common",
-            Rarity::Uncommon => "uncommon",
-            Rarity::Rare => "rare",
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct GoalAction {
-    /// Complete instruction line, e.g. "Grab 3× Neo C5, refine to
-    /// Flawless, run Hepit (Void) — Capture."
+    /// Complete instruction line, e.g. "Grab 3× <relic>, refine to
+    /// <tier>, run <node> (<type>) — cracks <part>."
     pub text: String,
     pub kind: ActionKind,
     /// The relic/fissure backing it, for slate ranking.
@@ -201,11 +183,15 @@ pub struct FocusPart {
     pub era: String,
 }
 
-/// Do-Now focus picker (brief #2 item 3): at most 3 parts by card
-/// priority (item 2), preferring a spread across relic eras — a live
+/// Do-Now focus picker (brief #2 item 3): at most `focus_max` parts by
+/// card priority, preferring a spread across relic eras — a live
 /// fissure almost always serves one of them, and an Omnia fissure can
-/// serve all three at once.
-pub fn pick_focus(cards: &[GoalCard], relics: &RelicTables) -> Vec<FocusPart> {
+/// serve all of them at once.
+pub fn pick_focus(
+    cards: &[GoalCard],
+    relics: &RelicTables,
+    tuning: &Tuning,
+) -> Vec<FocusPart> {
     // Bottleneck (rarest) needed part per card, in card priority order.
     let mut cands: Vec<(String, String, String)> = Vec::new();
     for card in cards {
@@ -235,7 +221,7 @@ pub fn pick_focus(cards: &[GoalCard], relics: &RelicTables) -> Vec<FocusPart> {
     let mut out: Vec<FocusPart> = Vec::new();
     let mut eras: HashSet<String> = HashSet::new();
     for (part, gear, era) in &cands {
-        if out.len() >= 3 {
+        if out.len() >= tuning.planner.focus_max_parts {
             break;
         }
         if eras.insert(era.clone()) {
@@ -248,7 +234,7 @@ pub fn pick_focus(cards: &[GoalCard], relics: &RelicTables) -> Vec<FocusPart> {
     }
     // Pass 2: fill remaining slots by priority regardless of era.
     for (part, gear, era) in &cands {
-        if out.len() >= 3 {
+        if out.len() >= tuning.planner.focus_max_parts {
             break;
         }
         if !out.iter().any(|f| f.part == *part) {
@@ -270,54 +256,6 @@ fn parse_time(s: &str) -> Option<DateTime<Utc>> {
     s.parse::<DateTime<Utc>>().ok()
 }
 
-/// Base minutes per mission by type + 2 min overhead (BRIEF §10).
-/// Endless types return per-crack-unit minutes instead (see `is_endless`).
-fn mission_base_minutes(mission_type: &str) -> f64 {
-    match mission_type.to_lowercase().as_str() {
-        "capture" => 3.0,
-        "exterminate" => 5.0,
-        "sabotage" => 5.0,
-        "rescue" => 4.0,
-        "spy" => 6.0,
-        "hive" => 10.0,
-        "mobile defense" => 7.0,
-        "defense" => 7.0,
-        "survival" => 5.0,
-        "interception" => 7.0,
-        "disruption" => 4.0,
-        "excavation" => 6.0,
-        "defection" => 8.0,
-        "infested salvage" => 6.0,
-        "survival*" => 5.0,
-        _ => 6.0,
-    }
-}
-
-/// Endless fissures crack once per rotation unit (~5 min) with no
-/// orbiter/load overhead between cracks; sprint fissures crack once
-/// per mission + 2 min overhead (BRIEF §10, §17 mission selection).
-fn is_endless(mission_type: &str) -> bool {
-    matches!(
-        mission_type.to_lowercase().as_str(),
-        "survival" | "defense" | "interception" | "disruption" | "excavation" | "void cascade"
-    )
-}
-
-/// Total minutes for a batch on one fissure.
-fn minutes_for_batch(mission_type: &str, batch: u32) -> f64 {
-    let b = batch.max(1) as f64;
-    if is_endless(mission_type) {
-        // One mission, N rotation units, single overhead.
-        b * mission_base_minutes(mission_type) + 2.0
-    } else {
-        b * (mission_base_minutes(mission_type) + 2.0)
-    }
-}
-
-fn minutes_per_crack(mission_type: &str, batch: u32) -> f64 {
-    minutes_for_batch(mission_type, batch) / batch.max(1) as f64
-}
-
 // ---------------------------------------------------------------------------
 // Refinement advice (BRIEF §17 North Star)
 // ---------------------------------------------------------------------------
@@ -331,14 +269,19 @@ pub fn expected_cracks(chance_pct: f64) -> f64 {
 }
 
 /// Stock-aware refinement tier.
-/// * commons run Intact (refining *hurts* them: 25.33% -> 16.67%);
+/// * commons run Intact (refining *hurts* them);
 /// * scarce stock (or unknown, treated as scarce) refines harder to
 ///   maximize success per copy;
 /// * plentiful stock biases DOWN a tier (volume substitutes for odds);
 ///   formally: the cheapest tier whose expected run fits inside stock,
 ///   defaulting to Radiant when even that exceeds holdings.
-pub fn choose_refinement(intact: f64, stock: Option<u32>) -> Refinement {
-    let rarity = Rarity::of(intact);
+/// Bands, ladder, and costs come from the runtime tuning tables.
+pub fn choose_refinement(
+    tuning: &Tuning,
+    intact: f64,
+    stock: Option<u32>,
+) -> Refinement {
+    let rarity = tuning.refinement.rarity_of(intact);
     if rarity == Rarity::Common {
         return Refinement::Intact;
     }
@@ -346,15 +289,15 @@ pub fn choose_refinement(intact: f64, stock: Option<u32>) -> Refinement {
         (Refinement::Intact, intact),
         (
             Refinement::Exceptional,
-            refine_chance(intact, Refinement::Exceptional),
+            tuning.refinement.fallback_chance(intact, Refinement::Exceptional),
         ),
         (
             Refinement::Flawless,
-            refine_chance(intact, Refinement::Flawless),
+            tuning.refinement.fallback_chance(intact, Refinement::Flawless),
         ),
         (
             Refinement::Radiant,
-            refine_chance(intact, Refinement::Radiant),
+            tuning.refinement.fallback_chance(intact, Refinement::Radiant),
         ),
     ];
     match stock {
@@ -373,30 +316,14 @@ pub fn choose_refinement(intact: f64, stock: Option<u32>) -> Refinement {
     }
 }
 
-/// Refined chance when the table only guarantees the Intact value.
-/// Real tables carry all four tiers; this fallback encodes the brief's
-/// stated ladder (rare 2/4/6/10, uncommon 11/13/17/20,
-/// common 25.33/23.33/20/16.67).
-fn refine_chance(intact: f64, tier: Refinement) -> f64 {
-    let rarity = Rarity::of(intact);
-    match (rarity, tier) {
-        (_, Refinement::Intact) => intact,
-        (Rarity::Rare, Refinement::Exceptional) => 4.0,
-        (Rarity::Rare, Refinement::Flawless) => 6.0,
-        (Rarity::Rare, Refinement::Radiant) => 10.0,
-        (Rarity::Uncommon, Refinement::Exceptional) => 13.0,
-        (Rarity::Uncommon, Refinement::Flawless) => 17.0,
-        (Rarity::Uncommon, Refinement::Radiant) => 20.0,
-        (Rarity::Common, Refinement::Exceptional) => 23.33,
-        (Rarity::Common, Refinement::Flawless) => 20.0,
-        (Rarity::Common, Refinement::Radiant) => 16.67,
-    }
-}
-
 /// Expected trace spend per success at a tier (informational, shown on
-/// the line so Seth can veto against his unobservable balance).
-pub fn trace_spend_per_success(tier: Refinement, chance_pct: f64) -> f64 {
-    tier.trace_cost_per_relic() as f64 * expected_cracks(chance_pct)
+/// the line so the unobservable balance can be vetoed against).
+pub fn trace_spend_per_success(
+    tuning: &Tuning,
+    tier: Refinement,
+    chance_pct: f64,
+) -> f64 {
+    tuning.refinement.trace_cost(tier) as f64 * expected_cracks(chance_pct)
 }
 
 // ---------------------------------------------------------------------------
@@ -410,7 +337,7 @@ pub struct FissurePick {
 }
 
 /// Rank matching fissures for a relic-era BATCH + planned batch size:
-/// 1. expiry (~15 min jumps first, if runnable — storms excluded here),
+/// 1. expiry (rush window jumps first, if runnable — storms excluded),
 /// 2. minutes per crack for the planned batch (dominant),
 /// 3. goal fit (bottleneck era first — caller pre-sorts eras),
 /// 4. Steel Path tiebreak for sprint missions (endless stays normal),
@@ -425,6 +352,7 @@ pub fn rank_fissures(
     batch: u32,
     now: DateTime<Utc>,
     steel_path_tiebreak: bool,
+    tuning: &Tuning,
 ) -> Vec<FissurePick> {
     let mut picks: Vec<FissurePick> = fissures
         .iter()
@@ -437,13 +365,13 @@ pub fn rank_fissures(
             Some(FissurePick {
                 fissure: f.clone(),
                 expires_in_mins: (expiry - now).num_seconds() as f64 / 60.0,
-                batch_minutes: minutes_for_batch(&f.mission_type, batch),
+                batch_minutes: tuning.missions.minutes_for_batch(&f.mission_type, batch),
             })
         })
         .collect();
     picks.sort_by(|a, b| {
-        let urg_a = a.expires_in_mins <= 15.0 && !a.fissure.is_storm;
-        let urg_b = b.expires_in_mins <= 15.0 && !b.fissure.is_storm;
+        let urg_a = a.expires_in_mins <= tuning.planner.expiry_jump_mins && !a.fissure.is_storm;
+        let urg_b = b.expires_in_mins <= tuning.planner.expiry_jump_mins && !b.fissure.is_storm;
         urg_b
             .cmp(&urg_a)
             .then_with(|| {
@@ -454,10 +382,10 @@ pub fn rank_fissures(
             .then_with(|| {
                 let sp_a = steel_path_tiebreak
                     && a.fissure.is_hard
-                    && !is_endless(&a.fissure.mission_type);
+                    && !tuning.missions.is_endless(&a.fissure.mission_type);
                 let sp_b = steel_path_tiebreak
                     && b.fissure.is_hard
-                    && !is_endless(&b.fissure.mission_type);
+                    && !tuning.missions.is_endless(&b.fissure.mission_type);
                 sp_b.cmp(&sp_a)
             })
             .then_with(|| a.fissure.is_storm.cmp(&b.fissure.is_storm))
@@ -502,6 +430,7 @@ pub fn best_crack_for_part(
     fissures: &[crate::model::Fissure],
     now: DateTime<Utc>,
     steel_path_tiebreak: bool,
+    tuning: &Tuning,
 ) -> Option<(CrackCandidate, FissurePick)> {
     let mut best: Option<(CrackCandidate, FissurePick)> = None;
     for (relic, _intact) in relics.relics_for_part(part) {
@@ -510,17 +439,17 @@ pub fn best_crack_for_part(
         if owned == Some(0) {
             continue; // known-empty: no crack exists.
         }
-        let refinement = choose_refinement(intact, owned);
+        let refinement = choose_refinement(tuning, intact, owned);
         let chance = relic.chance_for(part, refinement);
         let chance = if chance <= 0.0 {
-            refine_chance(intact, refinement)
+            tuning.refinement.fallback_chance(intact, refinement)
         } else {
             chance
         };
         let exp = expected_cracks(chance);
         let batch = match owned {
-            Some(s) => (s.min(exp.ceil() as u32)).clamp(1, MAX_BATCH),
-            None => (exp.ceil() as u32).clamp(1, UNKNOWN_DEFAULT_BATCH),
+            Some(s) => (s.min(exp.ceil() as u32)).clamp(1, tuning.planner.max_batch),
+            None => (exp.ceil() as u32).clamp(1, tuning.planner.unknown_default_batch),
         };
         let coverage = relic
             .rewards
@@ -528,8 +457,8 @@ pub fn best_crack_for_part(
             .filter(|r| r.name != part && other_wants.contains(&r.name))
             .count();
         let stock_factor = match owned {
-            Some(_) => 1.5, // cracking beats farming, always.
-            None => 1.0,
+            Some(_) => tuning.planner.known_stock_factor,
+            None => tuning.planner.unknown_stock_factor,
         };
         let score = chance * (1.0 + coverage as f64) * stock_factor;
         let picks = rank_fissures(
@@ -538,13 +467,16 @@ pub fn best_crack_for_part(
             batch,
             now,
             steel_path_tiebreak,
+            tuning,
         );
         let pick = match picks.into_iter().next() {
             Some(p) => p,
             None => continue,
         };
-        let trace_cost = refinement.trace_cost_per_relic() * batch;
-        let solo_minutes = minutes_for_batch(&pick.fissure.mission_type, batch);
+        let trace_cost = tuning.refinement.trace_cost(refinement) * batch;
+        let solo_minutes = tuning
+            .missions
+            .minutes_for_batch(&pick.fissure.mission_type, batch);
         let cand = CrackCandidate {
             relic: relic.name.clone(),
             era: relic.era().to_owned(),
@@ -571,11 +503,12 @@ pub fn best_crack_for_part(
 }
 
 /// Radshare verdict: 4-player same-relic share turns per-crack chance
-/// p into 1-(1-p)^4. Recommended when the share wins after ~7.5 min LFG
-/// formation time — typically rares at Flawless/Radiant with scarce
+/// p into 1-(1-p)^4. Recommended when the share wins after LFG
+/// formation time — typically bottleneck bands with scarce
 /// stock — AND the relic's gear is within the last two prime releases
-/// (Seth's gate: older recruiting never fills).
+/// (older recruiting never fills).
 pub fn radshare_verdict(
+    tuning: &PlannerTuning,
     chance_pct: f64,
     rarity: Rarity,
     mpc_solo: f64,
@@ -594,10 +527,12 @@ pub fn radshare_verdict(
     let exp_share = 1.0 / p4;
     // Share stretches expensive relics: worth it when the solo run is
     // long (rare part) or stock is scarce, and the time math repays LFG.
-    let lfg_mins = 7.5;
     let solo_time = exp_solo * mpc_solo;
-    let share_time = lfg_mins + exp_share * mpc_solo;
-    if (rarity == Rarity::Rare || scarce) && share_time < solo_time && exp_solo >= 5.0 {
+    let share_time = tuning.lfg_minutes + exp_share * mpc_solo;
+    if (rarity == Rarity::Rare || scarce)
+        && share_time < solo_time
+        && exp_solo >= tuning.radshare_min_solo_cracks
+    {
         Some(format!(
             "Best as a radshare (solo ~{:.0} cracks vs ~{:.0} shared).",
             exp_solo, exp_share
@@ -615,9 +550,6 @@ pub fn radshare_lfg(relic: &str) -> String {
 // ---------------------------------------------------------------------------
 // Goal cards (BRIEF §17)
 // ---------------------------------------------------------------------------
-
-pub const UNKNOWN_DEFAULT_BATCH: u32 = 4;
-pub const MAX_BATCH: u32 = 6;
 
 /// Normalize a gear/part name for rotation matching.
 pub fn norm_name(s: &str) -> String {
@@ -646,6 +578,7 @@ fn part_rows_for_gear(
     relics: &RelicTables,
     stock: &RelicStock,
     want_set: &HashSet<String>,
+    tuning: &Tuning,
 ) -> Vec<PartRow> {
     let item = roster.by_name(gear);
     let mut names: Vec<String> = wants_here.to_owned();
@@ -682,7 +615,9 @@ fn part_rows_for_gear(
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
             let best = opts.first();
-            let rarity = Rarity::of(best.map(|o| o.chance_intact).unwrap_or(0.0));
+            let rarity = tuning
+                .refinement
+                .rarity_of(best.map(|o| o.chance_intact).unwrap_or(0.0));
             let best_odds = match best {
                 Some(o) => format!(
                     "{} — {}% Intact / {}% Radiant",
@@ -692,7 +627,7 @@ fn part_rows_for_gear(
                 ),
                 None => "no relic source".to_owned(),
             };
-            let deal = best_deal_for_part(&part, relics, stock);
+            let deal = best_deal_for_part(&part, relics, stock, tuning);
             PartRow {
                 name: part,
                 state,
@@ -763,6 +698,7 @@ fn goal_cards(input: &PlanInput<'_>, active: &[String]) -> Vec<GoalCard> {
                 input.relics,
                 input.stock,
                 &want_set,
+                input.tuning,
             );
             let parts_total = parts.len();
             let parts_have = parts
@@ -850,19 +786,21 @@ fn derive_action(
     );
     // No live crack. Resurgence un-parks vaulted goals in rotation.
     // When the rotation is live and no copy is known-held, the certain
-    // instruction (buy the relics for Aya) beats "crack if you have it".
+    // instruction (buy the relics for the event currency) beats "crack if you have it".
     if resurgence_live && !holds_known {
         if let Some(vt) = &input.world.vault_trader {
             return GoalAction {
                 text: format!(
-                    "Rotation ends {} — Varzia has {}'s relics ({}). Farm Aya, buy the relics, then crack above.",
-                    days_until(input.now, &vt.expiry),
+                    "Rotation ends {} — {contact} has {}'s relics ({}). Farm {currency}, buy the relics, then crack above.",
+                    days_until(input.now, &vt.expiry, input.tuning),
                     gear,
                     vt.location,
+                    contact = input.tuning.planner.resurgence.contact.as_str(),
+                    currency = input.tuning.planner.resurgence.currency.as_str(),
                 ),
                 kind: ActionKind::Resurgence,
                 relic: None,
-                score: 40.0,
+                score: input.tuning.planner.score_resurgence,
             };
         }
     }
@@ -879,6 +817,7 @@ fn derive_action(
             &input.world.fissures,
             input.now,
             input.steel_path_tiebreak,
+            input.tuning,
         ) {
             let better = match &best_crack {
                 None => true,
@@ -895,13 +834,13 @@ fn derive_action(
             Some(_) => String::new(),
             None => " (if you have it)".to_owned(),
         };
-        let endless = is_endless(&pick.fissure.mission_type);
+        let endless = input.tuning.missions.is_endless(&pick.fissure.mission_type);
         let stay = if endless && cand.batch > 1 {
             format!(" — stay for {} rotations", cand.batch)
         } else {
             String::new()
         };
-        let sp = if pick.fissure.is_hard { " Steel Path" } else { "" };
+        let sp = if pick.fissure.is_hard { input.tuning.planner.steel_path_label.as_str() } else { "" };
         let mut text = format!(
             "Grab {}\u{00d7} {}{}, refine to {}, run {} ({}){}{} — cracks {}.",
             cand.batch,
@@ -923,11 +862,22 @@ fn derive_action(
             let g = norm_name(g);
             g.contains(&gear_norm) || gear_norm.contains(&g)
         });
-        let mpc = minutes_per_crack(&pick.fissure.mission_type, cand.batch);
-        let scarce = matches!(cand.owned, Some(0..=2) | None);
-        if let Some(v) =
-            radshare_verdict(cand.chance, cand_rarity(&cand), mpc, scarce, gear_recent)
-        {
+        let mpc = input
+            .tuning
+            .missions
+            .minutes_per_crack(&pick.fissure.mission_type, cand.batch);
+        let scarce = cand
+            .owned
+            .map(|s| s <= input.tuning.planner.scarce_max_held)
+            .unwrap_or(true);
+        if let Some(v) = radshare_verdict(
+            &input.tuning.planner,
+            cand.chance,
+            cand_rarity(input.tuning, &cand),
+            mpc,
+            scarce,
+            gear_recent,
+        ) {
             text.push_str(&format!(" {} {}", v, radshare_lfg(&cand.relic)));
         }
         return GoalAction {
@@ -942,17 +892,19 @@ fn derive_action(
     // nothing) — still surface the time-boxed buy window.
     if resurgence_live {
         if let Some(vt) = &input.world.vault_trader {
-            let days = days_until(input.now, &vt.expiry);
+            let days = days_until(input.now, &vt.expiry, input.tuning);
             return GoalAction {
                 text: format!(
-                    "Rotation ends {} — Varzia has {}'s relics ({}). Farm Aya, buy the relics, then crack above.",
+                    "Rotation ends {} — {contact} has {}'s relics ({}). Farm {currency}, buy the relics, then crack above.",
                     days,
                     gear,
                     vt.location,
+                    contact = input.tuning.planner.resurgence.contact.as_str(),
+                    currency = input.tuning.planner.resurgence.currency.as_str(),
                 ),
                 kind: ActionKind::Resurgence,
                 relic: None,
-                score: 40.0,
+                score: input.tuning.planner.score_resurgence,
             };
         }
     }
@@ -974,7 +926,7 @@ fn derive_action(
             ),
             kind: ActionKind::WaitFissure,
             relic: None,
-            score: 5.0,
+            score: input.tuning.planner.score_wait_fissure,
         };
     }
 
@@ -992,20 +944,22 @@ fn derive_action(
         ),
         kind: ActionKind::Parked,
         relic: None,
-        score: 0.0,
+        score: input.tuning.planner.score_parked,
     }
 }
 
-fn cand_rarity(cand: &CrackCandidate) -> Rarity {
+fn cand_rarity(tuning: &Tuning, cand: &CrackCandidate) -> Rarity {
     // expected = 100/chance, so this recovers the target's rarity band.
-    Rarity::of(100.0 / cand.expected_cracks.max(0.01))
+    tuning
+        .refinement
+        .rarity_of(100.0 / cand.expected_cracks.max(0.01))
 }
 
-fn days_until(now: DateTime<Utc>, expiry: &str) -> String {
+fn days_until(now: DateTime<Utc>, expiry: &str, tuning: &Tuning) -> String {
     match parse_time(expiry) {
         Some(t) if t > now => {
             let secs = (t - now).num_seconds();
-            if secs < 48 * 3600 {
+            if secs < tuning.planner.days_until_hour_boundary * 3600 {
                 format!("in {}h", secs / 3600)
             } else {
                 format!("in {}d", secs / 86400)
@@ -1017,6 +971,7 @@ fn days_until(now: DateTime<Utc>, expiry: &str) -> String {
 
 /// Best farm node label + table + rotation chance for one relic.
 fn best_source_node(
+    missions: &MissionTuning,
     relics: &RelicTables,
     relic: &crate::model::RelicEntry,
 ) -> Option<(String, String, f64)> {
@@ -1027,11 +982,12 @@ fn best_source_node(
             continue;
         }
         let nodes = relics.sources.get(table)?;
-        // Prefer fast missions (Capture/Exterminate/Disruption early).
+        // Prefer fast missions (early-rotation farming first).
         let mut ranked: Vec<&crate::model::FarmNode> = nodes.iter().collect();
         ranked.sort_by(|a, b| {
-            rotations_per_hour(&a.mode_name)
-                .partial_cmp(&rotations_per_hour(&b.mode_name))
+            missions
+                .rotations_per_hour(&a.mode_name)
+                .partial_cmp(&missions.rotations_per_hour(&b.mode_name))
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .reverse()
         });
@@ -1054,7 +1010,9 @@ fn farm_action_for(input: &PlanInput<'_>, wants: &[String]) -> Option<GoalAction
             if relic.vaulted || relic.sources.is_empty() {
                 continue;
             }
-            if let Some((node, table, chance)) = best_source_node(input.relics, relic) {
+            if let Some((node, table, chance)) =
+                best_source_node(&input.tuning.missions, input.relics, relic)
+            {
                 let _ = table;
                 scored.push((chance, node, relic.name.clone()));
             }
@@ -1068,7 +1026,7 @@ fn farm_action_for(input: &PlanInput<'_>, wants: &[String]) -> Option<GoalAction
         text: format!("Farm: {relic} — {node} (best rotation {chance}%)."),
         kind: ActionKind::Farm,
         relic: Some(relic),
-        score: 10.0,
+        score: input.tuning.planner.score_farm,
     })
 }
 
@@ -1122,7 +1080,8 @@ fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String], fo
             ),
             minutes_label: format!(
                 "~{}m",
-                mission_base_minutes(&alert.mission.mission_type) as u32 + 2
+                input.tuning.missions.base_minutes(&alert.mission.mission_type) as u32
+                    + input.tuning.missions.overhead as u32
             ),
             why: format!("Live payout: {}.", payout.join(", ")),
             kind: "event alert".to_owned(),
@@ -1142,30 +1101,32 @@ fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String], fo
                 id: "t1-resurgence".to_owned(),
                 tier: 1,
                 title: format!(
-                    "Varzia rotation ends {} — {} ({}).",
-                    days_until(input.now, &vt.expiry),
+                    "{contact} rotation ends {} — {} ({}).",
+                    days_until(input.now, &vt.expiry, input.tuning),
                     names.join(", "),
                     vt.location,
+                    contact = input.tuning.planner.resurgence.contact.as_str(),
                 ),
                 minutes_label: "window".to_owned(),
-                why: "Vaulted relics purchasable for Aya while the rotation is live.".to_owned(),
+                why: format!("Vaulted relics purchasable for {} while the rotation is live.", input.tuning.planner.resurgence.currency),
                 kind: "prime resurgence".to_owned(),
                 expiry: parse_time(&vt.expiry),
             });
         }
     }
-    // Baro leaving < 24h.
+    // Vendor leaving inside the tuned window.
     if let Some(baro) = &input.world.baro {
         if let Some(expiry) = parse_time(&baro.expiry) {
             let mins = (expiry - input.now).num_seconds() / 60;
-            if mins > 0 && mins < 24 * 60 {
+            if mins > 0 && mins < input.tuning.planner.vendor_window_hours * 60 {
                 chunks.push(Chunk {
                     id: "t1-baro".to_owned(),
                     tier: 1,
                     title: format!(
-                        "Baro leaves in {}h — {} (check inventory).",
+                        "{vendor} leaves in {}h — {} (check inventory).",
                         mins / 60,
-                        baro.location
+                        baro.location,
+                        vendor = input.tuning.planner.vendor.name.as_str(),
                     ),
                     minutes_label: "~5m".to_owned(),
                     why: "Biweekly vendor window closing.".to_owned(),
@@ -1211,6 +1172,7 @@ fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String], fo
                 &input.world.fissures,
                 input.now,
                 input.steel_path_tiebreak,
+                input.tuning,
             ) {
                 ranked.push((
                     card.gear.clone(),
@@ -1238,10 +1200,14 @@ fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String], fo
             Some(_) => String::new(),
             None => " (if you have it)".to_owned(),
         };
-        let endless = is_endless(&pick.fissure.mission_type);
-        let sp = if pick.fissure.is_hard { " Steel Path" } else { "" };
+        let endless = input.tuning.missions.is_endless(&pick.fissure.mission_type);
+        let sp = if pick.fissure.is_hard { input.tuning.planner.steel_path_label.as_str() } else { "" };
         let expiry_dt = parse_time(&pick.fissure.expiry);
-        let tier: u8 = if pick.expires_in_mins < 60.0 { 1 } else { 2 };
+        let tier: u8 = if pick.expires_in_mins < input.tuning.planner.tier1_crack_mins {
+            1
+        } else {
+            2
+        };
         let mut alternates = String::new();
         if cand.coverage > 0 {
             alternates = format!(" Covers {} other want(s) in the same relic.", cand.coverage);
@@ -1280,7 +1246,7 @@ fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String], fo
             .iter()
             .filter(|c| c.kind.contains("crack"))
             .count()
-            >= 6
+            >= input.tuning.planner.max_crack_chunks
         {
             // Useful slate, not exhaustive (BRIEF §10). Expiring
             // matches join tier 1 but share the same cap.
@@ -1295,9 +1261,9 @@ fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String], fo
         .iter()
         .filter(|g| g.action.kind == ActionKind::Farm)
         .collect();
-    if t2_count < 3 && !farm_goals.is_empty() {
+    if t2_count < input.tuning.planner.thin_tier2_below && !farm_goals.is_empty() {
         farms = score_farms(input, cards);
-        for f in farms.iter().take(3) {
+        for f in farms.iter().take(input.tuning.planner.farm_chunks) {
             chunks.push(Chunk {
                 id: format!("t3-farm-{}", sanitize_id(&f.node)),
                 tier: 3,
@@ -1333,7 +1299,7 @@ fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String], fo
             chunks.push(Chunk {
                 id: "t4-sortie".to_owned(),
                 tier: 4,
-                title: "Sortie: daily three-mission chain.".to_owned(),
+                title: format!("{}: daily three-mission chain.", input.tuning.planner.sortie.name),
                 minutes_label: "~20–30m".to_owned(),
                 why: format!("Legs: {}.", legs.join(" → ")),
                 kind: "sortie (daily)".to_owned(),
@@ -1352,7 +1318,8 @@ fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String], fo
             ),
             minutes_label: format!(
                 "~{}m",
-                mission_base_minutes(&fill.mission_type) as u32 + 2
+                input.tuning.missions.base_minutes(&fill.mission_type) as u32
+                    + input.tuning.missions.overhead as u32
             ),
             why: "Filler — slate ran thin; ducat/plat density ranking lands with market data later."
                 .to_owned(),
@@ -1403,7 +1370,7 @@ fn score_farms(input: &PlanInput<'_>, cards: &[GoalCard]) -> Vec<FarmHint> {
                     None => continue,
                 };
                 for node in nodes {
-                    let rate = rotations_per_hour(&node.mode_name);
+                    let rate = input.tuning.missions.rotations_per_hour(&node.mode_name);
                     let contrib = best_rot / 100.0 * rate;
                     let key = format!("{}|{}", node.planet, node.name);
                     let entry = agg.entry(key).or_insert_with(|| {
@@ -1443,20 +1410,6 @@ fn score_farms(input: &PlanInput<'_>, cards: &[GoalCard]) -> Vec<FarmHint> {
     out
 }
 
-fn rotations_per_hour(mode_name: &str) -> f64 {
-    match mode_name.to_lowercase().as_str() {
-        "survival" => 12.0,
-        "defense" => 12.0,
-        "interception" => 10.0,
-        "disruption" => 15.0,
-        "spy" => 6.0,
-        "capture" => 8.0,
-        "exterminate" => 6.0,
-        "excavation" => 10.0,
-        _ => 5.0,
-    }
-}
-
 /// Best remaining live fissure for the filler chunk: most co-wanted
 /// coverage, earliest expiry first.
 fn filler_fissure(input: &PlanInput<'_>) -> Option<crate::model::Fissure> {
@@ -1484,7 +1437,7 @@ fn sanitize_id(s: &str) -> String {
 pub fn plan(input: &PlanInput<'_>) -> Plan {
     let (active, pruned) = prune_wants(input.owned, input.wants, input.roster);
     let cards = goal_cards_for(input, &active);
-    let focus = pick_focus(&cards, input.relics);
+    let focus = pick_focus(&cards, input.relics, input.tuning);
     let (chunks, farms, notes) = build_chunks(input, &cards, &pruned, &focus);
     Plan {
         goals: cards,
@@ -1504,6 +1457,10 @@ fn goal_cards_for(input: &PlanInput<'_>, active: &[String]) -> Vec<GoalCard> {
 mod tests {
     use super::*;
     use crate::model::{Fissure, RelicTables, Roster, WorldState};
+
+    fn tuning() -> Tuning {
+        Tuning::for_tests()
+    }
 
     fn syn_fissure(node: &str, mtype: &str, tier: &str, expiry: &str) -> Fissure {
         Fissure {
@@ -1552,34 +1509,36 @@ mod tests {
 
     #[test]
     fn commons_run_intact_even_with_deep_stock() {
+        let t = tuning();
         let stock = RelicStock::Known([("X".to_owned(), 99)].into_iter().collect());
-        assert_eq!(choose_refinement(25.33, stock.count("X")), Refinement::Intact);
-        assert_eq!(choose_refinement(25.33, None), Refinement::Intact);
+        assert_eq!(choose_refinement(&t, 25.33, stock.count("X")), Refinement::Intact);
+        assert_eq!(choose_refinement(&t, 25.33, None), Refinement::Intact);
     }
 
     #[test]
     fn scarce_stock_refines_hard_plentiful_biases_down() {
+        let t = tuning();
         // Rare, 2% Intact: Radiant expects ~10 cracks.
         assert_eq!(
-            choose_refinement(2.0, Some(1)),
+            choose_refinement(&t, 2.0, Some(1)),
             Refinement::Radiant,
             "scarce stock maximizes per-copy odds"
         );
         assert_eq!(
-            choose_refinement(2.0, None),
+            choose_refinement(&t, 2.0, None),
             Refinement::Radiant,
             "unknown stock treated as scarce"
         );
         // 25 copies cover Exceptional (~25) but the cheapest fitting
         // tier above Intact wins over Radiant.
         assert_eq!(
-            choose_refinement(2.0, Some(25)),
+            choose_refinement(&t, 2.0, Some(25)),
             Refinement::Exceptional,
             "volume substitutes for per-crack odds"
         );
         // Uncommon 11%: Intact expects ~9.1; 10 copies fit Flawless (~5.9)? cheapest fitting above Intact: Exceptional (~7.7).
         assert_eq!(
-            choose_refinement(11.0, Some(10)),
+            choose_refinement(&t, 11.0, Some(10)),
             Refinement::Exceptional
         );
     }
@@ -1596,6 +1555,7 @@ mod tests {
 
     #[test]
     fn expiry_cascade_prefers_15min_runnable() {
+        let t = tuning();
         let now: DateTime<Utc> = "2026-10-15T21:00:00Z".parse().unwrap();
         let mut storm = syn_fissure("C", "Capture", "Neo", "2026-10-15T21:05:00Z");
         storm.is_storm = true;
@@ -1604,7 +1564,7 @@ mod tests {
             syn_fissure("B", "Exterminate", "Neo", "2026-10-15T21:10:00Z"),
             storm,
         ];
-        let picks = rank_fissures(&fiss, &["Neo"], 2, now, true);
+        let picks = rank_fissures(&fiss, &["Neo"], 2, now, true, &t);
         assert_eq!(picks.len(), 3);
         assert_eq!(picks[0].fissure.node, "B", "urgent runnable jumps first");
         assert!(picks[2].fissure.is_storm, "storms last");
@@ -1612,28 +1572,30 @@ mod tests {
 
     #[test]
     fn endless_wins_big_batches_sprint_wins_small() {
+        let t = tuning();
         let now: DateTime<Utc> = "2026-10-15T21:00:00Z".parse().unwrap();
         let fiss = vec![
             syn_fissure("A", "Exterminate", "Neo", "2026-10-15T23:00:00Z"),
             syn_fissure("B", "Survival", "Neo", "2026-10-15T23:00:00Z"),
         ];
-        let small = rank_fissures(&fiss, &["Neo"], 1, now, true);
+        let small = rank_fissures(&fiss, &["Neo"], 1, now, true, &t);
         assert_eq!(small[0].fissure.node, "A", "sprint wins batch of 1");
-        let big = rank_fissures(&fiss, &["Neo"], 4, now, true);
+        let big = rank_fissures(&fiss, &["Neo"], 4, now, true, &t);
         assert_eq!(big[0].fissure.node, "B", "endless wins batch of 4");
     }
 
     #[test]
     fn radshare_gated_on_recent_releases() {
+        let t = tuning();
         assert_eq!(
-            radshare_verdict(10.0, Rarity::Rare, 5.0, true, false),
+            radshare_verdict(&t.planner, 10.0, Rarity::Rare, 5.0, true, false),
             None,
             "old gear stays solo no matter the math"
         );
-        let yes = radshare_verdict(10.0, Rarity::Rare, 5.0, true, true);
+        let yes = radshare_verdict(&t.planner, 10.0, Rarity::Rare, 5.0, true, true);
         assert!(yes.is_some(), "rare + scarce + recent shares");
         assert_eq!(
-            radshare_verdict(25.33, Rarity::Common, 5.0, false, true),
+            radshare_verdict(&t.planner, 25.33, Rarity::Common, 5.0, false, true),
             None,
             "cheap volume runs never share"
         );
@@ -1706,6 +1668,7 @@ mod tests {
             pins: &[],
             recent_gear: &recent,
             steel_path_tiebreak: true,
+            tuning: &tuning(),
         });
         assert_eq!(p.focus.len(), 3, "at most 3 parts");
         let eras: HashSet<&str> = p.focus.iter().map(|f| f.era.as_str()).collect();
@@ -1735,18 +1698,18 @@ mod tests {
         );
         let fiss = vec![persto.clone(), omnia.clone()];
         // Axi batch: the Meso-locked Persto is not a candidate.
-        let axi = rank_fissures(&fiss, &["Axi"], 4, now, true);
+        let axi = rank_fissures(&fiss, &["Axi"], 4, now, true, &tuning());
         assert!(
             !axi.is_empty() && axi.iter().all(|p| p.fissure.tier == "Omnia"),
             "Axi batch sees only Omnia: {:?}",
             axi.iter().map(|p| &p.fissure.node).collect::<Vec<_>>(),
         );
         // Mixed Axi+Meso batch: Omnia only.
-        let mixed = rank_fissures(&fiss, &["Axi", "Meso"], 4, now, true);
+        let mixed = rank_fissures(&fiss, &["Axi", "Meso"], 4, now, true, &tuning());
         assert_eq!(mixed.len(), 1);
         assert_eq!(mixed[0].fissure.node, "Circulus (Lua)");
         // Compatible Meso batch still reaches the locked fissure.
-        let meso = rank_fissures(&fiss, &["Meso"], 4, now, true);
+        let meso = rank_fissures(&fiss, &["Meso"], 4, now, true, &tuning());
         assert!(meso.iter().any(|p| p.fissure.node == "Persto (Deimos)"));
     }
 
@@ -1798,6 +1761,7 @@ mod tests {
             pins: &[],
             recent_gear: &recent,
             steel_path_tiebreak: true,
+            tuning: &tuning(),
         });
         let order: Vec<&str> = p.goals.iter().map(|g| g.gear.as_str()).collect();
         assert_eq!(
@@ -1839,6 +1803,7 @@ mod tests {
             pins: &[],
             recent_gear: &recent,
             steel_path_tiebreak: true,
+            tuning: &tuning(),
         });
         assert_eq!(unpinned.goals[0].gear, "Khora Prime");
         let pins = vec!["Zakti Prime Blueprint".to_owned()];
@@ -1853,6 +1818,7 @@ mod tests {
             pins: &pins,
             recent_gear: &recent,
             steel_path_tiebreak: true,
+            tuning: &tuning(),
         });
         assert_eq!(p.goals[0].gear, "Zakti Prime");
     }
@@ -1878,6 +1844,7 @@ mod tests {
             &fiss,
             now,
             true,
+            &tuning(),
         )
         .unwrap();
         assert_eq!(cand.relic, "Neo C5");
@@ -1915,6 +1882,7 @@ mod tests {
                 pins: &pins,
                 recent_gear: &recent,
                 steel_path_tiebreak: true,
+                tuning: &tuning(),
             })
         };
         let a = mk();

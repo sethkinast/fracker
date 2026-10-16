@@ -45,15 +45,9 @@ impl Refinement {
         ]
     }
 
-    pub fn trace_cost_per_relic(self) -> u32 {
-        match self {
-            Refinement::Intact => 0,
-            Refinement::Exceptional => 25,
-            Refinement::Flawless => 50,
-            Refinement::Radiant => 100,
-        }
-    }
-
+    /// Trace costs live in `data/tuning/refinement.toml`
+    /// (`RefinementTuning::trace_cost`); this name table is protocol,
+    /// not content.
     pub fn name(self) -> &'static str {
         match self {
             Refinement::Intact => "Intact",
@@ -255,6 +249,14 @@ impl RosterItem {
     pub fn is_warframe(&self) -> bool {
         self.kind.eq_ignore_ascii_case("warframe")
     }
+
+    /// Companion gear (prime Sentinels from the universe feed).
+    pub fn is_companion(&self) -> bool {
+        matches!(
+            self.kind.to_lowercase().as_str(),
+            "sentinel" | "sentinels" | "pet" | "pets" | "companion" | "companions"
+        )
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -302,6 +304,68 @@ impl Roster {
             }
         }
         out
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Companion universe manifest (data/companions.toml)
+// ---------------------------------------------------------------------------
+
+/// Companion sources + exclusions (addendum #22): the WFCD category
+/// files behind the universe, and the names that must never become
+/// backlog items no matter what a feed carries.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CompanionsManifest {
+    #[serde(default)]
+    pub excluded: Vec<String>,
+    #[serde(default)]
+    pub unmasterable: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct CompanionsFile {
+    #[serde(default)]
+    pub exclusions: CompanionsNames,
+    #[serde(default)]
+    pub unmasterable: CompanionsNames,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct CompanionsNames {
+    #[serde(default)]
+    pub names: Vec<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub reason: String,
+}
+
+impl CompanionsManifest {
+    pub fn from_toml(text: &str) -> Result<Self, String> {
+        let file: CompanionsFile =
+            toml::from_str(text).map_err(|e| format!("companions: {e}"))?;
+        Ok(Self {
+            excluded: file.exclusions.names,
+            unmasterable: file.unmasterable.names,
+        })
+    }
+
+    pub fn is_excluded(&self, name: &str) -> bool {
+        self.excluded.iter().any(|x| x == name)
+    }
+
+    /// Drop wants belonging to excluded gear: the gear name itself or
+    /// any of its parts (`"<gear> …"`). The collar stays out of every
+    /// regeneration regardless of what the feeds carry.
+    pub fn filter_wants(&self, wants: &[String]) -> Vec<String> {
+        wants
+            .iter()
+            .filter(|w| {
+                !self.excluded.iter().any(|x| {
+                    *w == x || w.starts_with(&format!("{x} "))
+                })
+            })
+            .cloned()
+            .collect()
     }
 }
 
@@ -501,9 +565,9 @@ pub fn normalize_gear_token(unique_name: &str) -> String {
     .join(" ")
 }
 
-/// Community/event entry from world state `/pc/events` (Taubound pack:
-/// the Contegorus set is gated on the community-goal `health` progress
-/// of the "Road To Tau" entry).
+/// Community/event entry from world state `/pc/events` (event packs:
+/// a community-gated set rides on the community-goal `health` progress
+/// of the pack's event entry).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorldEvent {
@@ -520,15 +584,17 @@ pub struct WorldEvent {
 }
 
 impl WorldEvent {
-    pub fn is_road_to_tau(&self) -> bool {
+    /// Pack-defined event match (the match text lives in the pack TOML,
+    /// never in Rust): case-insensitive substring on the description.
+    pub fn matches_pack_event(&self, needle: &str) -> bool {
         let d = self.description.to_lowercase();
-        d.contains("road to tau") || d.contains("roadtotau")
+        !needle.is_empty() && d.contains(&needle.to_lowercase())
     }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct NightwaveChallenge {
+pub struct NightWaveChallenge {
     #[serde(default)]
     pub id: String,
     #[serde(default)]
@@ -543,11 +609,11 @@ pub struct NightwaveChallenge {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Nightwave {
+pub struct NightWave {
     #[serde(default)]
     pub season: u32,
     #[serde(default)]
-    pub active_challenges: Vec<NightwaveChallenge>,
+    pub active_challenges: Vec<NightWaveChallenge>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -595,7 +661,7 @@ pub struct WorldState {
     #[serde(default)]
     pub vault_trader: Option<VaultTrader>,
     #[serde(default)]
-    pub nightwave: Option<Nightwave>,
+    pub nightwave: Option<NightWave>,
     #[serde(default)]
     pub sortie: Option<Sortie>,
     #[serde(default, rename = "voidTrader")]
@@ -742,11 +808,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn refinement_trace_costs() {
-        assert_eq!(Refinement::Intact.trace_cost_per_relic(), 0);
-        assert_eq!(Refinement::Exceptional.trace_cost_per_relic(), 25);
-        assert_eq!(Refinement::Flawless.trace_cost_per_relic(), 50);
-        assert_eq!(Refinement::Radiant.trace_cost_per_relic(), 100);
+    fn companions_manifest_excludes_collar_always() {
+        let text = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data/companions.toml"),
+        )
+        .unwrap();
+        let m = CompanionsManifest::from_toml(&text).unwrap();
+        assert!(m.is_excluded("Kavasa Prime"));
+        assert!(!m.is_excluded("Nautilus Prime"));
+        // Even an injected collar want (or its parts) filters out.
+        let wants = vec![
+            "Kavasa Prime".to_owned(),
+            "Kavasa Prime Band".to_owned(),
+            "Nautilus Prime Blueprint".to_owned(),
+        ];
+        let kept = m.filter_wants(&wants);
+        assert_eq!(kept, vec!["Nautilus Prime Blueprint".to_owned()]);
+    }
+
+    #[test]
+    fn sentinel_kinds_count_as_companions() {
+        let item = RosterItem {
+            name: "Nautilus Prime".into(),
+            vaulted: true,
+            parts: vec![],
+            kind: "sentinel".into(),
+        };
+        assert!(item.is_companion());
+        assert!(!item.is_warframe());
+    }
+
+    #[test]
+    fn refinement_trace_costs_from_data() {
+        let t = crate::tuning::Tuning::for_tests();
+        assert_eq!(t.refinement.trace_cost(Refinement::Intact), 0);
+        assert_eq!(t.refinement.trace_cost(Refinement::Exceptional), 25);
+        assert_eq!(t.refinement.trace_cost(Refinement::Flawless), 50);
+        assert_eq!(t.refinement.trace_cost(Refinement::Radiant), 100);
     }
 
     #[test]

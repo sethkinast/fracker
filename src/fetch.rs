@@ -165,13 +165,13 @@ pub struct Affiliation {
 #[derive(Debug, Clone, Default)]
 pub struct DailyCaps {
     /// `DailyAffiliation`: faction-pool standing REMAINING of the
-    /// 16,000 + 500 × MR cap.
+    /// MR-scaled cap (see the tuning tables).
     pub affiliation_remaining: u32,
-    /// `DailyFocus`: focus REMAINING of the 250,000 + 5,000 × MR cap.
+    /// `DailyFocus`: focus REMAINING of the MR-scaled cap (see the
+    /// tuning tables).
     pub focus_remaining: u32,
-    /// Per-family `DailyAffiliation*` remaining values (Cavia, Cetus,
-    /// Quills, Solaris, Ventkids, Vox, Entrati, Necraloid, Zariman,
-    /// Kahl, Hex, Library, Pvp).
+    /// Per-family `DailyAffiliation*` remaining values (one per
+    /// syndicate family; the family list lives in the tuning tables).
     pub per_family: std::collections::HashMap<String, u32>,
 }
 

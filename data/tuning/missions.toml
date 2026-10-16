@@ -1,0 +1,44 @@
+# Mission heuristics (BRIEF §10 duration model, §17 selection + farm scoring).
+#
+# DATA-PACK PRINCIPLE (addendum #20): estimates live here, not in Rust.
+# `minutes` = base minutes per mission by type; every mission adds
+# `overhead` (loading/orbiter). Endless types crack once per rotation
+# unit (~`endless_unit_minutes` each) with a single overhead per run;
+# sprint types crack once per mission. `rotations_per_hour` drives the
+# co-yield farm scoring. Unknown types fall back to `default_minutes`
+# / `default_rotations_per_hour`.
+
+overhead = 2.0
+endless_unit_minutes = 5.0
+default_minutes = 6.0
+default_rotations_per_hour = 5.0
+
+# Mission types with no orbiter/load overhead between cracks.
+endless = ["survival", "defense", "interception", "disruption", "excavation", "void cascade"]
+
+[minutes]
+capture = 3.0
+exterminate = 5.0
+sabotage = 5.0
+rescue = 4.0
+spy = 6.0
+hive = 10.0
+"mobile defense" = 7.0
+defense = 7.0
+survival = 5.0
+interception = 7.0
+disruption = 4.0
+excavation = 6.0
+defection = 8.0
+"infested salvage" = 6.0
+"void cascade" = 6.0
+
+[rotations_per_hour]
+survival = 12.0
+defense = 12.0
+interception = 10.0
+disruption = 15.0
+spy = 6.0
+capture = 8.0
+exterminate = 6.0
+excavation = 10.0

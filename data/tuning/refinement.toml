@@ -1,0 +1,35 @@
+# Refinement + rarity tuning (BRIEF §17 North Star).
+#
+# DATA-PACK PRINCIPLE (addendum #20): the refinement ladder, trace
+# costs, and rarity bands live here. Real drop tables carry all four
+# tiers; `ladder` is the fallback when a row only lists Intact
+# (Intact is always passthrough of the table value). Rarity is a
+# property of the (part, relic) pair, banded off the Intact chance:
+# common at/above `common_min`, uncommon at/above `uncommon_min`,
+# else rare.
+
+common_min = 25.0
+uncommon_min = 11.0
+
+[trace_cost_per_relic]
+Intact = 0
+Exceptional = 25
+Flawless = 50
+Radiant = 100
+
+# Fallback chance (%) per (band, tier). Intact entries are informational
+# (passthrough); the engine uses the table's own Intact value.
+[ladder.rare]
+Exceptional = 4.0
+Flawless = 6.0
+Radiant = 10.0
+
+[ladder.uncommon]
+Exceptional = 13.0
+Flawless = 17.0
+Radiant = 20.0
+
+[ladder.common]
+Exceptional = 23.33
+Flawless = 20.0
+Radiant = 16.67

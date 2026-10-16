@@ -13,6 +13,10 @@ expires = "2026-11-17T16:00:00Z"
 
 [event]
 name = "Road To Tau"
+# Substring matched (case-insensitive) against world-state event
+# descriptions to find this pack's community-goal progress entry.
+# The match text lives HERE, not in Rust (addendum #20).
+match = "Road To Tau"
 resource = "Road To Tau Event Resource"
 resource_type = "Road To Tau Event Resource"
 alert_payout = 50

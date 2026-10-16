@@ -1,0 +1,75 @@
+# Planner constants (BRIEF §10 tiers, §17 cascade + share math, §8 ledgers).
+#
+# DATA-PACK PRINCIPLE (addendum #20): every threshold, window, batch
+# bound, and score weight lives here. Rust only interprets.
+
+# Do-Now focus: at most this many parts; era-spread preferred.
+focus_max_parts = 3
+
+# Crack batches: unknown stock plans this many; known stock clamps to this.
+unknown_default_batch = 4
+max_batch = 6
+
+# Fissure cascade: a matching fissure expiring within this window jumps
+# first (if comfortably runnable); crack matches under `tier1_crack_mins`
+# join tier 1, the rest tier 2. Useful slate, not exhaustive: at most
+# `max_crack_chunks` crack chunks; relic acquisition appears only when
+# tier 2 holds fewer than `thin_tier2_below` chunks (top `farm_chunks`).
+expiry_jump_mins = 15.0
+tier1_crack_mins = 60.0
+max_crack_chunks = 6
+thin_tier2_below = 3
+farm_chunks = 3
+
+# Card action scores (ordering weights, not promises).
+score_resurgence = 40.0
+score_farm = 10.0
+score_wait_fissure = 5.0
+score_parked = 0.0
+
+# Coverage scoring: cracking beats farming — known-stock relics score
+# this multiplier over unknown-stock ones.
+known_stock_factor = 1.5
+unknown_stock_factor = 1.0
+
+# A same-relic share turns per-crack chance p into 1-(1-p)^4.
+# Recommended when the share wins after `lfg_minutes` formation time,
+# for bottleneck bands with a long enough solo run. Commons at volume
+# never share (coordination repays nothing).
+lfg_minutes = 7.5
+radshare_min_solo_cracks = 5.0
+# Holdings at/below this count are "scarce" (stretch with a share).
+scarce_max_held = 2
+
+# Vendor window: the trader chunk appears while the vendor leaves within
+# this many hours.
+vendor_window_hours = 24
+
+# Display names that are game content, not product copy: the biweekly
+# trader, the resurgence contact + currency, the Steel Path modifier.
+steel_path_label = " Steel Path"
+
+[vendor]
+name = "Baro"
+
+[resurgence]
+contact = "Varzia"
+currency = "Aya"
+
+# Relative-day rendering for rotation ends.
+days_until_hour_boundary = 48
+
+[daily_caps]
+# Daily bars (profile REMAINING values; caps scale with mastery rank).
+standing_base = 16000
+standing_per_mr = 500
+focus_base = 250000
+focus_per_mr = 5000
+fallback_standing_label = "16k + 500 × MR"
+fallback_focus_label = "250k + 5k × MR"
+families = ["Cavia", "Cetus", "Quills", "Solaris", "Ventkids", "Vox", "Entrati", "Necraloid", "Zariman", "Kahl", "Hex", "Library", "Pvp"]
+
+[sortie]
+name = "Sortie"
+reset_label = "daily 17:00 UTC"
+ledger_id = "sortie-daily"

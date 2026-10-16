@@ -1,0 +1,40 @@
+# Companion universe manifest (third pass: backlog gap, addendum #12/#22).
+#
+# The earlier `pets.json` fetch 404'd because it guessed a root-level
+# path. The WFCD `warframe-items` dataset splits companions across two
+# REAL category files:
+#   data/json/Pets.json      — Kubrows, Kavats, Hounds, MOAs, Vulpaphylas, …
+#   data/json/Sentinels.json — Carrier, Dethcube, Helios, Nautilus, Shade, Wyrm …
+# cached locally as `data/cache/pets.json` + `data/cache/sentinels.json`
+# (7-day static TTL per BRIEF §6, same as the other datasets).
+#
+# Prime companions are the 6 prime Sentinels (all in the prime roster
+# with 4 parts each). Pets.json carries exactly one Prime-named entry,
+# Venari Prime (Khora's companion, masterable=false — not a backlog
+# item). Kavasa Prime is a companion COLLAR, not a weapon: no mastery,
+# owned already — EXCLUDED from every regeneration (addendum #22).
+
+[pet_sources]
+pets = "https://raw.githubusercontent.com/WFCD/warframe-items/master/data/json/Pets.json"
+sentinels = "https://raw.githubusercontent.com/WFCD/warframe-items/master/data/json/Sentinels.json"
+local_pets = "data/cache/pets.json"
+local_sentinels = "data/cache/sentinels.json"
+
+[exclusions]
+# Never backlog items, even if present in a roster feed.
+names = ["Kavasa Prime"]
+reason = "owned collar, not a weapon — no mastery (addendum #22)"
+
+# Non-masterable Prime-named companion parts (universe members, never wants).
+[unmasterable]
+names = ["Venari Prime"]
+reason = "Khora's companion; masterable=false in the dataset"
+
+[regen]
+# Last verification against the live profile (fixture) + datasets.
+date = "2026-10-16"
+prime_sentinels_in_roster = 6
+profile_prime_sentinels_mastered = 5
+profile_prime_sentinels_unmastered = ["Nautilus Prime"]
+backlog_primes_unmastered = 63
+kavasa_in_backlog = false
