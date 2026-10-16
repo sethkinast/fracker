@@ -1,0 +1,64 @@
+# OCR capture layouts (worker pass 5).
+#
+# UI geometry is content, not code (addendum #20): the pixel grid and the
+# per-cell text regions live here and are loaded at runtime; Rust only
+# interprets. `--ocr-layout <key>` picks the table for a screenshot class.
+#
+# Pixel geometry below was measured on the reference capture resolution and
+# is SCALED to whatever resolution the actual screenshot has, so a re-shot
+# at a different window size still aligns.
+#
+#   x0/y0/cell_w/cell_h : top-left of cell (0,0) and cell pitch, in pixels
+#                         at ref_width x ref_height
+#   name  : name-text region as [x0,y0,x1,y1] fractions of one cell
+#   count : stack-count region as [x0,y0,x1,y1] fractions of one cell
+#   count_style : "x"     -> literal "xN" text label (relic screen)
+#                 "badge" -> circled digit badge, absent when count == 1
+#   name_psm / count_psm : tesseract page-segmentation modes for that region
+#   upscale : integer nearest/bilinear upscale before handing to tesseract
+
+[relic]
+cols = 11
+rows = 7
+ref_width = 1941
+ref_height = 1091
+x0 = 48.0
+cell_w = 127.0
+y0 = 116.0
+cell_h = 132.0
+name = [0.063, 0.742, 0.937, 0.894]
+count = [0.10, 0.06, 0.44, 0.26]
+count_style = "x"
+name_psm = 7
+count_psm = 7
+name_upscale = 6
+count_upscale = 8
+min_score = 0.8
+
+[parts]
+cols = 11
+# Only the three full rows: the 4th row in the reference capture is clipped
+# by the inventory list viewport (icons present, name text gone), so it is
+# not part of the grid. `Layout::split` additionally rejects any cell that
+# would extend past the page, so a half-visible cell is never read.
+rows = 3
+ref_width = 1985
+ref_height = 1116
+x0 = 42.0
+cell_w = 141.0
+y0 = 340.0
+cell_h = 140.0
+# Whole cell: the one/two-line name sits directly under the item icon, and
+# tesseract's block pass (psm 6) reads the name while treating the icon as
+# noise. A fixed name band clipped tall weapon icons in testing.
+name = [0.0, 0.0, 1.0, 1.0]
+count = [0.06, 0.0, 0.32, 0.16]
+count_style = "badge"
+name_psm = 6
+count_psm = 7
+name_upscale = 3
+count_upscale = 8
+# The part crop includes the item icon, so raw reads are noisier than the
+# relic screen; the ambiguity margin guard (not the absolute floor) is what
+# keeps the never-guess rule. See docs/fifth-pass.md.
+min_score = 0.5

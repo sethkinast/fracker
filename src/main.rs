@@ -41,9 +41,12 @@ struct Args {
     /// Where to write the OCR stock state file (JSON).
     #[arg(long, default_value = "data/stock.json")]
     stock_out: PathBuf,
-    /// Grid shape for OCR segmentation, COLSxROWS.
-    #[arg(long, default_value = "5x4")]
-    ocr_grid: String,
+    /// Capture layout table for OCR (`[table]` key in --ocr-layouts).
+    #[arg(long, default_value = "relic")]
+    ocr_layout: String,
+    /// Capture layout file defining per-screen OCR geometry.
+    #[arg(long, default_value = "data/capture/layouts.toml")]
+    ocr_layouts: PathBuf,
 }
 
 #[tokio::main]
@@ -404,7 +407,20 @@ fn profile_context(
 fn run_ocr_ingest(args: &Args, dir: &std::path::Path) -> Result<(), String> {
     let tuning = Tuning::load_defaults()?;
     let _ = &tuning;
-    let grid = ocr::GridSpec::parse(&args.ocr_grid)?;
+
+    // Capture geometry is content (addendum #20): load the layout table
+    // and pick the screen class named by --ocr-layout.
+    let layouts = ocr::Layout::load_file(&args.ocr_layouts)?;
+    let layout = layouts
+        .get(&args.ocr_layout)
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "ocr layout {:?} not in {}",
+                args.ocr_layout,
+                args.ocr_layouts.display()
+            )
+        })?;
 
     // Item universe: roster parts + gear + relic names from the seed
     // datasets (the same names the planner reasons about).
@@ -431,7 +447,7 @@ fn run_ocr_ingest(args: &Args, dir: &std::path::Path) -> Result<(), String> {
 
     // Engine: tesseract when the binary exists, else the stub (empty
     // stock, never guesses) — status printed honestly either way.
-    let tesseract = ocr::TesseractCliEngine::probe();
+    let tesseract = ocr::TesseractCliEngine::probe(layout.clone());
     let stub;
     let engine: &dyn ocr::OcrEngine = match &tesseract {
         Some(e) => e,
@@ -445,11 +461,10 @@ fn run_ocr_ingest(args: &Args, dir: &std::path::Path) -> Result<(), String> {
     let (stock, results) = ocr::ingest_folder(
         dir,
         engine,
-        grid,
+        &layout,
         &universe,
         &relic_names,
         0.5,
-        0.8,
     )?;
     stock.write_to(&args.stock_out)?;
     let held = results.iter().filter(|r| r.held).count();
