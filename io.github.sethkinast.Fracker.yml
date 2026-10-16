@@ -14,7 +14,7 @@ runtime: org.freedesktop.Platform
 runtime-version: '24.08'
 sdk: org.freedesktop.Sdk
 sdk-extensions:
-  - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.ruststable
 command: fracker
 
 finish-args:
@@ -33,27 +33,30 @@ finish-args:
 
 modules:
   # leptonica: tesseract's image library (bundled, not assumed).
+  # Simple buildsystem + explicit out-of-tree cmake: leptonica 1.85's
+  # CMakeLists hard-refuses in-source generation, and the builder's
+  # cmake-ninja configuration landed in-source (CI "Build bundle").
+  # `-S . -B _build` keeps generation out-of-tree. The
+  # CMAKE_INSTALL_PREFIX/LIBDIR flags replicate what cmake-ninja passed.
   - name: leptonica
-    buildsystem: cmake-ninja
-    config-opts:
-      - -DCMAKE_BUILD_TYPE=Release
-      - -DBUILD_SHARED_LIBS=ON
-      - -DBUILD_PROG=OFF
-      - -DSW_BUILD=OFF
+    buildsystem: simple
+    build-commands:
+      - cmake -S . -B _build -DCMAKE_INSTALL_PREFIX=/app -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DBUILD_PROG=OFF -DSW_BUILD=OFF
+      - cmake --build _build
+      - cmake --install _build
     sources:
       - type: archive
         url: https://github.com/DanBloomberg/leptonica/releases/download/1.85.0/leptonica-1.85.0.tar.gz
         sha256: 3745ae3bf271a6801a2292eead83ac926e3a9bc1bf622e9cd4dd0f3786e17205
 
   # tesseract: the OCR engine, installed to /app/bin/tesseract.
+  # Same guard family as leptonica; same out-of-tree fix.
   - name: tesseract
-    buildsystem: cmake-ninja
-    config-opts:
-      - -DCMAKE_BUILD_TYPE=Release
-      - -DBUILD_SHARED_LIBS=ON
-      - -DBUILD_TRAINING_TOOLS=OFF
-      - -DGRAPHICS_DISABLED=ON
-      - -DINSTALL_CONFIGS=ON
+    buildsystem: simple
+    build-commands:
+      - cmake -S . -B _build -DCMAKE_INSTALL_PREFIX=/app -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DBUILD_TRAINING_TOOLS=OFF -DGRAPHICS_DISABLED=ON -DINSTALL_CONFIGS=ON
+      - cmake --build _build
+      - cmake --install _build
     sources:
       - type: archive
         url: https://github.com/tesseract-ocr/tesseract/archive/refs/tags/5.4.1.tar.gz
@@ -70,14 +73,25 @@ modules:
         sha256: 7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2
 
   # Fracker itself: Rust binary + data + launcher/desktop/metainfo/icon.
+  #
+  # Cargo vendoring (offline build): `cargo-sources.json` is generated
+  # from Cargo.lock by flatpak-cargo-generator.py and committed at the
+  # repo root. flatpak-builder pulls each crate archive into
+  # `cargo/vendor/` and writes `cargo/config` (the `vendored-sources`
+  # replacement); CARGO_HOME points cargo at it, so the build never
+  # touches the network. Regenerate after a dependency bump with:
+  #   flatpak-cargo-generator.py Cargo.lock -o cargo-sources.json
+  # The repo's own `.cargo/` is untouched, so local `cargo build`/`test`
+  # keep using the normal registry.
   - name: fracker
     buildsystem: simple
     build-options:
-      append-path: /usr/lib/sdk/rust-stable/bin
+      append-path: /usr/lib/sdk/ruststable/bin
       env:
         CARGO_HOME: /run/build/fracker/cargo
+        CARGO_NET_OFFLINE: 'true'
     build-commands:
-      - cargo build --release --locked
+      - cargo build --release --locked --offline
       - install -Dm755 target/release/fracker /app/bin/fracker.bin
       - install -Dm755 flatpak/fracker.sh /app/bin/fracker
       - install -Dm644 flatpak/io.github.sethkinast.Fracker.desktop /app/share/applications/io.github.sethkinast.Fracker.desktop
@@ -92,3 +106,5 @@ modules:
           - .git
           - target
           - .flatpak-builder
+      # Vendored crate archives + generated cargo config (see above).
+      - cargo-sources.json
