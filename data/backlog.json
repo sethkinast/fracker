@@ -1169,7 +1169,6 @@
   "Warframes": [
    "Baruuk",
    "Bonewidow",
-   "Excalibur Prime",
    "Follie",
    "Helminth",
    "Narin",
@@ -1216,6 +1215,10 @@
   {
    "name": "Kavasa Prime",
    "reason": "Seth owns the collar already (2026-10-15); companion collar, not a weapon \u2014 no mastery, special case excluded from the backlog."
+  },
+  {
+   "name": "Excalibur Prime",
+   "reason": "Founder-exclusive, permanently unobtainable (Seth, 2026-10-15). Never a target; filter from the universe on regeneration."
   }
  ]
 }

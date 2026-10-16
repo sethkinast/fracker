@@ -120,3 +120,9 @@ it refines the brief where they disagree. For the next worker pass.
     next pass — never retrofit them into the running pass, never
     cram scope to "fit more in." Small, steerable passes are the
     point.
+25. **Excalibur Prime excluded permanently (Seth, 2026-10-15):**
+    Founder-exclusive and unobtainable — "he's gone forever."
+    General rule for universe diffs: items with NO acquisition
+    path are excluded, never listed as backlog. (Same scrub should
+    catch non-frame entries squatting in the Warframes category —
+    e.g. Helminth — queued for pass 4.)
