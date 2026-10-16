@@ -181,3 +181,10 @@ it refines the brief where they disagree. For the next worker pass.
     Oracle box idles through a run (load avg 0.22) — the wall
     clock is remote inference + serial tool round-trips, with
     local CPU only in compile bursts.
+33. **Sequencing: runnable-here + inventory scrape BEFORE the IA
+    pass (Seth, 2026-10-16).** The next major phase after the
+    current queue is making Fracker run on Seth's machine (tray
+    + live regen + the OCR bootstrap run against his real
+    inventory, incl. the live capture session). The IA /
+    scannability pass is explicitly deferred until that exists —
+    using the tool with real stock data is what informs the IA.
