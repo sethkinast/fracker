@@ -115,3 +115,8 @@ it refines the brief where they disagree. For the next worker pass.
     hotlink icons don't render in Seth's review surface. The demo
     export embeds icons as ≤128px data-URI thumbnails; the product
     page itself keeps CDN hotlinks per BRIEF §4.2.
+24. **Iteration discipline (Seth, 2026-10-15):** a pass is frozen
+    at dispatch. New steering, fixtures, and ideas ENQUEUE for the
+    next pass — never retrofit them into the running pass, never
+    cram scope to "fit more in." Small, steerable passes are the
+    point.
