@@ -1,0 +1,28 @@
+# Universe scrub (sixth pass §1): data-owned corrections to the item
+# universe. APPLIED EVERYWHERE the universe is consumed (backlog wants,
+# the unmastered-by-category lists, and the OCR bootstrap universe) so a
+# universe rebuild keeps them fixed. No game content in Rust
+# (addendum #20: Rust only interprets).
+#
+# This file supersedes the hand-applied exclusions: the `excluded` array
+# that used to live in data/backlog.json and the `[exclusions]` table in
+# data/companions.toml. One list, one reason per entry.
+
+# Entries that must never appear in the universe, the backlog, or any
+# mastery math. A name also covers its parts ("<name> …").
+[[exclude]]
+name = "Helminth"
+reason = "a system, not a frame — squatting in the Warframes category (addendum #25)"
+
+[[exclude]]
+name = "Kavasa Prime"
+reason = "owned collar, not a weapon — no mastery (addendum #22)"
+
+[[exclude]]
+name = "Excalibur Prime"
+reason = "Founder-exclusive, permanently unobtainable (addendum #25)"
+
+# Canonical spellings: duplicate name orders collapse onto one entry.
+[[alias]]
+from = "Sirius & Orion"
+to = "Orion & Sirius"

@@ -20,6 +20,13 @@ use tuning::Tuning;
 /// reward relay and confirmed by the profile endpoint).
 pub const PROFILE_ACCOUNT_ID: &str = "5420fba23846322173707618";
 
+/// Repo/install data file path. `$FRACKER_DATA_DIR`-aware (see
+/// `tuning::data_dir`), so the Flatpak install resolves data from
+/// `/app/share/fracker/data` via the launcher's env.
+fn data_file(rel: &str) -> PathBuf {
+    tuning::data_dir().join(rel)
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "fracker", about = "Warframe session planner (first pass)")]
 struct Args {
@@ -100,11 +107,12 @@ async fn run_demo(args: &Args) -> Result<(), String> {
     let cache = config::cache_dir();
     let mut endpoint_failures: Vec<String> = Vec::new();
 
-    // 0. Runtime tuning + companion exclusions (no content in Rust).
+    // 0. Runtime tuning + data-owned universe scrub (no content in Rust).
     let tuning = Tuning::load_defaults()?;
-    let companions_text = std::fs::read_to_string("data/companions.toml")
-        .map_err(|e| format!("companions data/companions.toml: {e}"))?;
-    let companions = model::CompanionsManifest::from_toml(&companions_text)?;
+    let scrub_path = data_file("exclusions.toml");
+    let scrub_text = std::fs::read_to_string(&scrub_path)
+        .map_err(|e| format!("exclusions {}: {e}", scrub_path.display()))?;
+    let scrub = model::UniverseScrub::from_toml(&scrub_text)?;
 
     // 1. World state: live, else recorded fixture.
     let (world_text, world_status) = match fetch::fetch_worldstate(&client, &cache).await {
@@ -127,15 +135,17 @@ async fn run_demo(args: &Args) -> Result<(), String> {
         .unwrap_or_else(|_| Utc::now());
 
     // 2. Reconciled backlog (profile-derived primes), exclusions applied.
-    let backlog_text = std::fs::read_to_string("data/backlog.json")
-        .map_err(|e| format!("backlog data/backlog.json: {e}"))?;
+    let backlog_path = data_file("backlog.json");
+    let backlog_text = std::fs::read_to_string(&backlog_path)
+        .map_err(|e| format!("backlog {}: {e}", backlog_path.display()))?;
     let backlog = model::Backlog::from_json(&backlog_text)?;
-    let wants = companions.filter_wants(&backlog.wants());
+    let wants = scrub.scrub_wants(&backlog.wants());
+    let backlog_categories = scrub.scrub_categories(&backlog.unmastered_by_category);
 
     // 3. Seed relic/roster data.
-    let rel_text = std::fs::read_to_string("data/cache/relictables.json")
+    let rel_text = std::fs::read_to_string(data_file("cache/relictables.json"))
         .map_err(|e| format!("seed relictables: {e}"))?;
-    let wish_text = std::fs::read_to_string("data/cache/wishlist.json")
+    let wish_text = std::fs::read_to_string(data_file("cache/wishlist.json"))
         .map_err(|e| format!("seed wishlist: {e}"))?;
     let relics = model::RelicTables::from_json(&rel_text)?;
     let roster = model::Roster::from_json(&wish_text)?;
@@ -242,7 +252,7 @@ async fn run_demo(args: &Args) -> Result<(), String> {
         mastery_rank: Some(mastery_rank),
         icons: &icons,
         embedded_icons: Some(&embedded),
-        backlog_categories: &backlog.unmastered_by_category,
+        backlog_categories: &backlog_categories,
         daily,
         pack: Some(pack_render),
         tuning: &tuning,
