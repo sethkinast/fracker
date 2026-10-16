@@ -1,0 +1,633 @@
+//! Shared data model: relic/drop tables, prime roster, targets,
+//! world-state subset, profile snapshot, relic stock.
+//!
+//! Thin-layer principle (BRIEF §16 decision log): game knowledge lives
+//! in maintained remote datasets (Xuerian, warframestat, WFCD). This
+//! module only models their shapes.
+
+use std::collections::{HashMap, HashSet};
+
+use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// Tolerant primitives: the datasets use `null` where a default belongs.
+// ---------------------------------------------------------------------------
+
+/// Deserialize `null` (or missing) as `T::default`.
+fn null_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
+
+// ---------------------------------------------------------------------------
+// Refinement
+// ---------------------------------------------------------------------------
+
+/// Relic refinement tier. Trace costs: 0/25/50/100 (BRIEF §17).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Refinement {
+    Intact,
+    Exceptional,
+    Flawless,
+    Radiant,
+}
+
+impl Refinement {
+    pub fn all() -> [Refinement; 4] {
+        [
+            Refinement::Intact,
+            Refinement::Exceptional,
+            Refinement::Flawless,
+            Refinement::Radiant,
+        ]
+    }
+
+    pub fn trace_cost_per_relic(self) -> u32 {
+        match self {
+            Refinement::Intact => 0,
+            Refinement::Exceptional => 25,
+            Refinement::Flawless => 50,
+            Refinement::Radiant => 100,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Refinement::Intact => "Intact",
+            Refinement::Exceptional => "Exceptional",
+            Refinement::Flawless => "Flawless",
+            Refinement::Radiant => "Radiant",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Relic tables (Xuerian relictables.json)
+// ---------------------------------------------------------------------------
+
+/// One farm node entry from the top-level `sources` map.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FarmNode {
+    #[serde(default, deserialize_with = "null_default")]
+    pub planet: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub name: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub mode: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub mode_name: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub faction_name: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub min_enemy_level: u32,
+    #[serde(default, deserialize_with = "null_default")]
+    pub max_enemy_level: u32,
+}
+
+/// Per-table drop info for one relic: rotation -> chance %.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelicSourceTable {
+    #[serde(default)]
+    pub total_rotations: u32,
+    #[serde(default)]
+    pub rotations: HashMap<String, f64>,
+}
+
+/// One relic entry: rewards with per-refinement chances, vault flag,
+/// and farm sources (drop table -> rotation chances).
+#[derive(Debug, Clone, Deserialize)]
+pub struct RelicEntry {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub rewards: Vec<RelicReward>,
+    #[serde(default)]
+    pub vaulted: bool,
+    #[serde(default, deserialize_with = "sources_map_or_empty")]
+    pub sources: HashMap<String, RelicSourceTable>,
+}
+
+/// Vaulted relics carry `"sources": []` while dropping relics carry a
+/// table map — accept both, normalizing lists to empty.
+fn sources_map_or_empty<'de, D>(
+    d: D,
+) -> Result<HashMap<String, RelicSourceTable>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{SeqAccess, Visitor};
+    use std::fmt;
+    struct V;
+    impl<'de> Visitor<'de> for V {
+        type Value = HashMap<String, RelicSourceTable>;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a source-table map or an empty list")
+        }
+        fn visit_map<M: serde::de::MapAccess<'de>>(
+            self,
+            mut m: M,
+        ) -> Result<Self::Value, M::Error> {
+            let mut out = HashMap::new();
+            while let Some((k, v)) = m.next_entry::<String, RelicSourceTable>()? {
+                out.insert(k, v);
+            }
+            Ok(out)
+        }
+        fn visit_seq<S: SeqAccess<'de>>(self, _s: S) -> Result<Self::Value, S::Error> {
+            Ok(HashMap::new())
+        }
+    }
+    d.deserialize_any(V)
+}
+
+/// One reward row. `chance` maps refinement name -> percent.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RelicReward {
+    #[serde(default, deserialize_with = "null_default")]
+    pub name: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub chance: HashMap<String, f64>,
+}
+
+impl RelicReward {
+    /// Chance (%) of this reward at the given refinement.
+    /// Missing tiers fall back to Intact (older rows only list Intact).
+    pub fn chance_at(&self, r: Refinement) -> f64 {
+        if let Some(v) = self.chance.get(r.name()) {
+            return *v;
+        }
+        self.chance.get("Intact").copied().unwrap_or(0.0)
+    }
+}
+
+impl RelicEntry {
+    /// Era = first token of the relic name ("Lith"/"Meso"/"Neo"/"Axi"/"Requiem").
+    /// "Requiem" relics have no era fissure match except Requiem tier itself.
+    pub fn era(&self) -> &str {
+        self.name.split_whitespace().next().unwrap_or("")
+    }
+
+    /// Chance (%) of `part` in THIS relic at refinement `r`.
+    /// Rarity is a property of the (part, relic) pair (BRIEF §17).
+    pub fn chance_for(&self, part: &str, r: Refinement) -> f64 {
+        self.rewards
+            .iter()
+            .find(|rw| rw.name == part)
+            .map(|rw| rw.chance_at(r))
+            .unwrap_or(0.0)
+    }
+
+    pub fn contains(&self, part: &str) -> bool {
+        self.rewards.iter().any(|rw| rw.name == part)
+    }
+}
+
+/// Full relic dataset.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RelicTables {
+    #[serde(default)]
+    pub relics: HashMap<String, RelicEntry>,
+    #[serde(default)]
+    pub sources: HashMap<String, Vec<FarmNode>>,
+}
+
+impl RelicTables {
+    pub fn from_json(text: &str) -> Result<Self, String> {
+        serde_json::from_str(text).map_err(|e| format!("relictables: {e}"))
+    }
+
+    /// All relics containing `part`, with the per-(part, relic) Intact chance.
+    pub fn relics_for_part(&self, part: &str) -> Vec<(&RelicEntry, f64)> {
+        let mut out: Vec<(&RelicEntry, f64)> = self
+            .relics
+            .values()
+            .filter(|r| r.contains(part))
+            .map(|r| (r, r.chance_for(part, Refinement::Intact)))
+            .collect();
+        out.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.name.cmp(&b.0.name))
+        });
+        out
+    }
+
+    pub fn unvaulted_relics(&self) -> Vec<&RelicEntry> {
+        let mut out: Vec<&RelicEntry> = self
+            .relics
+            .values()
+            .filter(|r| !r.vaulted)
+            .collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Prime roster (Xuerian wishlist.json)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RosterPart {
+    #[serde(default)]
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RosterItem {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub vaulted: bool,
+    #[serde(default)]
+    pub parts: Vec<RosterPart>,
+    #[serde(default, rename = "type")]
+    pub kind: String,
+}
+
+impl RosterItem {
+    /// Warframes rank before weapons (BRIEF §10).
+    pub fn is_warframe(&self) -> bool {
+        self.kind.eq_ignore_ascii_case("warframe")
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Roster {
+    pub items: Vec<RosterItem>,
+}
+
+impl Roster {
+    pub fn from_json(text: &str) -> Result<Self, String> {
+        let items: Vec<RosterItem> =
+            serde_json::from_str(text).map_err(|e| format!("wishlist: {e}"))?;
+        Ok(Self { items })
+    }
+
+    pub fn by_name(&self, name: &str) -> Option<&RosterItem> {
+        self.items.iter().find(|i| i.name == name)
+    }
+
+    /// Parentage: part display name -> parent equipment names.
+    /// A part want is done iff its parent equipment is owned (BRIEF §10).
+    pub fn parentage(&self) -> HashMap<String, Vec<String>> {
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        for item in &self.items {
+            for part in &item.parts {
+                map.entry(part.name.clone())
+                    .or_default()
+                    .push(item.name.clone());
+            }
+        }
+        map
+    }
+
+    /// Parent equipment for a want. Whole-equipment wants (e.g. a part
+    /// name that is itself gear) resolve to themselves when present.
+    pub fn parents_of(&self, want: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.by_name(want).is_some() {
+            out.push(want.to_owned());
+        }
+        for item in &self.items {
+            if item.parts.iter().any(|p| p.name == want)
+                && !out.contains(&item.name)
+            {
+                out.push(item.name.clone());
+            }
+        }
+        out
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Targets (Xuerian /api/load or seed data/targets.json)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Targets {
+    #[serde(default)]
+    pub wants: Vec<String>,
+    #[serde(default)]
+    pub has: Vec<String>,
+    #[serde(default)]
+    pub mastered: Vec<String>,
+}
+
+impl Targets {
+    pub fn from_json(text: &str) -> Result<Self, String> {
+        serde_json::from_str(text).map_err(|e| format!("targets: {e}"))
+    }
+
+    pub fn from_seed_json(text: &str) -> Result<Self, String> {
+        Self::from_json(text)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// World state subset (api.warframestat.us)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Fissure {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub node: String,
+    #[serde(default)]
+    pub mission_type: String,
+    #[serde(default)]
+    pub tier: String,
+    #[serde(default)]
+    pub expiry: String,
+    #[serde(default)]
+    pub is_storm: bool,
+    #[serde(default)]
+    pub is_hard: bool,
+}
+
+impl Fissure {
+    /// Omnia fissures accept every era (BRIEF §17).
+    pub fn matches_era(&self, era: &str) -> bool {
+        self.tier.eq_ignore_ascii_case("omnia") || self.tier.eq_ignore_ascii_case(era)
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CountedItem {
+    #[serde(default)]
+    pub unique_name: String,
+    #[serde(default, rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlertMission {
+    #[serde(default)]
+    pub node: String,
+    #[serde(default, rename = "type")]
+    pub mission_type: String,
+    #[serde(default)]
+    pub faction: String,
+    #[serde(default)]
+    pub counted_items: Vec<CountedItem>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Alert {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub expiry: String,
+    #[serde(default)]
+    pub mission: AlertMission,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultTraderItem {
+    #[serde(default)]
+    pub unique_name: String,
+    #[serde(default)]
+    pub item: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultTrader {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub activation: String,
+    #[serde(default)]
+    pub expiry: String,
+    #[serde(default)]
+    pub character: String,
+    #[serde(default)]
+    pub location: String,
+    #[serde(default)]
+    pub inventory: Vec<VaultTraderItem>,
+}
+
+impl VaultTrader {
+    /// Normalized gear tokens from uniqueNames for rotation matching.
+    /// e.g. "/Lotus/StoreItems/Powersuits/Ranger/IvaraPrime" -> "ivara prime".
+    pub fn gear_tokens(&self) -> HashSet<String> {
+        self.inventory
+            .iter()
+            .map(|i| normalize_gear_token(&i.unique_name))
+            .filter(|t| !t.is_empty())
+            .collect()
+    }
+}
+
+/// "/Lotus/.../IvaraPrime" or "MPVIvaraPrimeSinglePack" -> "ivara prime".
+pub fn normalize_gear_token(unique_name: &str) -> String {
+    let tail = unique_name.rsplit('/').next().unwrap_or(unique_name);
+    let s = tail.to_owned();
+    // Split CamelCase-ish tokens; pack wrappers ("...SinglePack") still
+    // contain the gear names, and matching is substring-based.
+    let mut words: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for ch in s.chars() {
+        if ch.is_ascii_uppercase() && !cur.is_empty() {
+            words.push(cur.clone());
+            cur.clear();
+        }
+        cur.push(ch);
+    }
+    if !cur.is_empty() {
+        words.push(cur);
+    }
+    let joined = words.join(" ").to_lowercase();
+    // Pack entries ("m p v protea ivara prime dual pack") still contain
+    // the gear names; keep the whole token — matching is substring-based.
+    joined
+    .replace("m p v ", "")
+    .replace(" single pack", "")
+    .replace(" dual pack", "")
+    .replace(" pack", "")
+    .split_whitespace()
+    .collect::<Vec<_>>()
+    .join(" ")
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NightwaveChallenge {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub standing: u32,
+    #[serde(default)]
+    pub is_daily: bool,
+    #[serde(default)]
+    pub is_elite: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Nightwave {
+    #[serde(default)]
+    pub season: u32,
+    #[serde(default)]
+    pub active_challenges: Vec<NightwaveChallenge>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SortieVariant {
+    #[serde(default)]
+    pub node: String,
+    #[serde(default)]
+    pub mission_type: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoidTrader {
+    #[serde(default)]
+    pub expiry: String,
+    #[serde(default)]
+    pub location: String,
+    #[serde(default)]
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Sortie {
+    #[serde(default)]
+    pub expiry: String,
+    #[serde(default)]
+    pub variants: Vec<SortieVariant>,
+}
+
+/// World-state subset the planner consumes. Unknown sections default
+/// to empty so parsing never breaks on API additions.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorldState {
+    #[serde(default)]
+    pub timestamp: String,
+    #[serde(default)]
+    pub fissures: Vec<Fissure>,
+    #[serde(default)]
+    pub alerts: Vec<Alert>,
+    #[serde(default)]
+    pub vault_trader: Option<VaultTrader>,
+    #[serde(default)]
+    pub nightwave: Option<Nightwave>,
+    #[serde(default)]
+    pub sortie: Option<Sortie>,
+    #[serde(default, rename = "voidTrader")]
+    pub baro: Option<VoidTrader>,
+}
+
+impl WorldState {
+    pub fn from_json(text: &str) -> Result<Self, String> {
+        serde_json::from_str(text).map_err(|e| format!("worldstate: {e}"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Profile + stock
+// ---------------------------------------------------------------------------
+
+/// Equipment-level ownership: display names of built gear (resolved via
+/// the items dataset at the fetch/state layer; the planner takes names).
+#[derive(Debug, Clone, Default)]
+pub struct OwnedEquipment {
+    pub names: HashSet<String>,
+}
+
+impl OwnedEquipment {
+    pub fn empty() -> Self {
+        Self::default()
+    }
+}
+
+/// Relic holdings. Unknown until the §8.1 OCR bootstrap resolves it —
+/// then the planner ranks by coverage alone and labels "if you have it".
+#[derive(Debug, Clone)]
+pub enum RelicStock {
+    Unknown,
+    Known(HashMap<String, u32>),
+}
+
+impl RelicStock {
+    pub fn count(&self, relic: &str) -> Option<u32> {
+        match self {
+            RelicStock::Unknown => None,
+            RelicStock::Known(m) => Some(m.get(relic).copied().unwrap_or(0)),
+        }
+    }
+
+    pub fn is_known(&self) -> bool {
+        matches!(self, RelicStock::Known(_))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refinement_trace_costs() {
+        assert_eq!(Refinement::Intact.trace_cost_per_relic(), 0);
+        assert_eq!(Refinement::Exceptional.trace_cost_per_relic(), 25);
+        assert_eq!(Refinement::Flawless.trace_cost_per_relic(), 50);
+        assert_eq!(Refinement::Radiant.trace_cost_per_relic(), 100);
+    }
+
+    #[test]
+    fn omnia_matches_every_era() {
+        let f = Fissure {
+            tier: "Omnia".into(),
+            ..Default::default()
+        };
+        assert!(f.matches_era("Lith"));
+        assert!(f.matches_era("Axi"));
+        let g = Fissure {
+            tier: "Neo".into(),
+            ..Default::default()
+        };
+        assert!(g.matches_era("Neo"));
+        assert!(!g.matches_era("Axi"));
+    }
+
+    #[test]
+    fn chance_is_per_pair_with_intact_fallback() {
+        let r = RelicReward {
+            name: "X".into(),
+            chance: [("Intact".to_owned(), 2.0)].into_iter().collect(),
+        };
+        assert_eq!(r.chance_at(Refinement::Intact), 2.0);
+        assert_eq!(r.chance_at(Refinement::Radiant), 2.0);
+    }
+
+    #[test]
+    fn gear_token_normalizes_packs() {
+        assert_eq!(
+            normalize_gear_token("/Lotus/StoreItems/Powersuits/Ranger/IvaraPrime"),
+            "ivara prime"
+        );
+        let t = normalize_gear_token(
+            "/Lotus/Types/StoreItems/Packages/MegaPrimeVault/MPVIvaraPrimeSinglePack",
+        );
+        assert!(t.contains("ivara"), "pack token keeps gear name: {t}");
+    }
+}

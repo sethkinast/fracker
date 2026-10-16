@@ -1,5 +1,14 @@
-# Xuerian raw pull embeds Seth's private bookmark token as its key.
+# Seth-private raw pulls stay local (the Xuerian pull embeds his
+# bookmark token as its key; profile-raw is the full profile dump).
 data/xuerian-profile-raw.json
-# EE.log fixtures stay local while the repo is public; add them if it goes private.
+data/profile-raw.json
+
+# EE.log fixtures are Seth-side only (never commit real game logs).
+# Recorded JSON responses (world state, profile) ARE committed.
 fixtures/*.log
+fixtures/ee.log*
+fixtures/*EE.log*
+fixtures/reallog/
+
+# Rust
 target/
