@@ -11,7 +11,7 @@
 //! - `data/tuning/refinement.toml` — refinement ladder + rarity bands.
 //! - `data/tuning/planner.toml` — batch bounds, windows, scores, caps.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -316,6 +316,20 @@ pub struct DailyCapsTuning {
     pub fallback_focus_label: String,
     #[serde(default)]
     pub families: Vec<String>,
+    /// Player-facing names for the profile's internal `DailyAffiliation*`
+    /// suffixes (`main` = the bare shared pool). Data-owned: no display
+    /// string lives in `src/`.
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
+}
+
+impl DailyCapsTuning {
+    /// The player-facing label for a profile pool key. `main` is the bare
+    /// `DailyAffiliation` shared pool; other keys are family suffixes. An
+    /// unmapped suffix renders raw (visible, never blank) — never guess.
+    pub fn label_for<'a>(&'a self, key: &'a str) -> &'a str {
+        self.labels.get(key).map(String::as_str).unwrap_or(key)
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -503,6 +517,32 @@ mod tests {
         assert_eq!(t.planner.nightwave.name, "Nightwave");
         assert!(!t.planner.alert_sections.event_header.is_empty());
         assert!(!t.planner.alert_sections.lotus_header.is_empty());
+    }
+
+    #[test]
+    fn every_family_has_a_player_facing_label() {
+        // §4(b) audit: the profile emits raw `DailyAffiliation*` suffixes;
+        // every one the renderer can show must have a data-owned label, or
+        // it leaks the internal name ("Library" -> "Simaris"). The main
+        // shared pool (`DailyAffiliation`) is keyed `main`.
+        let t = Tuning::for_tests();
+        let caps = &t.planner.daily_caps;
+        assert_eq!(caps.label_for("main"), "Syndicates");
+        assert_eq!(caps.label_for("Library"), "Simaris");
+        for fam in &caps.families {
+            // Every suffix the renderer can show must be an explicit entry
+            // (an unmapped suffix would still render raw — the audit point).
+            assert!(
+                caps.labels.contains_key(fam),
+                "family {fam:?} has no [daily_caps.labels] entry — it would render its raw internal suffix"
+            );
+            assert!(
+                !caps.label_for(fam).is_empty(),
+                "family {fam:?} maps to an empty label"
+            );
+        }
+        // An unmapped suffix renders raw (visible), never blank.
+        assert_eq!(caps.label_for("SomethingNew"), "SomethingNew");
     }
 
     #[test]

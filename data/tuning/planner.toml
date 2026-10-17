@@ -79,6 +79,28 @@ fallback_standing_label = "16k + 500 × MR"
 fallback_focus_label = "250k + 5k × MR"
 families = ["Cavia", "Cetus", "Quills", "Solaris", "Ventkids", "Vox", "Entrati", "Necraloid", "Zariman", "Kahl", "Hex", "Library"]
 
+# Player-facing names for the daily-cap bars. The profile keys these by
+# internal `DailyAffiliation*` suffix ("Library" is Cephalon Simaris under
+# his internal faction name); `main` is the bare `DailyAffiliation` pool
+# the six main syndicates share. Data-owned: no display string lives in
+# src/. A suffix with no entry renders raw rather than blank (never guess).
+# The audit test `every_family_has_a_player_facing_label` keeps this map
+# covering the whole `families` list above.
+[daily_caps.labels]
+main = "Syndicates"
+Cavia = "Cavia"
+Cetus = "Ostron"
+Quills = "Quills"
+Solaris = "Solaris United"
+Ventkids = "Ventkids"
+Vox = "Vox Solaris"
+Entrati = "Entrati"
+Necraloid = "Necraloid"
+Zariman = "The Holdfasts"
+Kahl = "Kahl's Garrison"
+Hex = "The Hex"
+Library = "Simaris"
+
 [sortie]
 name = "Sortie"
 reset_label = "daily 17:00 UTC"
