@@ -227,3 +227,17 @@ it refines the brief where they disagree. For the next worker pass.
     is already current when Seth sits down, no manual step.
     This is in addition to mission-end regenerations during the
     session (item 35 watch) and the manual Regenerate verb.
+38. **First live-run fixes (Seth, 2026-10-16 evening, v0.2.0).**
+    (a) "Open plan page" does nothing — the OpenURI portal call
+    from the sandbox silently fails and the xdg-open fallback
+    does not fire either. The report itself generates fine
+    (~/.var/app/<id>/data/fracker/plan.html). Fix the open path
+    and make failures visible (status line / notification),
+    never silent.
+    (b) Daily-cap labels must be player-facing. The renderer
+    passes the profile DailyAffiliation* suffixes through raw:
+    the bare pool shows as just "Standing" (it is the main six
+    syndicates shared pool) and "Library" is Cephalon Simaris
+    under his internal faction name. Add a data-owned label
+    map: main pool -> "Syndicates", Library -> "Simaris", and
+    audit every other family suffix the same way.
