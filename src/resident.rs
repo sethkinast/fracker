@@ -20,16 +20,20 @@
 //! just another trigger.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, watch};
 
+use crate::capture::{self, CaptureData, CaptureSession};
+use crate::ocr::StockState as OcrStock;
 use crate::report::{self, ReportConfig};
 use crate::state::AppState;
 use crate::tray::{FrackerTray, TrayCommand, TrayStatus};
 use crate::watch::LogWatcher;
-use crate::{elog, portal};
+use crate::{elog, portal, screencast};
 
 /// What asked for a report run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +94,26 @@ pub struct ResidentOptions {
     pub watch_interval_ms: i32,
 }
 
+/// A message from the Capture Inventory worker thread to the resident
+/// loop (eighth pass §2).
+enum CaptureEvent {
+    /// Live per-bucket stack counts while scrolling.
+    Progress(capture::CaptureCounts),
+    /// The capture ended cleanly; the session carries the union of stacks
+    /// and which buckets were touched (for the partial-safe finalize).
+    Finished(Box<CaptureSession>),
+    /// The capture aborted; the message is shown to Seth, never swallowed.
+    Failed(String),
+}
+
+/// A running Capture Inventory worker. Dropping/stopping it ends the
+/// capture; the worker owns the PipeWire source and its thread.
+struct CaptureRun {
+    stop: Arc<AtomicBool>,
+    events: std::sync::mpsc::Receiver<CaptureEvent>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
 /// Run the resident with no tray (brief §4 headless mode). Identical
 /// watch + report behavior; the absence of a tray changes nothing.
 pub async fn run_headless(opts: ResidentOptions, shutdown: Shutdown) -> Result<(), String> {
@@ -116,6 +140,13 @@ pub async fn run(
     );
 
     let mut sd = shutdown.receiver();
+    // The Capture Inventory worker is polled on a light tick: draining the
+    // event channel here (rather than holding a future borrow across the
+    // select) keeps the loop borrow-check-clean while live counts still
+    // refresh a few times a second.
+    let mut capture: Option<CaptureRun> = None;
+    let mut tick = tokio::time::interval(Duration::from_millis(250));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let result = loop {
         tokio::select! {
             _ = sd.changed() => {
@@ -137,16 +168,268 @@ pub async fn run(
                     Some(TrayCommand::OpenPage) => {
                         open_page(&opts, &status, &tray).await;
                     }
+                    Some(TrayCommand::CaptureInventory) => {
+                        toggle_capture(&opts, &status, &tray, &mut capture).await;
+                    }
                     Some(TrayCommand::Quit) | None => break Ok(()),
                 }
+            }
+            _ = tick.tick() => {
+                pump_capture(&opts, &status, &tray, &mut capture).await;
             }
         }
     };
 
-    // Stop the watch thread and wait for it (it checks the flag each tick).
+    // Stop any capture and the watch thread, then wait for both.
+    stop_capture(&mut capture);
     shutdown.trigger();
     let _ = watch_thread.join();
     result
+}
+
+/// Toggle the Capture Inventory flow: start a ScreenCast session when
+/// idle, ask the running one to stop when capturing.
+async fn toggle_capture(
+    opts: &ResidentOptions,
+    status: &Arc<Mutex<TrayStatus>>,
+    tray: &Option<ksni::Handle<FrackerTray>>,
+    capture: &mut Option<CaptureRun>,
+) {
+    if let Some(run) = capture.as_ref() {
+        run.stop.store(true, Ordering::Relaxed);
+        if let Ok(mut s) = status.lock() {
+            s.capture_line = Some("stopping capture…".to_owned());
+        }
+        refresh_tray(tray).await;
+        return;
+    }
+
+    if let Ok(mut s) = status.lock() {
+        s.capturing = true;
+        s.capture_line = Some("opening ScreenCast consent…".to_owned());
+        s.last_error = None;
+    }
+    refresh_tray(tray).await;
+
+    match start_capture(opts, status).await {
+        Ok(run) => {
+            println!("resident: capture started");
+            *capture = Some(run);
+        }
+        Err(e) => {
+            eprintln!("resident: capture start failed: {e}");
+            if let Ok(mut s) = status.lock() {
+                s.capturing = false;
+                s.capture_line = None;
+                s.last_error = Some(format!("capture: {e}"));
+            }
+            refresh_tray(tray).await;
+        }
+    }
+}
+
+/// Open the ScreenCast portal session and spawn the capture worker thread.
+async fn start_capture(
+    opts: &ResidentOptions,
+    status: &Arc<Mutex<TrayStatus>>,
+) -> Result<CaptureRun, String> {
+    if let Ok(mut s) = status.lock() {
+        s.capture_line = Some("opening ScreenCast consent…".to_owned());
+    }
+    let token = screencast::load_restore_token(&opts.state_dir);
+    let negotiated = screencast::negotiate(token).await?;
+    if let Some(tok) = negotiated.restore_token.clone() {
+        if let Err(e) = screencast::save_restore_token(&opts.state_dir, &tok) {
+            // A token we cannot persist costs Seth a consent dialog next
+            // time; it is not fatal, but it is visible.
+            eprintln!("resident: could not save ScreenCast token: {e}");
+        }
+    }
+    let (tx, events) = std::sync::mpsc::channel();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_thread = stop.clone();
+    let data_dir = opts.report.data_dir.clone();
+    let join = std::thread::spawn(move || capture_worker(data_dir, negotiated, stop_thread, tx));
+    if let Ok(mut s) = status.lock() {
+        s.capture_line = Some("Capture: 0 relic stacks, 0 parts, 0 arcanes".to_owned());
+    }
+    Ok(CaptureRun {
+        stop,
+        events,
+        join: Some(join),
+    })
+}
+
+/// The blocking capture worker: load content, connect PipeWire, and drain
+/// frames through the §2 pipeline until stopped. Every failure is sent to
+/// the loop as a visible [`CaptureEvent::Failed`].
+fn capture_worker(
+    data_dir: PathBuf,
+    negotiated: screencast::Negotiated,
+    stop: Arc<AtomicBool>,
+    tx: std::sync::mpsc::Sender<CaptureEvent>,
+) {
+    let fail = |msg: String| {
+        let _ = tx.send(CaptureEvent::Failed(msg));
+    };
+    let data = match CaptureData::load(&data_dir) {
+        Ok(d) => d,
+        Err(e) => return fail(format!("capture data: {e}")),
+    };
+    let Some(layout) = data.layouts.get("relic").cloned() else {
+        return fail("capture: no relic layout in capture/layouts.toml".to_owned());
+    };
+    let Some(engine) = crate::ocr::TesseractCliEngine::probe(layout) else {
+        return fail("capture: tesseract unavailable".to_owned());
+    };
+    let mut source = match screencast::ScreenCastSource::new(negotiated, stop.clone()) {
+        Ok(s) => s,
+        Err(e) => return fail(format!("capture: {e}")),
+    };
+    let ctx = data.context();
+    let idle = data.classifier.idle_stop_frames;
+    let progress_tx = tx.clone();
+    let result = capture::run_capture(
+        &ctx,
+        &engine,
+        &mut source,
+        &stop,
+        idle,
+        move |s| {
+            let _ = progress_tx.send(CaptureEvent::Progress(s.counts()));
+        },
+    );
+    match result {
+        Ok(session) => {
+            let _ = tx.send(CaptureEvent::Finished(Box::new(session)));
+        }
+        Err(e) => fail(format!("capture: {e}")),
+    }
+}
+
+/// Drain the capture worker's events: refresh live counts, and on
+/// completion finalize the stock + regenerate the plan.
+async fn pump_capture(
+    opts: &ResidentOptions,
+    status: &Arc<Mutex<TrayStatus>>,
+    tray: &Option<ksni::Handle<FrackerTray>>,
+    capture: &mut Option<CaptureRun>,
+) {
+    let Some(run) = capture.as_ref() else { return };
+    let mut latest: Option<capture::CaptureCounts> = None;
+    let mut finished: Option<CaptureEvent> = None;
+    loop {
+        match run.events.try_recv() {
+            Ok(CaptureEvent::Progress(c)) => latest = Some(c),
+            Ok(ev) => {
+                finished = Some(ev);
+                break;
+            }
+            Err(TryRecvError::Empty) => break,
+            Err(TryRecvError::Disconnected) => {
+                finished = Some(CaptureEvent::Failed(
+                    "capture worker stopped unexpectedly".to_owned(),
+                ));
+                break;
+            }
+        }
+    }
+
+    if let Some(c) = latest {
+        if finished.is_none() {
+            if let Ok(mut s) = status.lock() {
+                s.capture_line = Some(format!(
+                    "Capture: {} relic stacks, {} parts, {} arcanes",
+                    c.relic_stacks, c.parts, c.arcanes
+                ));
+            }
+            refresh_tray(tray).await;
+        }
+    }
+
+    match finished {
+        Some(CaptureEvent::Finished(session)) => {
+            finalize_capture(opts, status, tray, *session).await;
+            stop_capture(capture);
+        }
+        Some(CaptureEvent::Failed(e)) => {
+            eprintln!("resident: capture failed: {e}");
+            if let Ok(mut s) = status.lock() {
+                s.capturing = false;
+                s.capture_line = None;
+                s.last_error = Some(e);
+            }
+            stop_capture(capture);
+            refresh_tray(tray).await;
+        }
+        _ => {}
+    }
+}
+
+/// Finalize a completed capture: captured buckets REPLACE the matching
+/// buckets in `stock.json` (untouched buckets survive), then the plan is
+/// regenerated and the tray reports what was collected.
+async fn finalize_capture(
+    opts: &ResidentOptions,
+    status: &Arc<Mutex<TrayStatus>>,
+    tray: &Option<ksni::Handle<FrackerTray>>,
+    session: CaptureSession,
+) {
+    if !session.has_any() {
+        if let Ok(mut s) = status.lock() {
+            s.capturing = false;
+            s.capture_line = Some("Capture: nothing collected".to_owned());
+        }
+        refresh_tray(tray).await;
+        return;
+    }
+
+    let path = &opts.report.stock_path;
+    let mut existing = match std::fs::read_to_string(path) {
+        Ok(text) => match OcrStock::from_json(&text) {
+            Ok(s) => s,
+            Err(e) => {
+                // Never clobber a stock file we cannot read.
+                eprintln!("resident: capture finalize: {e}");
+                if let Ok(mut s) = status.lock() {
+                    s.capturing = false;
+                    s.last_error = Some(format!("capture finalize: {e}"));
+                }
+                refresh_tray(tray).await;
+                return;
+            }
+        },
+        Err(_) => OcrStock::default(),
+    };
+    session.finalize_into(&mut existing);
+    if let Err(e) = existing.write_to(path) {
+        eprintln!("resident: capture finalize: {e}");
+        if let Ok(mut s) = status.lock() {
+            s.capturing = false;
+            s.last_error = Some(format!("capture finalize: {e}"));
+        }
+        refresh_tray(tray).await;
+        return;
+    }
+
+    let summary = capture::captured_summary(&session);
+    println!("resident: {summary} -> {}", path.display());
+    if let Ok(mut s) = status.lock() {
+        s.capturing = false;
+        s.capture_line = Some(summary);
+    }
+    // Regenerate the plan from the fresh stock (and refresh the tray).
+    do_report(opts, status, tray, Trigger::Manual).await;
+}
+
+/// Stop the worker (if any) and reap its thread.
+fn stop_capture(capture: &mut Option<CaptureRun>) {
+    if let Some(mut run) = capture.take() {
+        run.stop.store(true, Ordering::Relaxed);
+        if let Some(h) = run.join.take() {
+            let _ = h.join();
+        }
+    }
 }
 
 /// Await a tray command, or stay pending forever when there is no tray.
@@ -188,7 +471,8 @@ async fn do_report(
 }
 
 /// "Open plan page": generate when the report does not exist yet, then
-/// open it via the OpenURI portal (with an `xdg-open` fallback).
+/// open it via the OpenURI `OpenFile` portal (with an `xdg-open` fallback
+/// only for an absent portal). A portal refusal is surfaced, never silent.
 async fn open_page(
     opts: &ResidentOptions,
     status: &Arc<Mutex<TrayStatus>>,
@@ -206,8 +490,13 @@ async fn open_page(
             return;
         }
     }
-    match portal::open_uri(&portal::file_uri(out)).await {
-        Ok(()) => println!("resident: opened {}", out.display()),
+    match portal::open_plan(out).await {
+        Ok(()) => {
+            if let Ok(mut s) = status.lock() {
+                s.last_error = None;
+            }
+            println!("resident: opened {}", out.display());
+        }
         Err(e) => {
             eprintln!("resident: open failed: {e}");
             if let Ok(mut s) = status.lock() {

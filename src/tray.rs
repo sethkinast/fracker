@@ -29,6 +29,8 @@ pub enum TrayCommand {
     Regenerate,
     /// Open the current plan page (generate it first when missing).
     OpenPage,
+    /// Toggle the Capture Inventory screen-capture flow (eighth pass §2).
+    CaptureInventory,
     /// Exit the resident cleanly.
     Quit,
 }
@@ -47,6 +49,10 @@ pub struct TrayStatus {
     pub last_error: Option<String>,
     /// Resolved EE.log path (for the tooltip).
     pub log_path: Option<String>,
+    /// A Capture Inventory run is in progress (eighth pass §2).
+    pub capturing: bool,
+    /// The live capture line ("Capture: N relic stacks, …" or "stopping…").
+    pub capture_line: Option<String>,
 }
 
 impl TrayStatus {
@@ -61,10 +67,19 @@ impl TrayStatus {
         } else {
             "not watching"
         };
-        match (&self.last_report, &self.last_error) {
-            (_, Some(err)) => format!("{watch} · last report failed: {err}"),
-            (Some(when), None) => format!("{watch} · last report {when}"),
-            (None, None) => format!("{watch} · no report yet"),
+        let report = match (&self.last_report, &self.last_error) {
+            (_, Some(err)) => format!("last report failed: {err}"),
+            (Some(when), None) => format!("last report {when}"),
+            (None, None) => "no report yet".to_owned(),
+        };
+        if self.capturing {
+            let cap = self
+                .capture_line
+                .clone()
+                .unwrap_or_else(|| "capturing".to_owned());
+            format!("{cap} · {watch} · {report}")
+        } else {
+            format!("{watch} · {report}")
         }
     }
 }
@@ -120,13 +135,28 @@ impl Tray for FrackerTray {
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let regen = self.cmds.clone();
         let open = self.cmds.clone();
+        let capture = self.cmds.clone();
         let quit = self.cmds.clone();
+        let capturing = self
+            .status
+            .lock()
+            .map(|s| s.capturing)
+            .unwrap_or(false);
+        // One verb, two labels: Capture Inventory ↔ Stop capture.
+        let capture_label = if capturing {
+            "Stop capture"
+        } else {
+            "Capture Inventory"
+        };
         vec![
             menu_action("Regenerate now", move || {
                 let _ = regen.send(TrayCommand::Regenerate);
             }),
             menu_action("Open plan page", move || {
                 let _ = open.send(TrayCommand::OpenPage);
+            }),
+            menu_action(capture_label, move || {
+                let _ = capture.send(TrayCommand::CaptureInventory);
             }),
             MenuItem::Separator,
             // Status line: present but not clickable.
@@ -205,6 +235,7 @@ mod tests {
         let names: Vec<&str> = items.iter().map(|(l, _)| l.as_str()).collect();
         assert!(names.contains(&"Regenerate now"));
         assert!(names.contains(&"Open plan page"));
+        assert!(names.contains(&"Capture Inventory"), "the §2 toggle is present");
         assert!(names.contains(&"Quit"));
         // The status line is a present-but-disabled entry.
         assert!(items
@@ -227,8 +258,39 @@ mod tests {
         }
         assert_eq!(rx.try_recv().unwrap(), TrayCommand::Regenerate);
         assert_eq!(rx.try_recv().unwrap(), TrayCommand::OpenPage);
+        assert_eq!(rx.try_recv().unwrap(), TrayCommand::CaptureInventory);
         assert_eq!(rx.try_recv().unwrap(), TrayCommand::Quit);
-        assert!(rx.try_recv().is_err(), "only the three verbs fired");
+        assert!(rx.try_recv().is_err(), "only the four verbs fired");
+    }
+
+    #[test]
+    fn capture_toggle_relabels_and_surfaces_live_counts() {
+        // While capturing the same verb reads "Stop capture" and the
+        // status line shows the live per-bucket counts.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut tray = FrackerTray {
+            status: Arc::new(Mutex::new(TrayStatus {
+                watching: true,
+                dir_watch: true,
+                capturing: true,
+                capture_line: Some("Capture: 512 relic stacks, 0 parts, 12 arcanes".to_owned()),
+                ..Default::default()
+            })),
+            cmds: tx,
+        };
+        let names: Vec<String> = labels(&tray).into_iter().map(|(l, _)| l).collect();
+        assert!(names.contains(&"Stop capture".to_owned()));
+        assert!(!names.contains(&"Capture Inventory".to_owned()));
+        assert!(tray.status_line().contains("Capture: 512 relic stacks"));
+        // Firing it still sends the single toggle verb.
+        for item in tray.menu() {
+            if let MenuItem::Standard(s) = item {
+                (s.activate)(&mut tray);
+            }
+        }
+        assert_eq!(rx.try_recv().unwrap(), TrayCommand::Regenerate);
+        assert_eq!(rx.try_recv().unwrap(), TrayCommand::OpenPage);
+        assert_eq!(rx.try_recv().unwrap(), TrayCommand::CaptureInventory);
     }
 
     #[test]
@@ -240,6 +302,7 @@ mod tests {
             last_report: Some("12:34:56".to_owned()),
             last_error: None,
             log_path: Some("/x/EE.log".to_owned()),
+            ..Default::default()
         };
         assert_eq!(ok.line(), "watching EE.log (directory events) · last report 12:34:56");
         let poll = TrayStatus {
