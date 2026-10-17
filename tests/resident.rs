@@ -34,6 +34,7 @@ fn offline_report_config(base: &std::path::Path) -> ReportConfig {
         fixtures: root().join("fixtures"),
         cache_dir: base.join("cache"),
         out: base.join("out/plan.html"),
+        stock_path: base.join("out/stock.json"),
         config_path: base.join("config.toml"),
         offline: true,
         embed_icons: false,

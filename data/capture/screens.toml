@@ -1,0 +1,34 @@
+# Capture Inventory screen classification (eighth pass §2).
+#
+# While Seth scrolls his inventory the tray's Capture Inventory verb
+# samples frames; each stabilised frame is classified before any per-cell
+# OCR, so the right layout + §1 stock keys are used. Classification reads
+# ONE header strip and matches data-owned keywords — never a pixel guess.
+# UI wording is content (addendum #20), so it lives here, not in src/.
+#
+# `header` is the [x0,y0,x1,y1] fraction-of-frame region to OCR (the top
+# banner: the screen title / COLLECTED-UPGRADED counters). The keywords
+# below were measured from Seth's real captures (2026-10-16):
+#
+#   Void Relics / Refinement : "VOID RELICS / REFINEMENT … RADIANT"
+#   Inventory / Sell         : "INVENTORY / SELL"
+#   Arcanes                  : "ARCANES … UPGRADED"
+#
+# A frame matching no class (menus, gameplay, loading) is "Other":
+# collection pauses silently rather than reading the wrong grid.
+header = [0.0, 0.0, 1.0, 0.12]
+header_psm = 6
+header_upscale = 2
+
+# Frames with no classifiable screen in a row that auto-finalise a capture
+# ("Seth left the inventory"). 0 disables auto-stop; the menu toggle is
+# always the primary stop. Generous by default (~45 s at 2 fps).
+idle_stop_frames = 90
+
+# Score = number of keywords matched; the highest wins, ties are Other.
+[relic]
+keywords = ["REFINEMENT", "VOID RELICS", "RADIANT"]
+[parts]
+keywords = ["INVENTORY", "SELL"]
+[arcanes]
+keywords = ["ARCANES", "UPGRADED"]

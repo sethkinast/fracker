@@ -30,6 +30,9 @@ ksni = { version = "0.3", default-features = false, features = ["tokio"] }
 # D-Bus client for the OpenURI portal call (§3). Shared with ksni's
 # zbus 5.x; default-features=false keeps the C-vendored libdbus out.
 zbus = { version = "5", default-features = false, features = ["tokio"] }
+# StreamExt for awaiting the portal's `Response` signal (§4). Already a
+# transitive dependency of ksni, so it is in the vendored cargo-sources.json.
+futures-util = "0.3"
 
 [dev-dependencies]
 tempfile = "3"

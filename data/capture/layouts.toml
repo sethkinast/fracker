@@ -27,6 +27,11 @@ cell_w = 127.0
 y0 = 116.0
 cell_h = 132.0
 name = [0.063, 0.742, 0.937, 0.894]
+# Refined stacks render a second text line (`[Radiant]`/`[Flawless]`/
+# `[Exceptional]`) below the name and shift the name up into this band.
+# The engine reads it only when the lower band holds a bare label, so the
+# common Intact cell still costs one OCR call (eighth pass §1).
+name_upper = [0.063, 0.62, 0.937, 0.75]
 count = [0.10, 0.06, 0.44, 0.26]
 count_style = "x"
 name_psm = 7
@@ -63,29 +68,37 @@ count_upscale = 8
 # keeps the never-guess rule. See docs/fifth-pass.md.
 min_score = 0.5
 
-# Arcanes inventory screen (sixth pass §5, addendum #34). This screen is
-# the steady-state arcane source: neither the profile endpoint nor EE.log
+# Arcanes inventory screen (sixth pass §5, addendum #34; geometry
+# MEASURED from Seth's real capture, eighth pass §3). This screen is the
+# steady-state arcane source: neither the profile endpoint nor EE.log
 # carries arcane state.
 #
-# PROVISIONAL: the grid below is a best-effort shape derived from the parts
-# screen and has NOT been measured against a real Arcanes capture yet.
-# Never-guess validation is unchanged, so an off grid yields EMPTY arcane
-# stock, never bad stock. Replace x0/cell_w/y0/cell_h and the name/count
-# regions after Seth's first capture (docs/capture-checklist.md).
+# Measured on Seth's 1957x1100 Arcanes shot (all geometry relative, so
+# it scales to his 2560x1440 captures). Icon centres sit on an 11x7 grid;
+# the cell box is the icon centre +/- half the pitch.
+#
+#   x0/cell_w : 50.28 / 128.45      y0/cell_h : 103.08 / 132.83
+#
+# Per cell: stack count is a plain `xN` top-left (blank = 1); the name
+# wraps to TWO lines under the icon; the rank is a row of five diamond
+# pips at the bottom (centre-luma filled count). Never-guess validation
+# is unchanged, so an off grid yields EMPTY arcane stock, never bad stock.
 [arcanes]
-cols = 8
-rows = 5
-ref_width = 1985
-ref_height = 1116
-x0 = 42.0
-cell_w = 150.0
-y0 = 300.0
-cell_h = 150.0
-name = [0.0, 0.0, 1.0, 1.0]
-count = [0.06, 0.0, 0.32, 0.16]
-count_style = "badge"
+cols = 11
+rows = 7
+ref_width = 1957
+ref_height = 1100
+x0 = 50.28
+cell_w = 128.45
+y0 = 103.08
+cell_h = 132.83
+name = [0.08, 0.66, 0.92, 0.88]
+count = [0.06, 0.17, 0.42, 0.35]
+count_style = "x"
 name_psm = 6
 count_psm = 7
-name_upscale = 3
+name_upscale = 5
 count_upscale = 8
+# Five diamonds centred under the name (centres at cell-x 0.304 + 0.101*i).
+pips = [0.254, 0.87, 0.758, 0.96]
 min_score = 0.5

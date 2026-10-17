@@ -448,6 +448,7 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     // information). PvP is dropped with the Conclave cut.)
     // ----
     h.push_str("<section><h2>Today</h2>\n<div class=\"bars\">\n");
+    let caps = &ctx.tuning.planner.daily_caps;
     match &ctx.daily {
         Some(d) => {
             h.push_str(&pool_bar(
@@ -457,20 +458,20 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
                 false,
             ));
             h.push_str(&pool_bar(
-                "Standing",
+                caps.label_for("main"),
                 d.affiliation_remaining,
                 d.affiliation_cap,
                 false,
             ));
             let have: HashMap<&str, u32> =
                 d.families.iter().map(|(k, v)| (k.as_str(), *v)).collect();
-            for fam in &ctx.tuning.planner.daily_caps.families {
+            for fam in &caps.families {
                 if fam.eq_ignore_ascii_case("pvp") {
                     continue;
                 }
                 if let Some(remaining) = have.get(fam.as_str()).copied() {
                     h.push_str(&pool_bar(
-                        fam,
+                        caps.label_for(fam),
                         remaining,
                         d.affiliation_cap,
                         true,
@@ -479,7 +480,6 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
             }
         }
         None => {
-            let caps = &ctx.tuning.planner.daily_caps;
             let (focus_cap, stand_cap) = match ctx.mastery_rank {
                 Some(mr) => (
                     fmt_int(caps.focus_base + caps.focus_per_mr * mr),
@@ -779,7 +779,7 @@ fn fmt_int(n: u32) -> String {
 
 /// One standing/focus pool bar: remaining-of-cap, terse label. Full
 /// pools dim (`bar-full`) — the pattern is the information. Family
-/// pools render slim; Focus + main Standing render full-size.
+/// pools render slim; Focus + the main pool render full-size.
 fn pool_bar(name: &str, remaining: u32, cap: u32, slim: bool) -> String {
     let pct = if cap == 0 {
         0.0
@@ -1484,13 +1484,16 @@ mod tests {
         // Focus + main standing + one slim bar per family (12).
         assert_eq!(html.matches("card bar slim").count(), 12);
         assert!(html.contains("Focus · 214,545 / 400,000 left"));
-        assert!(html.contains("Standing · 0 / 31,000 left"));
-        assert!(html.contains("Cetus · 6,300 / 31,000 left"));
+        // Labels come from the data-owned map: main pool is "Syndicates",
+        // not the raw bare "Standing"; Cetus renders as its player-facing
+        // name "Ostron".
+        assert!(html.contains("Syndicates · 0 / 31,000 left"));
+        assert!(html.contains("Ostron · 6,300 / 31,000 left"));
         assert!(html.contains("Cavia · 31,000 / 31,000 left"));
         assert!(!html.contains("Pvp"), "PvP leaves with the Conclave cut");
         // Full pools dim; the used pool does not.
         assert!(html.contains("bar-full"), "untouched pools dim");
-        let cetus_bar = html.find("Cetus · 6,300").unwrap();
+        let cetus_bar = html.find("Ostron · 6,300").unwrap();
         let window = &html[cetus_bar.saturating_sub(60)..cetus_bar];
         assert!(!window.contains("bar-full"), "used pool stays loud");
     }
