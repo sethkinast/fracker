@@ -40,6 +40,10 @@ pub struct ReportConfig {
     pub cache_dir: PathBuf,
     /// Where the rendered HTML page is written (atomic temp + rename).
     pub out: PathBuf,
+    /// OCR-captured stock (`stock.json`): relics/parts/arcanes captured by
+    /// the §2 Capture Inventory flow. Read at plan time; a missing or
+    /// unreadable file is treated as unknown stock, never an error.
+    pub stock_path: PathBuf,
     /// App config file (pins + steel-path tiebreak).
     pub config_path: PathBuf,
     /// Skip the network; read the recorded fixtures (hermetic).
@@ -51,11 +55,17 @@ pub struct ReportConfig {
 impl ReportConfig {
     /// Product/resident defaults for a report written to the app data dir.
     pub fn resident(out: PathBuf, config_path: PathBuf) -> Self {
+        let stock_path = out
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.join("stock.json"))
+            .unwrap_or_else(|| PathBuf::from("stock.json"));
         Self {
             data_dir: crate::tuning::data_dir(),
             fixtures: PathBuf::from("fixtures"),
             cache_dir: config::cache_dir(),
             out,
+            stock_path,
             config_path,
             offline: false,
             embed_icons: false,
@@ -241,7 +251,16 @@ pub async fn generate(cfg: &ReportConfig) -> Result<ReportOutcome, String> {
         gated_label: format!("{} gated", taubound.community_goal.gated_set),
     };
 
-    let stock = RelicStock::Unknown;
+    let stock = match std::fs::read_to_string(&cfg.stock_path) {
+        Ok(text) => match crate::ocr::StockState::from_json(&text) {
+            Ok(s) => s.to_relic_stock(),
+            Err(e) => {
+                endpoint_failures.push(format!("stock {}: {e}", cfg.stock_path.display()));
+                RelicStock::Unknown
+            }
+        },
+        Err(_) => RelicStock::Unknown,
+    };
 
     let (cfg_file, _) = config::Config::load(&cfg.config_path)
         .unwrap_or((config::Config::default(), config::ConfigSource::Defaults));
@@ -471,6 +490,7 @@ mod tests {
             fixtures: root.join("fixtures"),
             cache_dir: std::env::temp_dir().join("fracker-report-test-cache"),
             out,
+            stock_path: root.join("data/stock.json"),
             config_path: root.join("does-not-exist.toml"),
             offline: true,
             embed_icons: false,

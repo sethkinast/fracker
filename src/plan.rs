@@ -81,6 +81,8 @@ pub struct PartDeal {
     pub chance: f64,
     pub expected: f64,
     pub owned: Option<u32>,
+    /// Copies already at Radiant (eighth pass §1: crack these first).
+    pub radiant: Option<u32>,
 }
 
 /// Best-relic deal for `part`: highest-Intact relic, stock-aware
@@ -93,7 +95,13 @@ pub fn best_deal_for_part(
 ) -> Option<PartDeal> {
     let (relic, intact) = relics.relics_for_part(part).into_iter().next()?;
     let owned = stock.count(&relic.name);
-    let refinement = choose_refinement(tuning, intact, owned);
+    let radiant = stock.radiant_count(&relic.name);
+    // Radiant stock is cracked as-is: no traces spent, best odds. Only
+    // when there is none do we fall back to the stock-aware ladder.
+    let refinement = match radiant {
+        Some(r) if r > 0 => Refinement::Radiant,
+        _ => choose_refinement(tuning, intact, owned),
+    };
     let mut chance = relic.chance_for(part, refinement);
     if chance <= 0.0 {
         chance = tuning.refinement.fallback_chance(intact, refinement);
@@ -105,6 +113,7 @@ pub fn best_deal_for_part(
         chance,
         expected: expected_cracks(chance),
         owned,
+        radiant,
     })
 }
 
@@ -1644,7 +1653,9 @@ mod tests {
     #[test]
     fn commons_run_intact_even_with_deep_stock() {
         let t = tuning();
-        let stock = RelicStock::Known([("X".to_owned(), 99)].into_iter().collect());
+        let stock = RelicStock::Known(crate::model::KnownStock::from_totals(
+            [("X".to_owned(), 99)].into_iter().collect(),
+        ));
         assert_eq!(choose_refinement(&t, 25.33, stock.count("X")), Refinement::Intact);
         assert_eq!(choose_refinement(&t, 25.33, None), Refinement::Intact);
     }

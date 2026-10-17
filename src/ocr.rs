@@ -23,8 +23,87 @@
 //! Rust `png` crate, plus 8-bit PGM/PPM for the synthetic test path, both
 //! decoded to one gray raster.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+
+// ---------------------------------------------------------------------------
+// Refinement tier (eighth pass §1)
+// ---------------------------------------------------------------------------
+
+/// Refinement tier of a relic stack. The refinement screen shows one cell
+/// per (relic x tier); non-Intact tiers carry a bracketed label under the
+/// name (`[Exceptional]`/`[Flawless]`/`[Radiant]`). Absence of a label is
+/// the game's own Intact indicator, so an unlabeled cell is Intact; a
+/// label we cannot parse is [`RefinementTier::Unknown`] — counted in
+/// totals, excluded from tier-specific advice, never silently assigned.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub enum RefinementTier {
+    Intact,
+    Exceptional,
+    Flawless,
+    Radiant,
+    Unknown,
+}
+
+impl RefinementTier {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RefinementTier::Intact => "intact",
+            RefinementTier::Exceptional => "exceptional",
+            RefinementTier::Flawless => "flawless",
+            RefinementTier::Radiant => "radiant",
+            RefinementTier::Unknown => "unknown",
+        }
+    }
+
+    /// The tier a bare (unbracketed) token names, if any.
+    pub fn from_token(t: &str) -> Option<Self> {
+        match t.trim().to_ascii_lowercase().as_str() {
+            "intact" => Some(RefinementTier::Intact),
+            "exceptional" => Some(RefinementTier::Exceptional),
+            "flawless" => Some(RefinementTier::Flawless),
+            "radiant" => Some(RefinementTier::Radiant),
+            _ => None,
+        }
+    }
+
+    /// Parse a tier label anywhere in a raw OCR read (`[Radiant]`, or a
+    /// bare `RADIANT` line). Returns `Unknown` when a bracket survives
+    /// but names no known tier.
+    pub fn parse_label(read: &str) -> Self {
+        let lower = read.to_ascii_lowercase();
+        if let Some(start) = lower.find('[') {
+            if let Some(end) = lower[start..].find(']') {
+                let inner = &lower[start + 1..start + end];
+                return Self::from_token(inner).unwrap_or(RefinementTier::Unknown);
+            }
+        }
+        for tok in lower.split_whitespace() {
+            if let Some(t) = Self::from_token(tok) {
+                return t;
+            }
+        }
+        RefinementTier::Intact
+    }
+}
+
+/// Remove any bracketed tier label from a raw read so fuzzy name
+/// matching sees the relic name alone.
+fn strip_tier_label(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut depth = 0usize;
+    for ch in s.chars() {
+        match ch {
+            '[' => depth += 1,
+            ']' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => out.push(ch),
+            _ => {}
+        }
+    }
+    out
+}
 
 /// 8-byte PNG file signature.
 const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
@@ -319,6 +398,9 @@ pub struct OcrRead {
     pub text: String,
     pub confidence: f32,
     pub count: Option<u32>,
+    /// Arcane rank read from the five rank pips (0..=5); `None` when the
+    /// screen has no pip row (relics/parts).
+    pub rank: Option<u8>,
 }
 
 impl OcrRead {
@@ -327,6 +409,7 @@ impl OcrRead {
             text: String::new(),
             confidence: 0.0,
             count: None,
+            rank: None,
         }
     }
 }
@@ -361,6 +444,19 @@ pub struct Layout {
     pub count_psm: u32,
     pub name_upscale: u32,
     pub count_upscale: u32,
+    /// A second name band ABOVE [`Self::name`] (eighth pass §1). The
+    /// refinement screen vertically centres a one- or two-line block: an
+    /// Intact cell (no tier label) puts its name in the lower band, while
+    /// a labelled cell (e.g. `[Radiant]`) shifts the name UP into this
+    /// band and drops the label into the lower one. Reading the upper
+    /// band only when the lower read is a bare label recovers the name
+    /// (and the tier) without a second OCR call on the common Intact
+    /// case. `None` on screens with a single-line name.
+    pub name_upper: Option<[f32; 4]>,
+    /// Arcane rank-pip row as `[x0,y0,x1,y1]` fractions of one cell
+    /// (eighth pass §3). Five diamonds sit under the name; the filled
+    /// count is the rank. `None` on screens without pips.
+    pub pips: Option<[f32; 4]>,
     /// Minimum fuzzy-match score to hold a read on this screen. The
     /// noisier the screen (icons in the crop), the lower the floor; the
     /// ambiguity margin guard stays constant.
@@ -390,6 +486,10 @@ struct LayoutDef {
     count_psm: u32,
     name_upscale: u32,
     count_upscale: u32,
+    #[serde(default)]
+    name_upper: Option<[f32; 4]>,
+    #[serde(default)]
+    pips: Option<[f32; 4]>,
     #[serde(default = "default_min_score")]
     min_score: f32,
 }
@@ -435,6 +535,8 @@ impl Layout {
                     count_psm: d.count_psm,
                     name_upscale: d.name_upscale,
                     count_upscale: d.count_upscale,
+                    name_upper: d.name_upper,
+                    pips: d.pips,
                     min_score: d.min_score,
                 },
             );
@@ -497,6 +599,31 @@ fn crop_region(cell: &GrayImage, region: [f32; 4]) -> GrayImage {
 pub trait OcrEngine {
     fn name(&self) -> &str;
     fn ocr_cell(&self, cell: &GrayImage) -> OcrRead;
+
+    /// OCR one cell using an **explicit** layout. The capture flow reads
+    /// cells from several screens (relics / parts / arcanes) with one
+    /// engine, so it cannot rely on the engine's own stored layout; this
+    /// lets it pass the routed layout per cell (eighth pass §2). The
+    /// default keeps geometry-free engines (template/stub) unchanged.
+    fn ocr_cell_in(&self, cell: &GrayImage, _layout: &Layout) -> OcrRead {
+        self.ocr_cell(cell)
+    }
+
+    /// OCR an arbitrary `[x0,y0,x1,y1]` fraction-of-IMAGE region (a header
+    /// banner) to plain text. The capture flow uses this to classify which
+    /// inventory screen a frame shows (eighth pass §2). Engines that cannot
+    /// read arbitrary regions return no text — classification then falls
+    /// through to "unclassified", which pauses collection rather than
+    /// guessing a screen.
+    fn read_text(
+        &self,
+        _image: &GrayImage,
+        _region: [f32; 4],
+        _psm: u32,
+        _upscale: u32,
+    ) -> String {
+        String::new()
+    }
 }
 
 /// No engine available: every read is empty at zero confidence, so the
@@ -631,22 +758,58 @@ impl TesseractCliEngine {
         }
     }
 
-    fn read_count(&self, cell: &GrayImage) -> Option<u32> {
-        let whitelist = match self.layout.count_style {
+    fn read_count(&self, cell: &GrayImage, layout: &Layout) -> Option<u32> {
+        let whitelist = match layout.count_style {
             CountStyle::XPrefix => "xX0123456789",
             CountStyle::Badge => "0123456789",
         };
         let raw = self.read_region(
             cell,
-            self.layout.count,
-            self.layout.count_psm,
-            self.layout.count_upscale,
+            layout.count,
+            layout.count_psm,
+            layout.count_upscale,
             Some(whitelist),
         );
         let digits: String = raw.chars().filter(|c| c.is_ascii_digit()).collect();
         // Both screens omit the label for a single item; anything <= 1 is
         // treated as "one", never as a spurious reading.
         digits.parse::<u32>().ok().filter(|&n| n > 1)
+    }
+
+    /// Arcane rank from the pip row: five evenly spaced diamonds; a
+    /// filled pip has a bright CENTRE, an empty one is a faint outline
+    /// (its centre is background). Sampling the slot-centre luma is
+    /// deterministic (no OCR, no guessing) — eighth pass §1/§3.
+    fn read_rank(&self, cell: &GrayImage, layout: &Layout) -> Option<u8> {
+        let pips = layout.pips?;
+        let band = crop_region(cell, pips);
+        if band.width == 0 || band.height == 0 {
+            return None;
+        }
+        const SLOTS: u32 = 5;
+        // Filled slots measure a centre mean ~50-58 on Seth's shot; empty
+        // outlines ~14. 30 sits safely between.
+        const FILLED_MEAN_ABOVE: f64 = 30.0;
+        let slot_w = band.width as f32 / SLOTS as f32;
+        if slot_w < 1.0 {
+            return None;
+        }
+        let mut filled = 0u8;
+        for s in 0..SLOTS {
+            let xc = ((s as f32 + 0.5) * slot_w) as u32;
+            let mut sum = 0u64;
+            let mut n = 0u64;
+            for y in 0..band.height {
+                for x in xc.saturating_sub(1)..=(xc + 1).min(band.width - 1) {
+                    sum += band.get(x, y) as u64;
+                    n += 1;
+                }
+            }
+            if n > 0 && (sum as f64 / n as f64) > FILLED_MEAN_ABOVE {
+                filled += 1;
+            }
+        }
+        Some(filled)
     }
 }
 
@@ -655,19 +818,63 @@ impl OcrEngine for TesseractCliEngine {
         "tesseract-cli"
     }
 
+    /// Header/banner read for screen classification (§2). No whitelist:
+    /// the header carries letters we must match ("REFINEMENT", "ARCANES").
+    fn read_text(
+        &self,
+        image: &GrayImage,
+        region: [f32; 4],
+        psm: u32,
+        upscale: u32,
+    ) -> String {
+        self.read_region(image, region, psm, upscale, None)
+    }
+
     fn ocr_cell(&self, cell: &GrayImage) -> OcrRead {
-        let text = self.read_region(
+        self.read_cell(cell, &self.layout)
+    }
+
+    fn ocr_cell_in(&self, cell: &GrayImage, layout: &Layout) -> OcrRead {
+        self.read_cell(cell, layout)
+    }
+}
+
+impl TesseractCliEngine {
+    /// Read one cell's name/count/rank with an explicit layout (so the
+    /// capture flow can route relics/parts/arcanes to the right regions
+    /// with a single engine).
+    fn read_cell(&self, cell: &GrayImage, layout: &Layout) -> OcrRead {
+        let mut text = self.read_region(
             cell,
-            self.layout.name,
-            self.layout.name_psm,
-            self.layout.name_upscale,
+            layout.name,
+            layout.name_psm,
+            layout.name_upscale,
             None,
         );
+        // Two-line cells (eighth pass §1): the lower band holds the
+        // `[Radiant]`/`[Flawless]` label for a refined stack, with the
+        // relic name displaced into the upper band. Only when the lower
+        // read is a bare label (or empty) do we pay for the second read.
+        if let Some(upper) = layout.name_upper {
+            if text.trim().is_empty() || text.contains('[') {
+                let up = self.read_region(
+                    cell,
+                    upper,
+                    layout.name_psm,
+                    layout.name_upscale,
+                    None,
+                );
+                if !up.trim().is_empty() {
+                    text = format!("{} {}", up.trim(), text.trim());
+                }
+            }
+        }
         let confidence = if text.is_empty() { 0.0 } else { 0.85 };
         OcrRead {
             text,
             confidence,
-            count: self.read_count(cell),
+            count: self.read_count(cell, layout),
+            rank: self.read_rank(cell, layout),
         }
     }
 }
@@ -702,6 +909,8 @@ fn default_layout() -> Layout {
         count_psm: 7,
         name_upscale: 6,
         count_upscale: 8,
+        name_upper: Some([0.063, 0.62, 0.937, 0.75]),
+        pips: None,
         min_score: 0.8,
     }
 }
@@ -916,12 +1125,14 @@ impl OcrEngine for TemplateEngine {
                 text: String::new(),
                 confidence: (conf * 0.5).min(0.4),
                 count: None,
+                rank: None,
             };
         }
         OcrRead {
             text,
             confidence: conf,
             count: None,
+            rank: None,
         }
     }
 }
@@ -945,6 +1156,7 @@ impl OcrEngine for FakeEngine {
             text: String::new(),
             confidence: 0.0,
             count: None,
+            rank: None,
         })
     }
 }
@@ -988,15 +1200,40 @@ impl Universe {
     /// As [`Self::best_match`], plus the runner-up score so the caller
     /// can refuse an ambiguous read (the never-guess rule): when the two
     /// best names are nearly tied we do NOT hold either.
+    ///
+    /// Icon art bleeds into a cell's name band (the arcanes screen in
+    /// particular), so a read may carry leading garbage tokens. We try
+    /// the read whole and with up to a few leading tokens trimmed,
+    /// keeping the best-scoring interpretation; the margin guard still
+    /// applies, so trimming never turns noise into a confident guess.
     pub fn best_match_margin(&self, read: &str) -> Option<(&str, f32, f32)> {
-        let f = fold(strip_relic_suffix(read));
-        if f.is_empty() {
+        let cleaned = strip_tier_label(read);
+        let cleaned = strip_relic_suffix(&cleaned);
+        let tokens: Vec<&str> = cleaned.split_whitespace().collect();
+        if tokens.is_empty() {
             return None;
         }
+        let mut best: Option<(&str, f32, f32)> = None;
+        for start in 0..tokens.len().min(4) {
+            let cand = fold(&tokens[start..].join(" "));
+            if cand.is_empty() {
+                continue;
+            }
+            if let Some(m) = self.match_one(&cand) {
+                if best.map_or(true, |b| m.1 > b.1) {
+                    best = Some(m);
+                }
+            }
+        }
+        best
+    }
+
+    /// Best name for one already-folded candidate plus its runner-up.
+    fn match_one(&self, f: &str) -> Option<(&str, f32, f32)> {
         let mut best: Option<(&str, f32)> = None;
         let mut second = 0.0f32;
         for (name, folded) in self.names.iter().zip(self.folded.iter()) {
-            let d = levenshtein_confusable(&f, folded);
+            let d = levenshtein_confusable(f, folded);
             let denom = f.chars().count().max(folded.chars().count()).max(1) as f32;
             let score = 1.0 - d as f32 / denom;
             match best {
@@ -1059,6 +1296,11 @@ fn confusable(a: char, b: char) -> bool {
             // tesseract renders the narrow UI "E" as a pound sign on the
             // 127-px relic cells; fold it so Axi E1 still validates.
             | ('£', 'e') | ('e', '£')
+            // ... and the relic "S" as a dollar sign at 1440p. This is the
+            // named cause of Lith S14's v0.2.0 drop (eighth pass §1): every
+            // "S14"/"S12"/"S15" stack read as "$14"/"$12"/"$15" and failed
+            // validation. Fold it so S-relics hold.
+            | ('$', 's') | ('s', '$')
     )
 }
 
@@ -1125,6 +1367,10 @@ pub struct CellResult {
     pub held: bool,
     /// Stack count read from the UI label ("x8"/badge); `None` means one.
     pub count: Option<u32>,
+    /// Relic refinement tier parsed from the cell (eighth pass §1).
+    pub tier: RefinementTier,
+    /// Arcane rank read from the pip row; `None` on screens without pips.
+    pub rank: Option<u8>,
 }
 
 /// Ambiguity guard: the runner-up name must trail the winner by at least
@@ -1147,6 +1393,8 @@ pub fn validate_read(
         match_score: 0.0,
         held: false,
         count: None,
+        tier: RefinementTier::Unknown,
+        rank: read.rank,
     };
     if read.confidence < min_confidence {
         return out;
@@ -1157,29 +1405,71 @@ pub fn validate_read(
         out.held = score >= min_score && (score - second) >= MATCH_MARGIN;
         if out.held {
             out.count = read.count;
+            // Tier only means something on a held relic read; elsewhere
+            // it is unknown (never a silent assignment on noise).
+            out.tier = RefinementTier::parse_label(&read.text);
         }
     }
     out
 }
 
-/// Stock state file: loose parts + relic counts + arcane ranks, JSON.
+/// Per-relic refinement breakdown: one count per tier. Totals are sums.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RelicStacks {
+    #[serde(default)]
+    pub tiers: BTreeMap<RefinementTier, u32>,
+}
+
+impl RelicStacks {
+    pub fn get(&self, tier: RefinementTier) -> u32 {
+        self.tiers.get(&tier).copied().unwrap_or(0)
+    }
+
+    pub fn total(&self) -> u32 {
+        self.tiers.values().sum()
+    }
+}
+
+/// Per-arcane rank breakdown: one count per rank (0..=5).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ArcaneStacks {
+    #[serde(default)]
+    pub ranks: BTreeMap<u8, u32>,
+}
+
+impl ArcaneStacks {
+    pub fn get(&self, rank: u8) -> u32 {
+        self.ranks.get(&rank).copied().unwrap_or(0)
+    }
+
+    pub fn total(&self) -> u32 {
+        self.ranks.values().sum()
+    }
+}
+
+/// Stock state file (eighth pass §1): relics keyed (relic, tier), parts by
+/// name, arcanes keyed (arcane, rank). A stack identity is unique on
+/// screen, so merging is a UNION: the same stack seen in N frames counts
+/// ONCE (the max observed count), never a sum across frames. This is what
+/// fixes both the name-only collisions and the overlapping-scroll double
+/// count of the v0.2.0 ingest.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct StockState {
     #[serde(default)]
-    pub relics: HashMap<String, u32>,
+    pub relics: BTreeMap<String, RelicStacks>,
     #[serde(default)]
-    pub parts: HashMap<String, u32>,
-    /// Arcane counts/ranks from the Arcanes inventory screen (sixth pass
-    /// §5, addendum #34). Neither the profile endpoint nor EE.log carries
+    pub parts: BTreeMap<String, u32>,
+    /// Arcane stacks from the Arcanes inventory screen (sixth pass §5,
+    /// addendum #34). Neither the profile endpoint nor EE.log carries
     /// arcane state, so this screen is the steady-state source.
     #[serde(default)]
-    pub arcanes: HashMap<String, u32>,
+    pub arcanes: BTreeMap<String, ArcaneStacks>,
 }
 
 impl StockState {
-    /// Aggregate validated results: each held match counts once; names in
-    /// `relic_names` are relic stock, names in `arcane_names` are arcane
-    /// stock, the rest loose parts.
+    /// Aggregate validated results into stock. Names in `relic_names` are
+    /// relic stacks, names in `arcane_names` are arcane stacks, the rest
+    /// loose parts. Merging is a union over stack identity (max count).
     pub fn from_results(
         results: &[CellResult],
         relic_names: &HashSet<String>,
@@ -1190,19 +1480,65 @@ impl StockState {
             if !r.held {
                 continue;
             }
-            if let Some(name) = &r.matched {
-                let add = r.count.unwrap_or(1);
-                let bucket = if relic_names.contains(name) {
-                    &mut stock.relics
-                } else if arcane_names.contains(name) {
-                    &mut stock.arcanes
-                } else {
-                    &mut stock.parts
-                };
-                *bucket.entry(name.clone()).or_insert(0) += add;
+            let Some(name) = &r.matched else { continue };
+            let add = r.count.unwrap_or(1);
+            if relic_names.contains(name) {
+                stock
+                    .relics
+                    .entry(name.clone())
+                    .or_default()
+                    .merge(r.tier, add);
+            } else if arcane_names.contains(name) {
+                stock
+                    .arcanes
+                    .entry(name.clone())
+                    .or_default()
+                    .merge(r.rank.unwrap_or(0), add);
+            } else {
+                let e = stock.parts.entry(name.clone()).or_insert(0);
+                *e = (*e).max(add);
             }
         }
         stock
+    }
+
+    /// Merge another capture into this one — a union over stack identity
+    /// (eighth pass §2). Used by the Capture Inventory finalize step.
+    pub fn merge_from(&mut self, other: &StockState) {
+        for (name, stacks) in &other.relics {
+            let dst = self.relics.entry(name.clone()).or_default();
+            for (tier, n) in &stacks.tiers {
+                let e = dst.tiers.entry(*tier).or_insert(0);
+                *e = (*e).max(*n);
+            }
+        }
+        for (name, stacks) in &other.arcanes {
+            let dst = self.arcanes.entry(name.clone()).or_default();
+            for (rank, n) in &stacks.ranks {
+                let e = dst.ranks.entry(*rank).or_insert(0);
+                *e = (*e).max(*n);
+            }
+        }
+        for (name, n) in &other.parts {
+            let e = self.parts.entry(name.clone()).or_insert(0);
+            *e = (*e).max(*n);
+        }
+    }
+
+    /// Per-relic totals (planner shape).
+    pub fn relic_totals(&self) -> HashMap<String, u32> {
+        self.relics
+            .iter()
+            .map(|(k, v)| (k.clone(), v.total()))
+            .collect()
+    }
+
+    /// Per-arcane totals.
+    pub fn arcane_totals(&self) -> HashMap<String, u32> {
+        self.arcanes
+            .iter()
+            .map(|(k, v)| (k.clone(), v.total()))
+            .collect()
     }
 
     pub fn to_json(&self) -> Result<String, String> {
@@ -1227,19 +1563,61 @@ impl StockState {
         Ok(())
     }
 
-    /// Planner shape: relic counts become known stock; parts feed the
-    /// bootstrap baseline (consumed via `AppState.parts_held`).
+    /// Planner shape: totals become known stock and the Radiant split
+    /// drives crack-first advice (eighth pass §1).
     pub fn to_relic_stock(&self) -> crate::model::RelicStock {
-        crate::model::RelicStock::Known(self.relics.clone())
+        let totals = self.relic_totals();
+        let radiant = self
+            .relics
+            .iter()
+            .filter(|(_, s)| s.get(RefinementTier::Radiant) > 0)
+            .map(|(k, s)| (k.clone(), s.get(RefinementTier::Radiant)))
+            .collect();
+        crate::model::RelicStock::Known(crate::model::KnownStock { totals, radiant })
     }
 
-    pub fn held_parts(&self) -> &HashMap<String, u32> {
-        &self.parts
+    pub fn held_parts(&self) -> HashMap<String, u32> {
+        self.parts.iter().map(|(k, v)| (k.clone(), *v)).collect()
     }
 
     /// Held arcane counts (stopgap or captured) for the bootstrap.
-    pub fn held_arcanes(&self) -> &HashMap<String, u32> {
-        &self.arcanes
+    pub fn held_arcanes(&self) -> HashMap<String, u32> {
+        self.arcane_totals()
+    }
+
+    /// Total relic copies, arcane copies and part copies (status lines).
+    pub fn totals(&self) -> (u32, u32, u32) {
+        (
+            self.relics.values().map(RelicStacks::total).sum(),
+            self.parts.values().copied().sum(),
+            self.arcanes.values().map(ArcaneStacks::total).sum(),
+        )
+    }
+
+    /// Number of distinct relic stacks (not copies) — the capture status
+    /// counts stacks, and "512 relic stacks" is the §2 phrasing.
+    pub fn relic_stack_count(&self) -> usize {
+        self.relics.values().map(|s| s.tiers.len()).sum()
+    }
+
+    pub fn arcane_stack_count(&self) -> usize {
+        self.arcanes.values().map(|s| s.ranks.len()).sum()
+    }
+}
+
+impl RelicStacks {
+    /// Fold one observed (tier, count) stack in with a union (max count).
+    pub fn merge(&mut self, tier: RefinementTier, n: u32) {
+        let e = self.tiers.entry(tier).or_insert(0);
+        *e = (*e).max(n);
+    }
+}
+
+impl ArcaneStacks {
+    /// Fold one observed (rank, count) stack in with a union (max count).
+    pub fn merge(&mut self, rank: u8, n: u32) {
+        let e = self.ranks.entry(rank).or_insert(0);
+        *e = (*e).max(n);
     }
 }
 
@@ -1287,7 +1665,7 @@ pub fn ingest_folder(
             let index = results.len();
             match cell {
                 Some(cell) => {
-                    let read = engine.ocr_cell(&cell);
+                    let read = engine.ocr_cell_in(&cell, layout);
                     results.push(validate_read(
                         &read,
                         universe,
@@ -1315,6 +1693,7 @@ pub fn ingest_folder(
 mod tests {
     use super::*;
     use crate::tuning::Tuning;
+    use std::sync::OnceLock;
 
     fn universe() -> Universe {
         Universe::from_names(
@@ -1334,6 +1713,16 @@ mod tests {
         ["Neo C5".to_owned()].into_iter().collect()
     }
 
+    /// Compact [`OcrRead`] builder for validation tests (no arcane rank).
+    fn read(text: &str, confidence: f32, count: Option<u32>) -> OcrRead {
+        OcrRead {
+            text: text.to_owned(),
+            confidence,
+            count,
+            rank: None,
+        }
+    }
+
     #[test]
     fn segments_even_grid() {
         let img = GrayImage::blank(100, 60, 0);
@@ -1344,8 +1733,9 @@ mod tests {
 
     #[test]
     fn capture_layouts_include_arcanes_screen() {
-        // Sixth pass §5: the Arcanes inventory screen is a first-class
-        // capture layout (addendum #34), alongside relic + parts.
+        // Sixth pass §5 / eighth pass §3: the Arcanes inventory screen is
+        // a first-class capture layout (addendum #34), now measured from
+        // Seth's real shot (11x7 grid, `xN` counts, rank pips).
         let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let layouts =
             Layout::load_file(&base.join("data/capture/layouts.toml")).unwrap();
@@ -1353,9 +1743,12 @@ mod tests {
             assert!(layouts.contains_key(key), "missing layout {key}");
         }
         let arc = &layouts["arcanes"];
-        assert_eq!(arc.cells_total(), 40, "8x5 arcane grid");
-        assert!(matches!(arc.count_style, CountStyle::Badge));
+        assert_eq!(arc.cells_total(), 77, "11x7 arcane grid");
+        assert!(matches!(arc.count_style, CountStyle::XPrefix));
         assert_eq!(arc.min_score, 0.5);
+        assert!(arc.pips.is_some(), "measure rank from the pip row");
+        // The relic screen reads a two-line name band (tier labels).
+        assert!(layouts["relic"].name_upper.is_some());
     }
 
     #[test]
@@ -1386,75 +1779,91 @@ mod tests {
     fn validation_fuzzy_matches_and_never_guesses() {
         let u = universe();
         // Exact read validates.
-        let exact = validate_read(&OcrRead {
-                text: "Neo C5".into(),
-                confidence: 0.95,
-                count: None,
-            }, &u, 0.5, 0.8, 0);
+        let exact = validate_read(&read("Neo C5", 0.95, None), &u, 0.5, 0.8, 0);
         assert!(exact.held);
         assert_eq!(exact.matched.as_deref(), Some("Neo C5"));
         // Typo still resolves (fuzzy), below-perfect score.
-        let typo = validate_read(&OcrRead {
-                text: "Ivara Prime Chassis Blueprlnt".into(),
-                confidence: 0.9,
-                count: None,
-            }, &u, 0.5, 0.8, 1);
+        let typo = validate_read(
+            &read("Ivara Prime Chassis Blueprlnt", 0.9, None),
+            &u,
+            0.5,
+            0.8,
+            1,
+        );
         assert!(typo.held, "typo resolves: {typo:?}");
         assert!(typo.match_score < 1.0);
         // Garbage never validates.
-        let garbage = validate_read(&OcrRead {
-                text: "zzz qqq www".into(),
-                confidence: 0.9,
-                count: None,
-            }, &u, 0.5, 0.8, 2);
+        let garbage = validate_read(&read("zzz qqq www", 0.9, None), &u, 0.5, 0.8, 2);
         assert!(!garbage.held);
         assert!(garbage.matched.is_some()); // best effort named, but NOT held
         // Low confidence never validates even when exact.
-        let shy = validate_read(&OcrRead {
-                text: "Neo C5".into(),
-                confidence: 0.2,
-                count: None,
-            }, &u, 0.5, 0.8, 3);
+        let shy = validate_read(&read("Neo C5", 0.2, None), &u, 0.5, 0.8, 3);
         assert!(!shy.held);
     }
 
     #[test]
-    fn stock_counts_relics_and_parts_in_planner_shape() {
+    fn stock_splits_tiers_totals_sum_and_frames_union() {
+        // Eighth pass §1: relics key by (relic, tier); totals are sums; a
+        // repeated stack identity (the same cell seen twice) is a UNION
+        // (max), never a sum across frames — the double-count fix.
         let u = universe();
         let rel = relics();
         let reads = vec![
-            validate_read(&OcrRead {
-                    text: "Neo C5".into(),
-                    confidence: 0.9,
-                    count: None,
-                }, &u, 0.5, 0.8, 0),
-            validate_read(&OcrRead {
-                    text: "Neo C5".into(),
-                    confidence: 0.9,
-                    count: Some(3),
-                }, &u, 0.5, 0.8, 1),
-            validate_read(&OcrRead {
-                    text: "Forma Blueprint".into(),
-                    confidence: 0.9,
-                    count: None,
-                }, &u, 0.5, 0.8, 2),
-            validate_read(&OcrRead {
-                    text: "zzz".into(),
-                    confidence: 0.9,
-                    count: None,
-                }, &u, 0.5, 0.8, 3),
+            validate_read(&read("Neo C5", 0.9, None), &u, 0.5, 0.8, 0),
+            // Same stack identity, seen again (overlapping scroll): union.
+            validate_read(&read("Neo C5", 0.9, None), &u, 0.5, 0.8, 1),
+            // A distinct tier of the same relic: adds to the total.
+            validate_read(&read("Neo C5 [Radiant]", 0.9, Some(3)), &u, 0.5, 0.8, 2),
+            validate_read(&read("Forma Blueprint", 0.9, None), &u, 0.5, 0.8, 3),
+            validate_read(&read("zzz", 0.9, None), &u, 0.5, 0.8, 4),
         ];
         let stock = StockState::from_results(&reads, &rel, &HashSet::new());
-        assert_eq!(stock.relics.get("Neo C5"), Some(&4));
+        let neo = stock.relics.get("Neo C5").expect("Neo C5 stack");
+        assert_eq!(neo.get(RefinementTier::Intact), 1, "same stack unions to one");
+        assert_eq!(neo.get(RefinementTier::Radiant), 3);
+        assert_eq!(neo.total(), 4, "totals sum across tiers");
         assert_eq!(stock.parts.get("Forma Blueprint"), Some(&1));
-        // Planner shape: known relic stock.
+        // Planner shape: known relic stock with the radiant split.
         match stock.to_relic_stock() {
-            crate::model::RelicStock::Known(m) => assert_eq!(m.get("Neo C5"), Some(&4)),
+            crate::model::RelicStock::Known(k) => {
+                assert_eq!(k.totals.get("Neo C5"), Some(&4));
+                assert_eq!(k.radiant.get("Neo C5"), Some(&3));
+            }
             crate::model::RelicStock::Unknown => panic!("stock must be known"),
         }
         let json = stock.to_json().unwrap();
         let back = StockState::from_json(&json).unwrap();
-        assert_eq!(back.relics.get("Neo C5"), Some(&4));
+        assert_eq!(back.relics.get("Neo C5").map(RelicStacks::total), Some(4));
+    }
+
+    #[test]
+    fn stock_merge_unions_overlapping_frames() {
+        // §2: capture merge is a union over stack identity. Two frames
+        // that both saw Axi G10 x14 and one that saw Axi A1 x8 produce
+        // Axi G10 = 14 (NOT 28), Axi A1 = 8.
+        let rel: HashSet<String> = ["Axi G10".to_owned(), "Axi A1".to_owned()].into_iter().collect();
+        let u = Universe::from_names(
+            &["Axi G10", "Axi A1"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
+        );
+        let mut a = StockState::from_results(
+            &[validate_read(&read("Axi G10", 0.9, Some(14)), &u, 0.5, 0.8, 0)],
+            &rel,
+            &HashSet::new(),
+        );
+        let b = StockState::from_results(
+            &[
+                validate_read(&read("Axi G10", 0.9, Some(14)), &u, 0.5, 0.8, 0),
+                validate_read(&read("Axi A1", 0.9, Some(8)), &u, 0.5, 0.8, 1),
+            ],
+            &rel,
+            &HashSet::new(),
+        );
+        a.merge_from(&b);
+        assert_eq!(a.relics.get("Axi G10").map(RelicStacks::total), Some(14));
+        assert_eq!(a.relics.get("Axi A1").map(RelicStacks::total), Some(8));
     }
 
     #[test]
@@ -1484,20 +1893,12 @@ mod tests {
         let arcane_names: HashSet<String> =
             ["Melee Influence".to_owned()].into_iter().collect();
         let reads = vec![
-            validate_read(&OcrRead {
-                    text: "Melee Influence".into(),
-                    confidence: 0.9,
-                    count: Some(4),
-                }, &u, 0.5, 0.5, 0),
-            validate_read(&OcrRead {
-                    text: "Axi A1".into(),
-                    confidence: 0.9,
-                    count: None,
-                }, &u, 0.5, 0.5, 1),
+            validate_read(&read("Melee Influence", 0.9, Some(4)), &u, 0.5, 0.5, 0),
+            validate_read(&read("Axi A1", 0.9, None), &u, 0.5, 0.5, 1),
         ];
         let stock = StockState::from_results(&reads, &relic_names, &arcane_names);
         assert_eq!(stock.held_arcanes().get("Melee Influence"), Some(&4));
-        assert_eq!(stock.relics.get("Axi A1"), Some(&1));
+        assert_eq!(stock.relics.get("Axi A1").map(RelicStacks::total), Some(1));
         assert!(stock.parts.is_empty(), "nothing falls through to parts");
         let back = StockState::from_json(&stock.to_json().unwrap()).unwrap();
         assert_eq!(back.held_arcanes().get("Melee Influence"), Some(&4));
@@ -1547,6 +1948,8 @@ mod tests {
             count_psm: 7,
             name_upscale: 1,
             count_upscale: 1,
+            name_upper: None,
+            pips: None,
             min_score: 0.8,
         }
     }
@@ -1618,17 +2021,7 @@ mod tests {
         .iter()
         .enumerate()
         {
-            let r = validate_read(
-                &OcrRead {
-                    text: label.to_string(),
-                    confidence: 0.9,
-                    count: None,
-                },
-                &u,
-                0.5,
-                0.8,
-                i,
-            );
+            let r = validate_read(&read(label, 0.9, None), &u, 0.5, 0.8, i);
             assert!(r.held, "known label validates: {label}");
         }
     }
@@ -1676,27 +2069,13 @@ mod tests {
         "Banshee Prime Systems Blueprint",
     ];
 
-    /// Universe + relic-name set, exactly as `run_ocr_ingest` builds them.
-    fn seed_universe() -> Option<(Universe, HashSet<String>)> {
+    /// Universe + relic/arcane name sets, built by the SAME helper the
+    /// live capture and `--ocr-ingest` use (`capture::load_universe`:
+    /// roster + relic names + the arcane set, scrubbed), so the tests and
+    /// production can never drift.
+    fn seed_universe() -> Option<(Universe, HashSet<String>, HashSet<String>)> {
         let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let rel_text = std::fs::read_to_string(base.join("data/cache/relictables.json")).ok()?;
-        let wish_text = std::fs::read_to_string(base.join("data/cache/wishlist.json")).ok()?;
-        let relics = crate::model::RelicTables::from_json(&rel_text).ok()?;
-        let roster = crate::model::Roster::from_json(&wish_text).ok()?;
-        let mut names: Vec<String> = Vec::new();
-        for item in &roster.items {
-            names.push(item.name.clone());
-            for p in &item.parts {
-                names.push(p.name.clone());
-            }
-        }
-        for name in relics.relics.keys() {
-            names.push(name.clone());
-        }
-        names.sort();
-        names.dedup();
-        let relic_names: HashSet<String> = relics.relics.keys().cloned().collect();
-        Some((Universe::from_names(&names), relic_names))
+        crate::capture::load_universe(&base.join("data")).ok()
     }
 
     /// Run one real fixture page through the full ingest path. `None`
@@ -1711,7 +2090,7 @@ mod tests {
         }
         let layouts = Layout::load_file(&base.join("data/capture/layouts.toml")).ok()?;
         let layout = layouts.get(layout_key)?.clone();
-        let (universe, relic_names) = seed_universe()?;
+        let (universe, relic_names, arcane_names) = seed_universe()?;
         let engine = match TesseractCliEngine::probe(layout.clone()) {
             Some(e) => e,
             None => {
@@ -1726,7 +2105,15 @@ mod tests {
         ));
         let _ = std::fs::create_dir_all(&dir);
         std::fs::copy(&src, dir.join(file)).ok()?;
-        let res = ingest_folder(&dir, &engine, &layout, &universe, &relic_names, &HashSet::new(), 0.5);
+        let res = ingest_folder(
+            &dir,
+            &engine,
+            &layout,
+            &universe,
+            &relic_names,
+            &arcane_names,
+            0.5,
+        );
         let _ = std::fs::remove_dir_all(&dir);
         res.ok().map(|(_, results)| results)
     }
@@ -1807,5 +2194,290 @@ mod tests {
             }
         }
         assert!(held >= 5, "parts held only {held}/33");
+    }
+
+    // -----------------------------------------------------------------
+    // Eighth pass §1/§3: Seth's real capture validation set (gitignored).
+    // Each test skips gracefully when the fixtures or tesseract are absent.
+    // -----------------------------------------------------------------
+
+    fn seth_relic_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/ocr-samples/seth-relics-2026-10-16/relics")
+    }
+
+    /// Ingest a real capture directory through the full pipeline (layout
+    /// key, seed universe). `None` when fixtures, seed data or a working
+    /// engine are missing.
+    fn ingest_real(dir: &Path, layout_key: &str) -> Option<(StockState, Vec<CellResult>)> {
+        if !dir.is_dir() {
+            eprintln!("skip {}: fixtures absent", dir.display());
+            return None;
+        }
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let layouts = Layout::load_file(&base.join("data/capture/layouts.toml")).ok()?;
+        let layout = layouts.get(layout_key)?.clone();
+        let (universe, relic_names, arcane_names) = seed_universe()?;
+        let engine = match TesseractCliEngine::probe(layout.clone()) {
+            Some(e) => e,
+            None => {
+                eprintln!("skip {}: no tesseract available", dir.display());
+                return None;
+            }
+        };
+        ingest_folder(dir, &engine, &layout, &universe, &relic_names, &arcane_names, 0.5).ok()
+    }
+
+    /// Seth's 9 relic shots, ingested once per test binary. The §1
+    /// validation test and the §2 sequence test share this (the second
+    /// caller blocks on the first, so the OCR pass runs only once).
+    fn seth_relics_cached() -> Option<&'static (StockState, Vec<CellResult>)> {
+        static CACHE: OnceLock<Option<(StockState, Vec<CellResult>)>> = OnceLock::new();
+        CACHE
+            .get_or_init(|| ingest_real(&seth_relic_dir(), "relic"))
+            .as_ref()
+    }
+
+    /// Seth's real Arcanes shot, ingested once per test binary, shared by
+    /// the §3 layout test and the §2 sequence test.
+    fn seth_arcanes_cached() -> Option<&'static (StockState, Vec<CellResult>)> {
+        static CACHE: OnceLock<Option<(StockState, Vec<CellResult>)>> = OnceLock::new();
+        CACHE
+            .get_or_init(|| {
+                let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+                let src = base.join("fixtures/ocr-samples/seth-arcanes-2026-10-16.png");
+                if !src.exists() {
+                    eprintln!("skip arcanes validation: fixture absent");
+                    return None;
+                }
+                let dir = std::env::temp_dir()
+                    .join(format!("fracker-ocr-arc-{}", std::process::id()));
+                let _ = std::fs::create_dir_all(&dir);
+                let copied = std::fs::copy(&src, dir.join("seth-arcanes.png")).is_ok();
+                let ingested = copied
+                    .then(|| ingest_real(&dir, "arcanes"))
+                    .flatten();
+                let _ = std::fs::remove_dir_all(&dir);
+                ingested
+            })
+            .as_ref()
+    }
+
+    #[test]
+    fn fixture_seth_relics_validation_set() {
+        // Eighth pass §1 drop forensics. Ingest Seth's 9 live 1440p
+        // relic shots and reproduce the Seth-confirmed cells, keep the
+        // tier split, and prove the overlapping-scroll union.
+        let Some((stock, results)) = seth_relics_cached() else {
+            return;
+        };
+        assert_eq!(results.len(), 693, "9 shots x 11x7 cells");
+
+        // Meso K4 x38: single stack, read correctly.
+        let k4 = stock.relics.get("Meso K4").expect("Meso K4 present");
+        assert_eq!(k4.total(), 38, "Meso K4 x38");
+
+        // Lith G6: TWO stacks in one shot — x36 (Intact) + x1 ([Radiant]).
+        // v0.2.0 kept 36 and discarded the split; we keep both.
+        let g6 = stock.relics.get("Lith G6").expect("Lith G6 present");
+        assert_eq!(g6.get(RefinementTier::Intact), 36, "G6 x36 intact stack");
+        assert_eq!(g6.get(RefinementTier::Radiant), 1, "G6 x1 radiant stack");
+        assert_eq!(g6.total(), 37, "G6 true total is 37");
+
+        // Lith S14 x40: the v0.2.0 drop. Named cause was the `$`/`S`
+        // glyph confusion (every S14 read as $14); the confusable fold
+        // makes it hold.
+        let s14 = stock.relics.get("Lith S14").expect("Lith S14 read");
+        assert_eq!(s14.get(RefinementTier::Intact), 40, "Seth's x40 S14 stack");
+
+        // Axi G10 appears x14 in two overlapping shots: the union must
+        // count it ONCE (v0.2.0's stock.json says 28).
+        assert_eq!(
+            stock.relics.get("Axi G10").map(RelicStacks::total),
+            Some(14),
+            "overlapping-scroll stack counted once"
+        );
+
+        // Axi A1's captured x8 stack validates (the '1'/'l' confusion).
+        assert_eq!(
+            stock.relics.get("Axi A1").map(RelicStacks::total),
+            Some(8),
+            "Axi A1 x8"
+        );
+
+        // Coverage: nearly every cell holds, and the union removes the
+        // v0.2.0 overlap double-counts (its name-only total was 3975).
+        let held = results.iter().filter(|r| r.held).count();
+        assert!(held >= 660, "held {held}/693");
+        assert!(stock.relic_stack_count() >= 540, "stacks {}", stock.relic_stack_count());
+        let copies: u32 = stock.relics.values().map(RelicStacks::total).sum();
+        assert!(copies < 3975, "union beats double-counting: {copies} < 3975");
+
+        // Tier classification accuracy, measured on the labeled subset:
+        // every cell whose raw read carried a refinement label must
+        // classify to a known tier (never a silent Unknown).
+        let labeled: Vec<&CellResult> = results
+            .iter()
+            .filter(|r| r.held && r.raw_text.contains('['))
+            .collect();
+        assert!(labeled.len() >= 20, "labeled cells found: {}", labeled.len());
+        let known = labeled
+            .iter()
+            .filter(|r| r.tier != RefinementTier::Unknown)
+            .count();
+        eprintln!(
+            "Seth relic tier classification: {known}/{} = {:.1}%",
+            labeled.len(),
+            100.0 * known as f64 / labeled.len() as f64
+        );
+        assert_eq!(known, labeled.len(), "every tier label classifies");
+        let radiant: u32 = stock
+            .relics
+            .values()
+            .map(|s| s.get(RefinementTier::Radiant))
+            .sum();
+        assert!(radiant > 0, "radiant split recorded for the planner");
+    }
+
+    #[test]
+    fn fixture_seth_arcanes_measured_layout() {
+        // Eighth pass §3: geometry measured from Seth's real Arcanes
+        // shot; reads validate against the arcane universe, counts are
+        // `xN` (blank = 1) and the rank is the five-diamond pip row.
+        let Some((stock, results)) = seth_arcanes_cached() else {
+            return;
+        };
+        assert_eq!(results.len(), 77, "11x7 arcane grid");
+        let held = results.iter().filter(|r| r.held).count();
+        assert!(held >= 70, "arcanes held {held}/77");
+
+        // The same arcane appears as MULTIPLE stacks at different ranks.
+        let av = stock.arcanes.get("Arcane Avenger").expect("Arcane Avenger");
+        assert!(av.ranks.len() >= 2, "Avenger at several ranks: {:?}", av.ranks);
+
+        // Rank pips: the x14 Arcane Guardian is rank 0; a plain Guardian
+        // (count 1) is rank 5.
+        let g = stock.arcanes.get("Arcane Guardian").expect("Arcane Guardian");
+        assert_eq!(g.get(0), 14, "Guardian x14 at rank 0");
+        assert_eq!(g.get(5), 1, "a rank-5 Guardian stack");
+
+        // Count convention: plain `xN` top-left, blank = 1 (x3 + plain).
+        let accel = stock
+            .arcanes
+            .get("Arcane Acceleration")
+            .expect("Arcane Acceleration");
+        assert_eq!(accel.total(), 4, "x3 + plain = 4");
+
+        // Two-line names ("Arcane Blade Charger") still validate.
+        assert!(
+            stock.arcanes.contains_key("Arcane Blade Charger"),
+            "two-line name validates"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Eighth pass §2: the box-side Capture Inventory gate. Feed Seth's real
+    // shots as overlapping frame sequences through the capture pipeline
+    // (no portal, no PipeWire) and prove the merged union equals the §1/§3
+    // validation results with no double counts.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn fixture_seth_capture_sequence_unions_without_double_counts() {
+        let Some(expected_relics) = seth_relics_cached() else {
+            return;
+        };
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let legend = "\n(skip §2 sequence: need the relic fixtures)";
+        if !seth_relic_dir().is_dir() {
+            eprintln!("{legend}");
+            return;
+        }
+        let data = match crate::capture::CaptureData::load(&base.join("data")) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("skip §2 sequence: {e}{legend}");
+                return;
+            }
+        };
+        let Some(layout) = data.layouts.get("relic").cloned() else {
+            eprintln!("skip §2 sequence: no relic layout{legend}");
+            return;
+        };
+        let Some(engine) = TesseractCliEngine::probe(layout) else {
+            eprintln!("skip §2 sequence: no tesseract{legend}");
+            return;
+        };
+
+        // Build an overlapping sequence: every shot appears twice (the
+        // second is byte-identical, exercising the unchanged-frame skip)
+        // and an untouched blank frame is sprinkled in (an unclassifiable
+        // "menu" frame that must pause collection silently).
+        let mut files: Vec<PathBuf> = std::fs::read_dir(seth_relic_dir())
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().map_or(false, |x| x == "png"))
+            .collect();
+        files.sort();
+        assert!(files.len() >= 9, "expected Seth's 9 relic shots");
+
+        let mut frames: Vec<GrayImage> = Vec::new();
+        for (i, f) in files.iter().enumerate() {
+            let bytes = std::fs::read(f).unwrap();
+            let img = GrayImage::from_bytes(&bytes).unwrap();
+            let blank = GrayImage::blank(img.width, img.height, 0);
+            frames.push(img.clone());
+            frames.push(blank); // unrelated frame between shots
+            frames.push(img); // the same shot again (skip path)
+            if i % 2 == 0 {
+                frames.push(GrayImage::blank(64, 64, 0));
+            }
+        }
+        // Include the real Arcanes screen too, so the sequence exercises
+        // the arcanes layout + rank keys.
+        let arcanes_png = base.join("fixtures/ocr-samples/seth-arcanes-2026-10-16.png");
+        if let Ok(bytes) = std::fs::read(&arcanes_png) {
+            if let Ok(img) = GrayImage::from_bytes(&bytes) {
+                frames.push(img.clone());
+                frames.push(img);
+            }
+        }
+
+        let mut source = crate::capture::SequenceSource::new(frames);
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let ctx = data.context();
+        let session = crate::capture::run_capture(
+            &ctx,
+            &engine,
+            &mut source,
+            &stop,
+            0,
+            |_| {},
+        )
+        .expect("sequence capture runs");
+
+        assert!(session.has_any(), "classified at least one inventory screen");
+        let got = session.stock();
+        // The union over overlapping frames equals the one-shot §1 ingest
+        // exactly: same tiers, same counts, no double counts.
+        assert_eq!(
+            got.relics, expected_relics.0.relics,
+            "§2 relic union must equal the §1 validation result"
+        );
+        // And the same for the Arcanes screen.
+        if let Some(expected_arc) = seth_arcanes_cached() {
+            assert_eq!(
+                got.arcanes, expected_arc.0.arcanes,
+                "§2 arcane union must equal the §3 validation result"
+            );
+        }
+        eprintln!(
+            "§2 sequence union: {} relic stacks, {} arcanes (frames seen {}, read {}, skipped {})",
+            got.relic_stack_count(),
+            got.arcane_stack_count(),
+            session.frames_seen(),
+            session.frames_read(),
+            session.frames_skipped(),
+        );
     }
 }

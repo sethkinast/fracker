@@ -27,6 +27,11 @@ cell_w = 127.0
 y0 = 116.0
 cell_h = 132.0
 name = [0.063, 0.742, 0.937, 0.894]
+# Refined stacks render a second text line (`[Radiant]`/`[Flawless]`/
+# `[Exceptional]`) below the name and shift the name up into this band.
+# The engine reads it only when the lower band holds a bare label, so the
+# common Intact cell still costs one OCR call (eighth pass §1).
+name_upper = [0.063, 0.62, 0.937, 0.75]
 count = [0.10, 0.06, 0.44, 0.26]
 count_style = "x"
 name_psm = 7

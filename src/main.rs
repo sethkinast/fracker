@@ -11,14 +11,13 @@
 //!
 //! `--ocr-ingest` is the one-shot inventory bootstrap (pass 5).
 
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use clap::Parser;
 use tokio::sync::mpsc;
 
-use fracker::{config, instance, model, ocr, report, resident, tray, tuning};
+use fracker::{capture, config, instance, ocr, report, resident, tray, tuning};
 
 /// Repo/install data file path. `$FRACKER_DATA_DIR`-aware (see
 /// `tuning::data_dir`), so the Flatpak install resolves data from
@@ -109,6 +108,7 @@ async fn run_demo(args: &Args) -> Result<(), String> {
         fixtures: args.fixtures.clone(),
         cache_dir: config::cache_dir(),
         out,
+        stock_path: tuning::data_dir().join("stock.json"),
         config_path: cfg_path,
         offline: args.offline,
         embed_icons: true,
@@ -153,6 +153,7 @@ async fn run_resident(args: &Args) -> Result<(), String> {
         fixtures: args.fixtures.clone(),
         cache_dir: config::cache_dir(),
         out: args.out.clone().unwrap_or_else(config::report_file),
+        stock_path: config::data_dir().join("stock.json"),
         config_path: cfg_path,
         offline: args.offline,
         embed_icons: false,
@@ -234,47 +235,10 @@ fn run_ocr_ingest(args: &Args, dir: &std::path::Path) -> Result<(), String> {
             )
         })?;
 
-    // Data-owned universe corrections apply here too (sixth pass §1):
-    // excluded entries and duplicate spellings never reach the OCR
-    // universe.
-    let scrub_path = data_file("exclusions.toml");
-    let scrub = model::UniverseScrub::from_toml(
-        &std::fs::read_to_string(&scrub_path)
-            .map_err(|e| format!("exclusions {}: {e}", scrub_path.display()))?,
-    )?;
-    // Arcane set (sixth pass §5): labeled stopgap until the first Arcanes
-    // capture; the screen is the steady-state arcane source (#34).
-    let arcane_path = data_file("arcanes.toml");
-    let arcanes = model::ArcaneManifest::from_toml(
-        &std::fs::read_to_string(&arcane_path)
-            .map_err(|e| format!("arcanes {}: {e}", arcane_path.display()))?,
-    )?;
-
     // Item universe: roster parts + gear + relic names + the arcane set,
-    // scrubbed (the same names the planner reasons about).
-    let rel_text = std::fs::read_to_string(data_file("cache/relictables.json"))
-        .map_err(|e| format!("seed relictables: {e}"))?;
-    let wish_text = std::fs::read_to_string(data_file("cache/wishlist.json"))
-        .map_err(|e| format!("seed wishlist: {e}"))?;
-    let relics = model::RelicTables::from_json(&rel_text)?;
-    let roster = model::Roster::from_json(&wish_text)?;
-    let mut names: Vec<String> = Vec::new();
-    for item in &roster.items {
-        names.push(item.name.clone());
-        for p in &item.parts {
-            names.push(p.name.clone());
-        }
-    }
-    for name in relics.relics.keys() {
-        names.push(name.clone());
-    }
-    names.extend(arcanes.names.iter().cloned());
-    let mut names = scrub.scrub_names(&names);
-    names.sort();
-    names.dedup();
-    let universe = ocr::Universe::from_names(&names);
-    let relic_names: HashSet<String> = relics.relics.keys().cloned().collect();
-    let arcane_names = arcanes.name_set();
+    // scrubbed (the same names the planner reasons about). Shared with the
+    // §2 Capture Inventory flow so the debug path and the tray flow agree.
+    let (universe, relic_names, arcane_names) = capture::load_universe(&tuning::data_dir())?;
 
     // Engine: tesseract when the binary exists, else the stub (empty
     // stock, never guesses) — status printed honestly either way.
@@ -300,13 +264,16 @@ fn run_ocr_ingest(args: &Args, dir: &std::path::Path) -> Result<(), String> {
     )?;
     stock.write_to(&args.stock_out)?;
     let held = results.iter().filter(|r| r.held).count();
+    let (relic_copies, part_copies, arcane_copies) = stock.totals();
     println!(
-        "ocr: {} cells, {} held ({} relics, {} parts, {} arcanes) -> {}",
+        "ocr: {} cells, {} held ({} relic stacks/{} copies, {} parts, {} arcane stacks/{} copies) -> {}",
         results.len(),
         held,
-        stock.relics.values().sum::<u32>(),
-        stock.parts.values().sum::<u32>(),
-        stock.arcanes.values().sum::<u32>(),
+        stock.relic_stack_count(),
+        relic_copies,
+        part_copies,
+        stock.arcane_stack_count(),
+        arcane_copies,
         args.stock_out.display(),
     );
     Ok(())

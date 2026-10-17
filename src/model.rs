@@ -997,19 +997,48 @@ impl OwnedEquipment {
     }
 }
 
+/// Relic holdings, tier-aware (eighth pass §1). The refinement screen
+/// shows one cell per (relic x tier); the planner consumes per-relic
+/// TOTALS plus the RADIANT split (radiant piles are cracked as-is;
+/// otherwise the tier is chosen by the refinement ladder).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnownStock {
+    /// relic -> total copies across all tiers.
+    pub totals: HashMap<String, u32>,
+    /// relic -> copies already at Radiant (cracked without spending traces).
+    pub radiant: HashMap<String, u32>,
+}
+
+impl KnownStock {
+    pub fn from_totals(totals: HashMap<String, u32>) -> Self {
+        Self {
+            totals,
+            radiant: HashMap::new(),
+        }
+    }
+}
+
 /// Relic holdings. Unknown until the §8.1 OCR bootstrap resolves it —
 /// then the planner ranks by coverage alone and labels "if you have it".
 #[derive(Debug, Clone)]
 pub enum RelicStock {
     Unknown,
-    Known(HashMap<String, u32>),
+    Known(KnownStock),
 }
 
 impl RelicStock {
     pub fn count(&self, relic: &str) -> Option<u32> {
         match self {
             RelicStock::Unknown => None,
-            RelicStock::Known(m) => Some(m.get(relic).copied().unwrap_or(0)),
+            RelicStock::Known(k) => Some(k.totals.get(relic).copied().unwrap_or(0)),
+        }
+    }
+
+    /// Copies already at Radiant for `relic` (`None` = stock unknown).
+    pub fn radiant_count(&self, relic: &str) -> Option<u32> {
+        match self {
+            RelicStock::Unknown => None,
+            RelicStock::Known(k) => Some(k.radiant.get(relic).copied().unwrap_or(0)),
         }
     }
 
@@ -1119,24 +1148,26 @@ mod tests {
     }
 
     #[test]
-    fn arcane_manifest_loads_labeled_stopgap() {
-        // Sixth pass §5: the arcane set is data, LABELED as a stopgap
-        // until Seth's first Arcanes capture.
+    fn arcane_manifest_carries_the_full_universe() {
+        // Eighth pass §3: the arcane set is now the real, data-owned
+        // universe derived from the item dataset (172 names), superseding
+        // the spoken-debrief stopgap. OCR reads validate against it.
         let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let m = ArcaneManifest::from_toml(
             &std::fs::read_to_string(base.join("data/arcanes.toml")).unwrap(),
         )
         .unwrap();
-        assert_eq!(m.names.len(), 11, "the Taubound arcane set");
-        assert!(
-            m.label.to_lowercase().contains("stopgap"),
-            "must be labeled a stopgap: {}",
-            m.label
-        );
+        assert_eq!(m.names.len(), 172, "the arcane universe");
+        assert!(!m.label.is_empty());
         assert!(m.name_set().contains("Melee Influence"));
-        // The three still below rank 5 per the pack.
-        for n in ["Melee Animosity", "Melee Vortex", "Secondary Surge"] {
-            assert!(m.name_set().contains(n), "missing {n}");
+        // Names visible in Seth's real Arcanes capture must validate.
+        for n in [
+            "Arcane Avenger",
+            "Arcane Acceleration",
+            "Akimbo Slip Shot",
+            "Arcane Blade Charger",
+        ] {
+            assert!(m.name_set().contains(n), "missing captured name {n}");
         }
     }
 
