@@ -241,3 +241,13 @@ it refines the brief where they disagree. For the next worker pass.
     under his internal faction name. Add a data-owned label
     map: main pool -> "Syndicates", Library -> "Simaris", and
     audit every other family suffix the same way.
+39. **Capture Inventory is a tray flow, not files (Seth,
+    2026-10-16).** Seth rejected the screenshot-folder + CLI
+    ingest UX after one use. Final-product flow: "Capture
+    Inventory" verb in the tray; he then simply scrolls his
+    inventory in-game while Fracker watches the screen (XDG
+    ScreenCast portal + PipeWire, one consent), classifies
+    which inventory screen he is on (relics / parts / arcanes),
+    and collects stacks as they scroll past, deduped by stack
+    identity. The CLI --ocr-ingest path remains as a debug /
+    calibration tool only.
