@@ -39,13 +39,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use serde::Serialize;
 use zbus::zvariant::{DynamicType, Fd, ObjectPath, OwnedValue, Value};
 
-use crate::capture::FrameSource;
+use crate::capture::{CaptureLog, FrameSource};
 use crate::ocr::GrayImage;
 
 // ---------------------------------------------------------------------------
@@ -667,10 +667,27 @@ impl PwApi {
 const PW_DIRECTION_INPUT: c_int = 1;
 /// `PW_ID_ANY`.
 const PW_ID_ANY: u32 = 0xffff_ffff;
-/// `PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_DONT_RECONNECT`.
-const PW_STREAM_FLAGS: u32 = (1 << 2) | (1 << 7);
+/// `PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS |
+/// PW_STREAM_FLAG_DONT_RECONNECT`.
+///
+/// **AUTOCONNECT is required for a portal screencast** (ninth pass §1 root
+/// cause): `OpenPipeWireRemote` hands back a private PipeWire core whose
+/// single node is the screen being cast. With `target_id = PW_ID_ANY` and
+/// no AUTOCONNECT the input stream is created on the core but never linked
+/// to that node, so `pw_stream_connect` returns 0 while the stream sits
+/// idle forever: `process` never fires, no error state is entered, and the
+/// UI would block with no signal. The canonical portal consumer flags are
+/// `AUTOCONNECT | MAP_BUFFERS | (RT_PROCESS?)`, so the missing bit was the
+/// whole post-consent failure.
+const PW_STREAM_FLAGS: u32 = (1 << 0) | (1 << 2) | (1 << 7);
 /// `PW_STREAM_STATE_ERROR`.
 const PW_STREAM_STATE_ERROR: i32 = -1;
+/// How long to wait for the first frame before declaring the stream
+/// unlinked. Consent is already granted by the time we connect, so a
+/// healthy stream delivers within a beat; this only exists so a stream
+/// that never links (e.g. the AUTOCONNECT bug above) surfaces in the tray
+/// instead of hanging the capture forever.
+const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// State shared with the PipeWire callbacks. The pointers into `api` and
 /// `stream` are only ever touched from the PipeWire thread; the channel
@@ -681,6 +698,8 @@ struct StreamCtx {
     tx: Sender<GrayImage>,
     format: AtomicU32,
     err: Arc<Mutex<Option<String>>>,
+    /// Verbatim PipeWire stream-state + error log (ninth pass §1).
+    log: CaptureLog,
 }
 
 /// A live PipeWire screencast stream yielding grayscale frames. Dropping
@@ -697,6 +716,11 @@ pub struct ScreenCastSource {
     err: Arc<Mutex<Option<String>>>,
     size: (u32, u32),
     connected: bool,
+    /// Deadline for the first frame; a stream that never links fails here
+    /// instead of stalling the capture forever.
+    first_frame_deadline: Instant,
+    got_first: bool,
+    log: CaptureLog,
 }
 
 // The source is created and consumed on one thread; PipeWire stream
@@ -706,10 +730,12 @@ unsafe impl Send for ScreenCastSource {}
 
 impl ScreenCastSource {
     /// Build and connect a stream on the negotiated remote fd. Call from
-    /// a non-async context (it starts a PipeWire thread loop).
+    /// a non-async context (it starts a PipeWire thread loop). `log`
+    /// receives every PipeWire state transition + error verbatim.
     pub fn new(
         negotiated: Negotiated,
         stop: Arc<AtomicBool>,
+        log: CaptureLog,
     ) -> Result<Self, String> {
         let api = PwApi::load()?;
         unsafe {
@@ -736,6 +762,7 @@ impl ScreenCastSource {
             tx,
             format: AtomicU32::new(pod::SPA_VIDEO_FORMAT_BGRA),
             err: err.clone(),
+            log: log.clone(),
         });
         let mut ctx = ctx;
         let events = Box::new(StreamEvents {
@@ -807,6 +834,7 @@ impl ScreenCastSource {
         let stream = match result {
             Ok(s) => s,
             Err(e) => {
+                log.record("connecting", &e);
                 unsafe {
                     (api.pw_thread_loop_stop)(thread_loop);
                     (api.pw_thread_loop_destroy)(thread_loop);
@@ -814,6 +842,10 @@ impl ScreenCastSource {
                 return Err(e);
             }
         };
+        log.record(
+            "connecting",
+            "PipeWire stream connected (AUTOCONNECT); awaiting first frame",
+        );
         // The negotiated fd is now owned by PipeWire; leak the OwnedFd so
         // it is not double-closed (pw_context_connect_fd dup'd it).
         std::mem::forget(negotiated.fd);
@@ -830,6 +862,9 @@ impl ScreenCastSource {
             err,
             size,
             connected: true,
+            first_frame_deadline: Instant::now() + FIRST_FRAME_TIMEOUT,
+            got_first: false,
+            log,
         })
     }
 
@@ -847,13 +882,44 @@ impl FrameSource for ScreenCastSource {
             }
             if let Ok(mut e) = self.err.lock() {
                 if let Some(msg) = e.take() {
+                    self.log.record("capturing", &msg);
                     return Err(msg);
                 }
             }
             match self.rx.recv_timeout(Duration::from_millis(250)) {
-                Ok(img) => return Ok(Some(img)),
-                Err(RecvTimeoutError::Timeout) => continue,
-                Err(RecvTimeoutError::Disconnected) => return Ok(None),
+                Ok(img) => {
+                    if !self.got_first {
+                        self.got_first = true;
+                        self.log.record(
+                            "capturing",
+                            "first frame received; stream is linked",
+                        );
+                    }
+                    return Ok(Some(img));
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    // A stream that never links (no AUTOCONNECT, wrong
+                    // node, permission) produces no error state — only
+                    // silence. Surface the stall instead of blocking.
+                    if !self.got_first && Instant::now() >= self.first_frame_deadline {
+                        let msg = format!(
+                            "PipeWire: no first frame within {}s — stream never linked",
+                            FIRST_FRAME_TIMEOUT.as_secs()
+                        );
+                        self.log.record("capturing", &msg);
+                        return Err(msg);
+                    }
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    if !self.got_first {
+                        let msg =
+                            "PipeWire: frame channel closed before the first frame".to_owned();
+                        self.log.record("capturing", &msg);
+                        return Err(msg);
+                    }
+                    return Ok(None);
+                }
             }
         }
     }
@@ -877,14 +943,28 @@ impl Drop for ScreenCastSource {
 
 unsafe extern "C" fn on_state_changed(
     data: *mut c_void,
-    _old: i32,
+    old: i32,
     state: i32,
     error: *const c_char,
 ) {
-    if data.is_null() || state != PW_STREAM_STATE_ERROR {
+    if data.is_null() {
         return;
     }
     let ctx = &mut *(data as *mut StreamCtx);
+    let detail = if error.is_null() {
+        String::new()
+    } else {
+        let s = std::ffi::CStr::from_ptr(error).to_string_lossy();
+        format!(" ({s})")
+    };
+    // Every transition goes to the capture log verbatim (ninth pass §1).
+    ctx.log.record(
+        "connecting",
+        &format!("PipeWire stream state {old} -> {state}{detail}"),
+    );
+    if state != PW_STREAM_STATE_ERROR {
+        return;
+    }
     let msg = if error.is_null() {
         "PipeWire stream entered the error state".to_owned()
     } else {

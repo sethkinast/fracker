@@ -28,8 +28,9 @@
 //! [`SequenceSource`]. Nothing here touches the network.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
 
@@ -548,6 +549,250 @@ pub fn captured_summary(session: &CaptureSession) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Capture lifecycle (ninth pass §1)
+// ---------------------------------------------------------------------------
+
+/// The capture lifecycle stages Seth sees in the tray. The whole flow is
+/// one single-shot pipeline; the tray reflects exactly where it is, and
+/// **every** failure lands in [`CaptureStage::Error`] naming the stage that
+/// failed (never a silent stall — item 40a).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaptureStage {
+    /// No capture running.
+    Idle,
+    /// The ScreenCast consent dialog is up (or the portal is being asked).
+    ConsentPending,
+    /// Consent granted; opening the PipeWire remote / connecting the stream.
+    Connecting,
+    /// Frames flowing; per-bucket counts accrue.
+    Capturing,
+    /// Scroll done; captured buckets are being written to stock + report.
+    Finalizing,
+    /// A stage failed. `stage` names it; `message` is the verbatim
+    /// D-Bus/PipeWire error so nothing is swallowed.
+    Error { stage: &'static str, message: String },
+}
+
+impl CaptureStage {
+    /// Human label for the tray status line.
+    pub fn label(&self) -> String {
+        match self {
+            CaptureStage::Idle => "idle".to_owned(),
+            CaptureStage::ConsentPending => "consent pending".to_owned(),
+            CaptureStage::Connecting => "connecting".to_owned(),
+            CaptureStage::Capturing => "capturing".to_owned(),
+            CaptureStage::Finalizing => "finalizing".to_owned(),
+            CaptureStage::Error { stage, message } => format!("error ({stage}): {message}"),
+        }
+    }
+
+    /// A capture is in flight (any stage except Idle/Error). The tray uses
+    /// this to relabel the toggle "Stop capture".
+    pub fn is_active(&self) -> bool {
+        matches!(
+            self,
+            CaptureStage::ConsentPending
+                | CaptureStage::Connecting
+                | CaptureStage::Capturing
+                | CaptureStage::Finalizing
+        )
+    }
+
+    pub fn is_error(&self) -> bool {
+        matches!(self, CaptureStage::Error { .. })
+    }
+}
+
+/// The live capture state: current stage plus the running per-bucket
+/// counts. Pure — the resident owns one behind the status mutex, so the
+/// transition rules and failure surfacing are unit-testable with a fake
+/// frame source (ninth pass §1 gate).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureLifecycle {
+    stage: CaptureStage,
+    counts: CaptureCounts,
+}
+
+impl Default for CaptureLifecycle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CaptureLifecycle {
+    pub fn new() -> Self {
+        Self {
+            stage: CaptureStage::Idle,
+            counts: CaptureCounts::default(),
+        }
+    }
+
+    pub fn stage(&self) -> &CaptureStage {
+        &self.stage
+    }
+
+    pub fn counts(&self) -> CaptureCounts {
+        self.counts
+    }
+
+    /// Move to `stage`, returning the stage we came from. Callers record
+    /// the transition (the machine itself does no I/O, so it stays pure).
+    pub fn set_stage(&mut self, stage: CaptureStage) -> CaptureStage {
+        let previous = std::mem::replace(&mut self.stage, stage);
+        if !matches!(self.stage, CaptureStage::Capturing) {
+            // Counts only mean anything while capturing; clear on every
+            // other transition so a stale count never shows.
+            self.counts = CaptureCounts::default();
+        }
+        previous
+    }
+
+    /// Record a failure at `stage` (verbatim message). The stage becomes
+    /// [`CaptureStage::Error`] naming it — the visible failure surface.
+    pub fn fail(&mut self, stage: &'static str, message: impl Into<String>) {
+        self.stage = CaptureStage::Error {
+            stage,
+            message: message.into(),
+        };
+        self.counts = CaptureCounts::default();
+    }
+
+    pub fn set_counts(&mut self, counts: CaptureCounts) {
+        self.counts = counts;
+    }
+
+    /// One line for the tray: the stage, plus live counts while capturing.
+    pub fn status_line(&self) -> String {
+        match &self.stage {
+            CaptureStage::Capturing => format!(
+                "Capture: capturing — {} relic stacks, {} parts, {} arcanes",
+                self.counts.relic_stacks, self.counts.parts, self.counts.arcanes
+            ),
+            other => format!("Capture: {}", other.label()),
+        }
+    }
+}
+
+/// Append-only capture log in the app data dir (ninth pass §1): every
+/// lifecycle transition and every verbatim D-Bus/PipeWire failure lands
+/// here, so a silent post-consent stall is impossible to miss. Cheap to
+/// clone (shared handle) and safe to write from the PipeWire thread.
+#[derive(Clone)]
+pub struct CaptureLog {
+    path: PathBuf,
+    file: Arc<Mutex<Option<std::fs::File>>>,
+}
+
+impl CaptureLog {
+    /// Open (append) `<data_dir>/capture.log`. Failure to open is not
+    /// fatal: the log degrades to a no-op and the tray still shows state.
+    pub fn open(data_dir: &Path) -> Self {
+        let path = data_dir.join("capture.log");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .ok();
+        Self {
+            path,
+            file: Arc::new(Mutex::new(file)),
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Append one timestamped line: `<local time> [stage] message`.
+    pub fn record(&self, stage: &str, message: &str) {
+        let Ok(mut guard) = self.file.lock() else {
+            return;
+        };
+        let Some(f) = guard.as_mut() else {
+            return;
+        };
+        use std::io::Write;
+        let stamp = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z");
+        let _ = writeln!(f, "{stamp} [{stage}] {message}");
+    }
+}
+
+/// A frame source that yields `good` frames, then fails with `msg` — the
+/// fake failing source the §1 gate uses to prove a mid-capture frame
+/// failure surfaces instead of stalling.
+pub struct FailingSource {
+    remaining: usize,
+    msg: String,
+}
+
+impl FailingSource {
+    pub fn after(good: usize, msg: impl Into<String>) -> Self {
+        Self {
+            remaining: good,
+            msg: msg.into(),
+        }
+    }
+}
+
+impl FrameSource for FailingSource {
+    fn next_frame(&mut self) -> Result<Option<GrayImage>, String> {
+        if self.remaining == 0 {
+            return Err(self.msg.clone());
+        }
+        self.remaining -= 1;
+        Ok(Some(GrayImage::blank(4, 4, 7)))
+    }
+}
+
+/// Drive one capture through the full lifecycle with injected stage
+/// actions. The resident's real actions are portal/PipeWire I/O; the §1
+/// gate injects fakes that fail at each stage. Every `Err` lands the
+/// machine in [`CaptureStage::Error`] naming the stage and is returned
+/// verbatim.
+pub fn run_capture_flow<O, C, D, F>(
+    lifecycle: &mut CaptureLifecycle,
+    open_consent: O,
+    connect: C,
+    drain: D,
+    finalize: F,
+) -> Result<CaptureSession, String>
+where
+    O: FnOnce() -> Result<(), String>,
+    C: FnOnce() -> Result<Box<dyn FrameSource>, String>,
+    D: FnOnce(&mut dyn FrameSource, &mut CaptureLifecycle) -> Result<CaptureSession, String>,
+    F: FnOnce(&CaptureSession) -> Result<(), String>,
+{
+    lifecycle.set_stage(CaptureStage::ConsentPending);
+    if let Err(e) = open_consent() {
+        lifecycle.fail("consent pending", e.clone());
+        return Err(e);
+    }
+    lifecycle.set_stage(CaptureStage::Connecting);
+    let mut source = match connect() {
+        Ok(s) => s,
+        Err(e) => {
+            lifecycle.fail("connecting", e.clone());
+            return Err(e);
+        }
+    };
+    lifecycle.set_stage(CaptureStage::Capturing);
+    let session = match drain(source.as_mut(), lifecycle) {
+        Ok(s) => s,
+        Err(e) => {
+            lifecycle.fail("capturing", e.clone());
+            return Err(e);
+        }
+    };
+    lifecycle.set_stage(CaptureStage::Finalizing);
+    if let Err(e) = finalize(&session) {
+        lifecycle.fail("finalizing", e.clone());
+        return Err(e);
+    }
+    lifecycle.set_stage(CaptureStage::Idle);
+    Ok(session)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -678,5 +923,165 @@ mod tests {
         assert!(src.next_frame().unwrap().is_none());
         let u = Universe::from_names(&["Lith G6".to_owned()]);
         assert_eq!(u.len(), 1);
+    }
+
+    // ---- §1 capture lifecycle ----
+
+    #[test]
+    fn lifecycle_transitions_and_counts_render_in_the_status_line() {
+        let mut lc = CaptureLifecycle::new();
+        assert_eq!(*lc.stage(), CaptureStage::Idle);
+        assert_eq!(lc.status_line(), "Capture: idle");
+        assert!(!lc.stage().is_active());
+
+        lc.set_stage(CaptureStage::ConsentPending);
+        assert_eq!(lc.status_line(), "Capture: consent pending");
+        assert!(lc.stage().is_active());
+
+        lc.set_stage(CaptureStage::Connecting);
+        assert_eq!(lc.status_line(), "Capture: connecting");
+
+        lc.set_stage(CaptureStage::Capturing);
+        lc.set_counts(CaptureCounts {
+            relic_stacks: 12,
+            parts: 3,
+            arcanes: 1,
+        });
+        assert_eq!(
+            lc.status_line(),
+            "Capture: capturing — 12 relic stacks, 3 parts, 1 arcanes"
+        );
+
+        lc.set_stage(CaptureStage::Finalizing);
+        // Counts do not leak past capturing.
+        assert_eq!(lc.status_line(), "Capture: finalizing");
+        assert_eq!(lc.counts(), CaptureCounts::default());
+
+        lc.set_stage(CaptureStage::Idle);
+        assert_eq!(lc.status_line(), "Capture: idle");
+    }
+
+    #[test]
+    fn lifecycle_surfaces_a_failure_naming_the_stage() {
+        let mut lc = CaptureLifecycle::new();
+        lc.set_stage(CaptureStage::Connecting);
+        lc.fail("connecting", "PipeWire: pw_stream_connect failed (-1)");
+        assert!(lc.stage().is_error());
+        assert!(!lc.stage().is_active());
+        let line = lc.status_line();
+        assert!(
+            line.contains("error (connecting)") && line.contains("pw_stream_connect failed (-1)"),
+            "the verbatim failure must survive into the status line: {line}"
+        );
+    }
+
+    #[test]
+    fn capture_flow_fails_at_each_stage_with_a_visible_stage_name() {
+        // The §1 gate: a fake failure injected at each seam must land the
+        // state machine in Error naming that stage — never a silent stall.
+        let run = |which: &str| {
+            let mut lc = CaptureLifecycle::new();
+            let res = run_capture_flow(
+                &mut lc,
+                || {
+                    if which == "consent" {
+                        Err("portal: user cancelled".to_owned())
+                    } else {
+                        Ok(())
+                    }
+                },
+                || {
+                    if which == "connect" {
+                        Err("PipeWire: pw_context_connect_fd failed".to_owned())
+                    } else if which == "capture" {
+                        // A fake source that yields one frame then fails.
+                        Ok(Box::new(FailingSource::after(
+                            1,
+                            "PipeWire stream error: no first frame",
+                        )) as Box<dyn FrameSource>)
+                    } else {
+                        Ok(Box::new(SequenceSource::new(vec![
+                            GrayImage::blank(4, 4, 7),
+                            GrayImage::blank(4, 4, 9),
+                        ])) as Box<dyn FrameSource>)
+                    }
+                },
+                |source, lifecycle| {
+                    let universe = Universe::from_names(&[]);
+                    let layouts = HashMap::new();
+                    let relic_names = HashSet::new();
+                    let arcane_names = HashSet::new();
+                    let classifier = ScreenClassifier::default();
+                    let ctx = CaptureContext {
+                        layouts: &layouts,
+                        universe: &universe,
+                        relic_names: &relic_names,
+                        arcane_names: &arcane_names,
+                        classifier: &classifier,
+                        min_confidence: 0.5,
+                    };
+                    let session = run_capture(
+                        &ctx,
+                        &crate::ocr::StubEngine,
+                        source,
+                        &AtomicBool::new(false),
+                        0,
+                        |_| {},
+                    )?;
+                    lifecycle.set_counts(session.counts());
+                    Ok(session)
+                },
+                |_| {
+                    if which == "finalize" {
+                        Err("stock write: permission denied".to_owned())
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            (lc, res)
+        };
+
+        for (which, stage) in [
+            ("consent", "consent pending"),
+            ("connect", "connecting"),
+            ("capture", "capturing"),
+            ("finalize", "finalizing"),
+        ] {
+            let (lc, res) = run(which);
+            assert!(res.is_err(), "{which} must fail");
+            match lc.stage() {
+                CaptureStage::Error { stage: s, message } => {
+                    assert_eq!(*s, stage, "failing stage name for {which}");
+                    assert!(!message.is_empty());
+                }
+                other => panic!("{which} should land in Error, got {other:?}"),
+            }
+        }
+
+        // The happy path still completes: Idle, never Error.
+        let (lc, res) = run("ok");
+        assert!(res.is_ok());
+        assert_eq!(*lc.stage(), CaptureStage::Idle);
+    }
+
+    #[test]
+    fn capture_log_appends_timestamped_lines() {
+        let dir = std::env::temp_dir().join(format!("fracker-caplog-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = CaptureLog::open(&dir);
+        assert_eq!(log.path(), dir.join("capture.log"));
+        log.record("connecting", "PipeWire: pw_stream_connect failed (-1)");
+        log.record("capturing", "first frame after 42ms");
+        let text = std::fs::read_to_string(log.path()).unwrap();
+        assert!(text.contains("[connecting] PipeWire: pw_stream_connect failed (-1)"));
+        assert!(text.contains("[capturing] first frame after 42ms"));
+        // Clone shares the same file so a worker thread can append too.
+        let clone = log.clone();
+        clone.record("finalizing", "writing 2 relic stacks");
+        let text = std::fs::read_to_string(log.path()).unwrap();
+        assert!(text.contains("[finalizing] writing 2 relic stacks"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
