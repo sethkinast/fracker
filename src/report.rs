@@ -313,10 +313,9 @@ pub async fn generate(
         world: &world,
         generated_label: now.format("%Y-%m-%d %H:%M UTC").to_string(),
         targets_status: format!(
-            "backlog {} primes · profile {} (MR{})",
+            "backlog {} primes · profile {}",
             backlog.primes.unmastered.len(),
             profile_status,
-            mastery_rank,
         ),
         world_status,
         weekly_done: &weekly_done,
