@@ -105,13 +105,16 @@ fn donow_alert_section(
     for a in alerts {
         let est = tuning.missions.base_minutes(&a.mission_type) as u32
             + tuning.missions.overhead as u32;
+        let done_cls = if a.done { " done" } else { "" };
+        let done_note = if a.done { " · log &check;" } else { "" };
         h.push_str(&format!(
-            "<div class=\"card exp {cls}\"><span class=\"exp-title\">{} ({}) — {}</span>\n<span class=\"exp-sub\">{} left · ~{}m</span></div>\n",
+            "<div class=\"card exp {cls}{done_cls}\"><span class=\"exp-title\">{} ({}) — {}</span>\n<span class=\"exp-sub\">{} left · ~{}m{}</span></div>\n",
             esc(&a.node),
             esc(&a.mission_type),
             esc(&a.payout),
             esc(&a.left),
             est,
+            done_note,
         ));
     }
     h.push_str("</div>\n");
@@ -848,6 +851,8 @@ section { margin-bottom: 6px; }
 .do-sub { color: #7e8898; margin-top: 6px; }
 .expiring { display: grid; gap: 2px; margin-top: 8px; }
 .exp { padding: 12px 16px; }
+.exp.done { opacity: .5; }
+.exp.done .exp-title { text-decoration: line-through; }
 .exp-title { font-family: Rajdhani, sans-serif; font-weight: 600; font-size: 16px; }
 .exp-sub { color: #7e8898; font-size: 13px; display: block; margin-top: 2px; }
 .slate { display: grid; gap: 2px; }
@@ -1385,12 +1390,14 @@ mod tests {
                 mission_type: "Survival".to_owned(),
                 payout: "50× Road To Tau Event Resource".to_owned(),
                 left: "25m".to_owned(),
+                done: true,
             }],
             lotus_alerts: vec![AlertView {
                 node: "Larunda (Mercury)".to_owned(),
                 mission_type: "Capture".to_owned(),
                 payout: "Orokin Catalyst".to_owned(),
                 left: "1h05m".to_owned(),
+                done: false,
             }],
             resurgence: Some(ResurgenceView {
                 contact: "Varzia".to_owned(),
@@ -1414,6 +1421,9 @@ mod tests {
         assert!(html.contains("50× Road To Tau Event Resource"));
         assert!(html.contains("25m left"));
         assert!(html.contains("Larunda (Mercury)"));
+        // Ninth pass §4: a log-proven alert renders struck with the proof.
+        assert!(html.contains("class=\"card exp evt done\""));
+        assert!(html.contains("log &check;"));
         let evt_pos = html.find("Nimus (Eris)").unwrap();
         let lotus_pos = html.find("Larunda (Mercury)").unwrap();
         assert!(evt_pos < lotus_pos, "events render before gifts");

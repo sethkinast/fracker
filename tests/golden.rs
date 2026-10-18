@@ -75,6 +75,7 @@ fn golden_plan_recompute() -> Golden {
         pins,
         recent_gear: recent,
         steel_path_tiebreak: true,
+        completed_missions: &[],
         tuning,
     };
     let plan = plan::plan(&input);

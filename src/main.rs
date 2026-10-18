@@ -113,7 +113,7 @@ async fn run_demo(args: &Args) -> Result<(), String> {
         offline: args.offline,
         embed_icons: true,
     };
-    let outcome = report::generate(&cfg).await?;
+    let outcome = report::generate(&cfg, &[]).await?;
     println!("demo: {} -> {}", outcome.summary(), outcome.out.display());
     println!(
         "demo: icons {}/{} · profile MR{} · endpoints: {}",

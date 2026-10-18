@@ -137,6 +137,11 @@ pub async fn run(
 ) -> Result<(), String> {
     let (trigger_tx, mut trigger_rx) = mpsc::unbounded_channel::<Trigger>();
     let capture_log = CaptureLog::open(&opts.state_dir);
+    // Ninth pass §4: the log-proven mission ledger the watch thread fills
+    // and every report reads. Shared so the report path always sees the
+    // latest completions, and seeded from persisted state so a restart
+    // mid-session keeps its strikes.
+    let completions: Arc<Mutex<Vec<elog::MissionCompletion>>> = Arc::new(Mutex::new(Vec::new()));
     let watch_thread = spawn_watch(
         opts.log_path.clone(),
         opts.watch_interval_ms,
@@ -144,6 +149,7 @@ pub async fn run(
         status.clone(),
         trigger_tx,
         shutdown.receiver(),
+        completions.clone(),
     );
 
     let mut sd = shutdown.receiver();
@@ -165,15 +171,15 @@ pub async fn run(
                 // Coalesce a burst (e.g. session start + mission end in
                 // one read) into a single report run.
                 while trigger_rx.try_recv().is_ok() {}
-                do_report(&opts, &status, &tray, trigger).await;
+                do_report(&opts, &status, &tray, trigger, &completions).await;
             }
             cmd = recv_cmd(&mut cmds) => {
                 match cmd {
                     Some(TrayCommand::Regenerate) => {
-                        do_report(&opts, &status, &tray, Trigger::Manual).await;
+                        do_report(&opts, &status, &tray, Trigger::Manual, &completions).await;
                     }
                     Some(TrayCommand::OpenPage) => {
-                        open_page(&opts, &status, &tray).await;
+                        open_page(&opts, &status, &tray, &completions).await;
                     }
                     Some(TrayCommand::CaptureInventory) => {
                         toggle_capture(&opts, &status, &tray, &mut capture, &capture_log).await;
@@ -182,7 +188,8 @@ pub async fn run(
                 }
             }
             _ = tick.tick() => {
-                pump_capture(&opts, &status, &tray, &mut capture, &capture_log).await;
+                pump_capture(&opts, &status, &tray, &mut capture, &capture_log, &completions)
+                    .await;
             }
         }
     };
@@ -376,6 +383,7 @@ async fn pump_capture(
     tray: &Option<ksni::Handle<FrackerTray>>,
     capture: &mut Option<CaptureRun>,
     log: &CaptureLog,
+    completions: &Arc<Mutex<Vec<elog::MissionCompletion>>>,
 ) {
     let Some(run) = capture.as_ref() else { return };
     let mut stages: Vec<CaptureStage> = Vec::new();
@@ -422,7 +430,7 @@ async fn pump_capture(
 
     match finished {
         Some(CaptureEvent::Finished(session)) => {
-            finalize_capture(opts, status, tray, *session, log).await;
+            finalize_capture(opts, status, tray, *session, log, completions).await;
             stop_capture(capture);
         }
         Some(CaptureEvent::Failed { stage, message }) => {
@@ -444,6 +452,7 @@ async fn finalize_capture(
     tray: &Option<ksni::Handle<FrackerTray>>,
     session: CaptureSession,
     log: &CaptureLog,
+    completions: &Arc<Mutex<Vec<elog::MissionCompletion>>>,
 ) {
     set_capture_stage(status, log, CaptureStage::Finalizing);
     if !session.has_any() {
@@ -479,7 +488,7 @@ async fn finalize_capture(
     println!("resident: {summary} -> {}", path.display());
     log.record("finalizing", &format!("{summary} -> {}", path.display()));
     // Regenerate the plan from the fresh stock (and refresh the tray).
-    do_report(opts, status, tray, Trigger::Manual).await;
+    do_report(opts, status, tray, Trigger::Manual, completions).await;
     set_capture_stage(status, log, CaptureStage::Idle);
 }
 
@@ -507,9 +516,14 @@ async fn do_report(
     status: &Arc<Mutex<TrayStatus>>,
     tray: &Option<ksni::Handle<FrackerTray>>,
     trigger: Trigger,
+    completions: &Arc<Mutex<Vec<elog::MissionCompletion>>>,
 ) {
     println!("resident: regenerating page ({trigger:?})");
-    match report::generate(&opts.report).await {
+    let proven: Vec<elog::MissionCompletion> = completions
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+    match report::generate(&opts.report, &proven).await {
         Ok(outcome) => {
             if let Ok(mut s) = status.lock() {
                 s.last_report = Some(chrono::Local::now().format("%H:%M:%S").to_string());
@@ -538,11 +552,16 @@ async fn open_page(
     opts: &ResidentOptions,
     status: &Arc<Mutex<TrayStatus>>,
     tray: &Option<ksni::Handle<FrackerTray>>,
+    completions: &Arc<Mutex<Vec<elog::MissionCompletion>>>,
 ) {
     let out = &opts.report.out;
     if !out.exists() {
         println!("resident: no report yet; generating before open");
-        if let Err(e) = report::generate(&opts.report).await {
+        let proven: Vec<elog::MissionCompletion> = completions
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        if let Err(e) = report::generate(&opts.report, &proven).await {
             eprintln!("resident: report failed: {e}");
             if let Ok(mut s) = status.lock() {
                 s.last_error = Some(e);
@@ -584,6 +603,7 @@ fn spawn_watch(
     status: Arc<Mutex<TrayStatus>>,
     trigger_tx: mpsc::UnboundedSender<Trigger>,
     shutdown: watch::Receiver<bool>,
+    completions: Arc<Mutex<Vec<elog::MissionCompletion>>>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         if let Err(e) = watch_loop(
@@ -593,6 +613,7 @@ fn spawn_watch(
             status.clone(),
             trigger_tx,
             shutdown,
+            completions,
         ) {
             eprintln!("resident: watch stopped: {e}");
             if let Ok(mut s) = status.lock() {
@@ -600,6 +621,11 @@ fn spawn_watch(
             }
         }
     })
+}
+
+/// The UTC date (`YYYY-MM-DD`) the §4 mission ledger is scoped to.
+fn today_utc() -> String {
+    chrono::Utc::now().format("%Y-%m-%d").to_string()
 }
 
 /// The watch loop: reconcile, tail, classify, trigger, persist.
@@ -610,6 +636,7 @@ fn watch_loop(
     status: Arc<Mutex<TrayStatus>>,
     trigger_tx: mpsc::UnboundedSender<Trigger>,
     shutdown: watch::Receiver<bool>,
+    completions: Arc<Mutex<Vec<elog::MissionCompletion>>>,
 ) -> Result<(), String> {
     let mut st = AppState::load(&state_dir)?;
     let mut watcher = LogWatcher::open(&log_path)?;
@@ -624,12 +651,37 @@ fn watch_loop(
     let mut last_tick = Instant::now();
     let mut last_inode = watcher.position().inode;
 
+    // Ninth pass §4: the mission ledger. `missions` pairs each armed
+    // `MissionInfo` block with its end-of-match success marker; proven
+    // completions are stamped with the UTC day, persisted in app state,
+    // and published to the shared ledger every report reads.
+    let mut missions = elog::MissionLog::new();
+    let mut today = today_utc();
+    st.mission_completions.retain(|c| c.day == today);
+    if let Ok(mut g) = completions.lock() {
+        *g = st.mission_completions.clone();
+    }
+
     loop {
         if *shutdown.borrow() {
             break;
         }
         let lines = watcher.next_lines(interval_ms)?;
         let pos = watcher.position();
+
+        // A UTC day rollover retires yesterday's completions: the ledger
+        // is today-scoped (ninth pass §4).
+        let mut rolled = false;
+        let now_day = today_utc();
+        if now_day != today {
+            today = now_day;
+            st.mission_completions.retain(|c| c.day == today);
+            if let Ok(mut g) = completions.lock() {
+                g.retain(|c| c.day == today);
+            }
+            rolled = true;
+        }
+
         // A fresh inode (file appeared or rotated) is a hard session edge
         // (addendum #37): the tracker sees an infinite gap so a re-login
         // reads as a start, and the appearance itself fires a report.
@@ -655,6 +707,16 @@ fn watch_loop(
             if ev.as_ref().map_or(false, |e| e.is_mission_end()) {
                 let _ = trigger_tx.send(Trigger::MissionEnd);
             }
+            // §4: prove a mission from its armed identity + success marker.
+            if let Some(done) = missions.feed(raw, &today) {
+                st.mission_completions.push(done.clone());
+                if let Ok(mut g) = completions.lock() {
+                    g.push(done);
+                }
+                // A proven completion is worth a fresh page even when the
+                // marker did not classify as a mission-end event.
+                let _ = trigger_tx.send(Trigger::MissionEnd);
+            }
         }
         // One session start per read, whether from the file edge or a
         // `Logged in` line (they often arrive together).
@@ -662,7 +724,7 @@ fn watch_loop(
             let _ = trigger_tx.send(Trigger::SessionStart);
         }
 
-        let dirty = !lines.is_empty() || pos != st.log_position;
+        let dirty = !lines.is_empty() || pos != st.log_position || rolled;
         st.log_position = pos;
         if dirty {
             st.save(&state_dir)?;
@@ -722,6 +784,7 @@ mod tests {
             status,
             tx,
             shutdown.receiver(),
+            Arc::new(Mutex::new(Vec::new())),
         );
 
         // No file yet: nothing fires.
@@ -756,7 +819,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let shutdown = Shutdown::new();
         let status = Arc::new(Mutex::new(TrayStatus::default()));
-        let handle = spawn_watch(log.clone(), 20, state.clone(), status, tx, shutdown.receiver());
+        let handle = spawn_watch(log.clone(), 20, state.clone(), status, tx, shutdown.receiver(), Arc::new(Mutex::new(Vec::new())));
         assert_eq!(recv_trigger(&mut rx), Some(Trigger::SessionStart));
         // Drain any stragglers.
         while rx.try_recv().is_ok() {}

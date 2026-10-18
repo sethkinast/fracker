@@ -20,6 +20,7 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 
+use crate::elog::MissionCompletion;
 use crate::model::{OwnedEquipment, RelicStock};
 use crate::tuning::Tuning;
 use crate::{config, fetch, model, pack, plan, render};
@@ -121,7 +122,15 @@ impl ReportOutcome {
 
 /// Render the checklist page from the configured inputs. Never dies on a
 /// dead endpoint: each fetch falls back to its recorded fixture.
-pub async fn generate(cfg: &ReportConfig) -> Result<ReportOutcome, String> {
+///
+/// `completed` is the resident's log-proven, today-scoped mission ledger
+/// (ninth pass §4). Every report — auto, manual, or session-start — takes
+/// it so a finished worldstate alert renders struck regardless of any
+/// manual tick; the CLI demo passes an empty slice.
+pub async fn generate(
+    cfg: &ReportConfig,
+    completed: &[MissionCompletion],
+) -> Result<ReportOutcome, String> {
     let data_file = |rel: &str| cfg.data_dir.join(rel);
     let mut endpoint_failures: Vec<String> = Vec::new();
 
@@ -276,6 +285,7 @@ pub async fn generate(cfg: &ReportConfig) -> Result<ReportOutcome, String> {
         pins: &cfg_file.pins,
         recent_gear: &HashSet::new(),
         steel_path_tiebreak: cfg_file.steel_path_tiebreak,
+        completed_missions: completed,
         tuning: &tuning,
     };
     let plan = plan::plan(&input);
@@ -529,7 +539,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let out = dir.join("plan.html");
         let cfg = test_cfg(out.clone());
-        let outcome = generate(&cfg).await.expect("offline generate");
+        let outcome = generate(&cfg, &[]).await.expect("offline generate");
         assert!(out.exists(), "page written");
         let html = std::fs::read_to_string(&out).unwrap();
         assert!(html.contains("<html"), "real HTML page");
