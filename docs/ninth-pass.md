@@ -41,18 +41,37 @@ consumer's first frames — is failing or stalling invisibly.
   the happy path still passes the §2-sequence harness from
   pass 8.
 
-## §2 Session start: regenerate AND open; opening must just work (items 37, 40b)
+## §2 Serve the plan over loopback HTTP; session start opens it (items 37, 40b, 41)
 
-- On new-EE.log detection the resident already regenerates;
-  Seth expects the plan to OPEN at game start too. Do both.
-  (If the game is focused fullscreen, the browser opening
-  behind it is fine — the page must be open when he alt-tabs.)
-- The current Open path makes him pick a program for the HTML
-  file EVERY time. Diagnose why (portal OpenFile handing off
-  without a usable content-type/default association on KDE)
-  and make opening land in his default browser with no
-  chooser, from inside the sandbox, every time. The §4/pass-8
-  response-tracking stays; a failed open still surfaces.
+Seth's catch (item 41): the plan page's checkboxes persist via
+localStorage, but the page is a file:// URL — Chrome treats
+each file:// document as an opaque origin (localStorage is
+dead there) and Firefox partitions file storage, so ticks are
+fragile-to-broken depending on browser. And the file handoff
+is why opening asks him to pick a program every time. One
+move fixes both: **the resident serves the plan itself.**
+
+- Embed a tiny HTTP server in the resident process, bound to
+  127.0.0.1 only (the manifest already has --share=network,
+  so the sandbox shares the host net namespace and the host
+  browser can reach loopback). Near-zero footprint: serve the
+  current report HTML at a stable URL (e.g.
+  `http://127.0.0.1:<port>/` — port from config with a sane
+  stored default; if the port is taken, fall back and record
+  the live URL where the tray's Open action reads it).
+- "Open plan page" and the session-start auto-open both
+  become OpenURI on that http:// URL: default browser, no
+  chooser, no FD handoff, no sandbox path nonsense. A failed
+  open still surfaces in the tray status.
+- Tick persistence moves server-side: checkbox changes POST
+  to the server (e.g. /tick) and are stored in the app data
+  dir keyed by item id + day, re-applied at render — ticks
+  survive regenerations and are browser-independent.
+  localStorage may remain as a progressive nicety but is no
+  longer the store of record. The 60s meta-refresh stays.
+- On new-EE.log detection: regenerate AND open the URL at
+  game start (item 40b). The browser opening behind a
+  fullscreen game is fine.
 
 ## §3 Standing math: the profile field IS the remaining (item 40c)
 
@@ -95,7 +114,11 @@ in EE.log identify completed missions.
   mission and asserts the generated report strikes that alert
   (the fixtures/ EE.log samples on the box carry real
   MissionInfo lines; synthesize the worldstate side as
-  needed).
+  needed). Seth's own current-session EE.log may land at
+  `fixtures/ocr-samples/ee-log-2026-10-17.log` mid-run (Graf
+  syncs it) — if present, use it as an additional fixture:
+  it is the exact log his resident watched while the alerts
+  went unstuck.
 
 ## Hard constraints (unchanged)
 

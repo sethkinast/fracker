@@ -266,3 +266,12 @@ it refines the brief where they disagree. For the next worker pass.
     undone after regeneration despite the resident watching
     since session start — log-derived completions must reach
     the report the resident generates.
+41. **The plan is served, not a file (Seth, 2026-10-18).**
+    localStorage under file:// is browser-dependent and
+    effectively broken (opaque origins in Chrome, partitioned
+    storage in Firefox), so tick persistence cannot live
+    there, and the file handoff is what produced the
+    every-time app chooser. The resident serves the plan from
+    a tiny loopback HTTP server in-process: stable origin,
+    ticks POST to the server and persist in app data,
+    opening is a plain http:// URL in the default browser.
