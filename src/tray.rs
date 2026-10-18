@@ -22,6 +22,8 @@ use ksni::menu::StandardItem;
 use ksni::{Category, Handle, MenuItem, Status, ToolTip, Tray, TrayMethods};
 use tokio::sync::mpsc;
 
+use crate::capture::{CaptureLifecycle, CaptureStage};
+
 /// Verbs the tray menu asks the resident loop to perform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayCommand {
@@ -49,13 +51,20 @@ pub struct TrayStatus {
     pub last_error: Option<String>,
     /// Resolved EE.log path (for the tooltip).
     pub log_path: Option<String>,
-    /// A Capture Inventory run is in progress (eighth pass §2).
-    pub capturing: bool,
-    /// The live capture line ("Capture: N relic stacks, …" or "stopping…").
-    pub capture_line: Option<String>,
+    /// The Capture Inventory lifecycle (ninth pass §1): the explicit state
+    /// machine Seth reads from the tray.
+    pub capture: CaptureLifecycle,
+    /// The loopback-served plan URL (ninth pass §2), recorded when the
+    /// embedded HTTP server binds so "Open plan page" opens it directly.
+    pub page_url: Option<String>,
 }
 
 impl TrayStatus {
+    /// True while a capture is in flight (relabels the tray toggle).
+    pub fn capturing(&self) -> bool {
+        self.capture.stage().is_active()
+    }
+
     /// The one-line human status for tooltip + menu.
     pub fn line(&self) -> String {
         let watch = if self.watching {
@@ -72,14 +81,10 @@ impl TrayStatus {
             (Some(when), None) => format!("last report {when}"),
             (None, None) => "no report yet".to_owned(),
         };
-        if self.capturing {
-            let cap = self
-                .capture_line
-                .clone()
-                .unwrap_or_else(|| "capturing".to_owned());
-            format!("{cap} · {watch} · {report}")
-        } else {
+        if matches!(self.capture.stage(), CaptureStage::Idle) {
             format!("{watch} · {report}")
+        } else {
+            format!("{} · {watch} · {report}", self.capture.status_line())
         }
     }
 }
@@ -140,7 +145,7 @@ impl Tray for FrackerTray {
         let capturing = self
             .status
             .lock()
-            .map(|s| s.capturing)
+            .map(|s| s.capturing())
             .unwrap_or(false);
         // One verb, two labels: Capture Inventory ↔ Stop capture.
         let capture_label = if capturing {
@@ -267,13 +272,19 @@ mod tests {
     fn capture_toggle_relabels_and_surfaces_live_counts() {
         // While capturing the same verb reads "Stop capture" and the
         // status line shows the live per-bucket counts.
+        let mut lc = CaptureLifecycle::new();
+        lc.set_stage(CaptureStage::Capturing);
+        lc.set_counts(crate::capture::CaptureCounts {
+            relic_stacks: 512,
+            parts: 0,
+            arcanes: 12,
+        });
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut tray = FrackerTray {
             status: Arc::new(Mutex::new(TrayStatus {
                 watching: true,
                 dir_watch: true,
-                capturing: true,
-                capture_line: Some("Capture: 512 relic stacks, 0 parts, 12 arcanes".to_owned()),
+                capture: lc,
                 ..Default::default()
             })),
             cmds: tx,
@@ -281,7 +292,7 @@ mod tests {
         let names: Vec<String> = labels(&tray).into_iter().map(|(l, _)| l).collect();
         assert!(names.contains(&"Stop capture".to_owned()));
         assert!(!names.contains(&"Capture Inventory".to_owned()));
-        assert!(tray.status_line().contains("Capture: 512 relic stacks"));
+        assert!(tray.status_line().contains("Capture: capturing — 512 relic stacks"));
         // Firing it still sends the single toggle verb.
         for item in tray.menu() {
             if let MenuItem::Standard(s) = item {
@@ -291,6 +302,32 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap(), TrayCommand::Regenerate);
         assert_eq!(rx.try_recv().unwrap(), TrayCommand::OpenPage);
         assert_eq!(rx.try_recv().unwrap(), TrayCommand::CaptureInventory);
+    }
+
+    #[test]
+    fn capture_error_stage_is_visible_in_the_tray_line() {
+        // Ninth pass §1: a failed capture names its stage in the tray, not
+        // just the resident log.
+        let mut lc = CaptureLifecycle::new();
+        lc.fail("connecting", "PipeWire: no first frame within 15s");
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let tray = FrackerTray {
+            status: Arc::new(Mutex::new(TrayStatus {
+                watching: true,
+                dir_watch: true,
+                capture: lc,
+                ..Default::default()
+            })),
+            cmds: tx,
+        };
+        let line = tray.status_line();
+        assert!(
+            line.contains("error (connecting)") && line.contains("no first frame"),
+            "capture failure must be visible: {line}"
+        );
+        // The toggle is back to "Capture Inventory" (not active).
+        let names: Vec<String> = labels(&tray).into_iter().map(|(l, _)| l).collect();
+        assert!(names.contains(&"Capture Inventory".to_owned()));
     }
 
     #[test]

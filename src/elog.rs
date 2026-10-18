@@ -20,6 +20,8 @@
 
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
+
 // ---------------------------------------------------------------------------
 // Line model
 // ---------------------------------------------------------------------------
@@ -169,6 +171,207 @@ fn classify_inner(line: &LogLine) -> Option<Event> {
         return Some(Event::HostMigration);
     }
     None
+}
+
+// ---------------------------------------------------------------------------
+// Mission completions (ninth pass §4)
+// ---------------------------------------------------------------------------
+
+/// The identity a `MissionInfo` block carries for one armed mission. The
+/// log prints the whole block (multi-line JSON) after
+/// `Client loaded {"name":"…"} with MissionInfo:`; `alertId` / `alertTag`
+/// / `missionType` / `faction` / `location` / the reward `ItemType`s are
+/// what let a completion be matched to a live worldstate alert.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MissionInfo {
+    /// The `{"name":"SolNode175_Alert"}` from the loading line.
+    #[serde(default)]
+    pub name: String,
+    /// `alertId` — the strongest identity (matches a worldstate alert id).
+    #[serde(default)]
+    pub alert_id: String,
+    /// `alertTag` — e.g. `RoadToTauEvent`.
+    #[serde(default)]
+    pub alert_tag: String,
+    /// Raw mission type (`MT_HIVE`, `MT_EXTERMINATION`, …).
+    #[serde(default)]
+    pub mission_type: String,
+    /// Raw faction (`FC_INFESTATION`, …).
+    #[serde(default)]
+    pub faction: String,
+    /// Internal node (`SolNode175`); NOT comparable to a worldstate
+    /// display node (`Nimus (Eris)`), so it is not used for matching.
+    #[serde(default)]
+    pub location: String,
+    /// `missionReward.countedItems[].ItemType` uniqueNames.
+    #[serde(default)]
+    pub reward_items: Vec<String>,
+}
+
+impl MissionInfo {
+    fn from_json(v: &serde_json::Value) -> Self {
+        let s = |k: &str| {
+            v.get(k)
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_owned()
+        };
+        let reward_items = v
+            .get("missionReward")
+            .and_then(|r| r.get("countedItems"))
+            .and_then(|c| c.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|e| {
+                        e.get("ItemType").and_then(|t| t.as_str()).map(str::to_owned)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self {
+            name: String::new(),
+            alert_id: s("alertId"),
+            alert_tag: s("alertTag"),
+            mission_type: s("missionType"),
+            faction: s("faction"),
+            location: s("location"),
+            reward_items,
+        }
+    }
+
+    /// True when the block names a specific alert (not a plain mission).
+    pub fn is_alert(&self) -> bool {
+        !self.alert_id.is_empty() || !self.alert_tag.is_empty()
+    }
+}
+
+/// A mission the log proved completed (an end-of-match success marker
+/// after its `MissionInfo` was armed), scoped to the UTC day it fired.
+/// The resident persists these and feeds them to every report so a
+/// finished alert strikes regardless of any manual tick.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MissionCompletion {
+    #[serde(default)]
+    pub info: MissionInfo,
+    /// UTC date (`YYYY-MM-DD`) the completion was observed.
+    #[serde(default)]
+    pub day: String,
+}
+
+impl MissionCompletion {
+    /// A positive identity match against a worldstate alert — never
+    /// inferred. Matches when the alert ids are equal, or when the event
+    /// tag agrees AND the mission types normalize equal, or when the tag
+    /// agrees AND a payout resource uniqueName is shared. Node is
+    /// deliberately NOT compared (the log's node is internal).
+    pub fn matches_alert(&self, alert: &crate::model::Alert) -> bool {
+        let info = &self.info;
+        if !info.alert_id.is_empty() && !alert.id.is_empty() && info.alert_id == alert.id {
+            return true;
+        }
+        let tag_eq =
+            !info.alert_tag.is_empty() && info.alert_tag.eq_ignore_ascii_case(&alert.tag);
+        if !tag_eq {
+            return false;
+        }
+        let mine = mission_type_key(&info.mission_type);
+        let theirs = mission_type_key(&alert.mission.mission_type);
+        if !mine.is_empty() && mine == theirs {
+            return true;
+        }
+        alert.mission.counted_items().iter().any(|c| {
+            !c.unique_name.is_empty()
+                && info
+                    .reward_items
+                    .iter()
+                    .any(|r| r.eq_ignore_ascii_case(&c.unique_name))
+        })
+    }
+}
+
+/// Normalize a mission type so `MT_MOBILE_DEFENSE` and `Mobile Defense`
+/// compare equal (`MOBILEDEFENSE`). Empty in, empty out.
+fn mission_type_key(t: &str) -> String {
+    let t = t.strip_prefix("MT_").unwrap_or(t);
+    t.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(|c| c.to_uppercase())
+        .collect()
+}
+
+/// Buffers the multi-line `MissionInfo` JSON blocks the log prints and
+/// pairs an armed mission with its end-of-match success marker. Feed
+/// every raw line; it returns a [`MissionCompletion`] the moment one is
+/// proven. A completion with no armed mission (the resident started
+/// mid-session) is dropped — never inferred from proximity alone.
+#[derive(Debug, Default)]
+pub struct MissionLog {
+    /// Accumulating JSON body (`Some` while a `MissionInfo` block is open).
+    buf: Option<String>,
+    /// The `{"name":"…"}` from the blocking line.
+    pending_name: Option<String>,
+    /// The most recently armed mission, awaiting its end marker.
+    armed: Option<MissionInfo>,
+}
+
+impl MissionLog {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The mission currently armed (if any) — for tests/diagnostics.
+    pub fn armed(&self) -> Option<&MissionInfo> {
+        self.armed.as_ref()
+    }
+
+    /// Feed one raw EE.log line. `day` is the UTC date to stamp onto a
+    /// completion. Returns the completion when an end-of-match success
+    /// marker confirms the armed mission.
+    pub fn feed(&mut self, raw: &str, day: &str) -> Option<MissionCompletion> {
+        if let Some(buf) = self.buf.as_mut() {
+            if buf.len() > 256 * 1024 {
+                // A `with MissionInfo:` that never resolves into JSON must
+                // not accumulate forever.
+                self.buf = None;
+                return None;
+            }
+            buf.push_str(raw.trim_end_matches(['\r', '\n']));
+            buf.push('\n');
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(buf) {
+                let mut info = MissionInfo::from_json(&v);
+                info.name = self.pending_name.take().unwrap_or_default();
+                self.armed = Some(info);
+                self.buf = None;
+            }
+            return None;
+        }
+        let line = raw.trim_end_matches(['\r', '\n']);
+        if line.contains("with MissionInfo:") {
+            self.pending_name = extract_loaded_name(line);
+            self.buf = Some(String::new());
+            return None;
+        }
+        if line.contains("GiveMissionRewards. success=true")
+            || line.contains("EndOfMatch.lua: Mission Succeeded")
+        {
+            if let Some(info) = self.armed.take() {
+                return Some(MissionCompletion {
+                    info,
+                    day: day.to_owned(),
+                });
+            }
+        }
+        None
+    }
+}
+
+/// Pull `SolNode175_Alert` out of `Client loaded {"name":"…"} with
+/// MissionInfo:`.
+fn extract_loaded_name(line: &str) -> Option<String> {
+    let at = line.find("\"name\":\"")? + "\"name\":\"".len();
+    let rest = &line[at..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_owned())
 }
 
 // ---------------------------------------------------------------------------
@@ -550,5 +753,172 @@ mod tests {
         assert_eq!(extract_hex24("id abcdef0123456789abcdef01.").len(), 1);
         // Embedded in a longer hex run: no match.
         assert!(extract_hex24("abcdef0123456789abcdef0123").is_empty());
+    }
+
+    // ---- ninth pass §4: log-derived mission completions ----
+
+    /// The exact two-line shape Seth's log prints: the loading line, then
+    /// the multi-line MissionInfo JSON (trimmed here to the identity
+    /// fields), then the end-of-match success markers.
+    fn armed_block(name: &str, alert_id: &str, mtype: &str) -> Vec<String> {
+        vec![
+            format!(
+                "48.805 Sys [Info]: Client loaded {{\"name\":\"{name}\"}} with MissionInfo:"
+            ),
+            "{".to_owned(),
+            format!("    \"missionType\" : \"{mtype}\","),
+            "    \"faction\" : \"FC_INFESTATION\",".to_owned(),
+            "    \"missionReward\" : {".to_owned(),
+            "        \"countedItems\" : [ {".to_owned(),
+            "            \"ItemCount\" : 50,".to_owned(),
+            "            \"ItemType\" : \"/Lotus/Types/Gameplay/Events/RoadToTauEvent/RoadToTauEventResource\""
+                .to_owned(),
+            "        } ]".to_owned(),
+            "    },".to_owned(),
+            "    \"location\" : \"SolNode175\",".to_owned(),
+            format!("    \"alertId\" : \"{alert_id}\","),
+            "    \"alertTag\" : \"RoadToTauEvent\"".to_owned(),
+            "}".to_owned(),
+        ]
+    }
+
+    #[test]
+    fn mission_log_arms_from_multiline_json_and_completes_on_success() {
+        let mut log = MissionLog::new();
+        let mut completion = None;
+        for line in armed_block("SolNode175_Alert", "6ad0d7360dfe89c5d82290a2", "MT_HIVE") {
+            completion = completion.or(log.feed(&line, "2026-10-17"));
+        }
+        // Still armed, no completion until an end-of-match success marker.
+        assert!(completion.is_none());
+        let armed = log.armed().expect("mission armed from the JSON block");
+        assert_eq!(armed.name, "SolNode175_Alert");
+        assert_eq!(armed.alert_id, "6ad0d7360dfe89c5d82290a2");
+        assert_eq!(armed.alert_tag, "RoadToTauEvent");
+        assert_eq!(armed.mission_type, "MT_HIVE");
+        assert_eq!(armed.location, "SolNode175");
+        assert_eq!(armed.reward_items.len(), 1);
+
+        completion = log.feed(
+            "251.004 Script [Info]: EndOfMatch.lua: Mission Succeeded",
+            "2026-10-17",
+        );
+        let c = completion.expect("completion after the success marker");
+        assert_eq!(c.info.alert_id, "6ad0d7360dfe89c5d82290a2");
+        assert_eq!(c.day, "2026-10-17");
+        // A second marker does not double-fire.
+        assert!(log
+            .feed(
+                "251.004 Script [Info]: EndOfMatch.lua: EndOfMatch.lua: GiveMissionRewards. success=true",
+                "2026-10-17"
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn mission_log_never_infers_without_a_positive_marker() {
+        let mut log = MissionLog::new();
+        for line in armed_block("SolNode175_Alert", "abc", "MT_HIVE") {
+            let _ = log.feed(&line, "2026-10-17");
+        }
+        // A FAILED mission must not complete.
+        assert!(log
+            .feed(
+                "251.004 Script [Info]: EndOfMatch.lua: Mission Failed",
+                "2026-10-17"
+            )
+            .is_none());
+        // A marker with no armed mission (tail started mid-mission) drops.
+        let mut empty = MissionLog::new();
+        assert!(empty
+            .feed(
+                "251.004 Script [Info]: EndOfMatch.lua: Mission Succeeded",
+                "2026-10-17"
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn completions_match_alerts_on_positive_identity_only() {
+        use crate::model::{Alert, AlertMission, AlertReward, CountedItem};
+        let mut info = MissionInfo {
+            alert_id: "6ad0d7360dfe89c5d82290a2".to_owned(),
+            alert_tag: "RoadToTauEvent".to_owned(),
+            mission_type: "MT_HIVE".to_owned(),
+            faction: "FC_INFESTATION".to_owned(),
+            location: "SolNode175".to_owned(),
+            reward_items: vec![
+                "/Lotus/Types/Gameplay/Events/RoadToTauEvent/RoadToTauEventResource".to_owned(),
+            ],
+            ..Default::default()
+        };
+        let completion = MissionCompletion {
+            info: info.clone(),
+            day: "2026-10-17".to_owned(),
+        };
+        let alert = |id: &str, tag: &str, mtype: &str| Alert {
+            id: id.to_owned(),
+            tag: tag.to_owned(),
+            expiry: String::new(),
+            mission: AlertMission {
+                node: "Nimus (Eris)".to_owned(),
+                mission_type: mtype.to_owned(),
+                faction: "Infested".to_owned(),
+                reward: AlertReward {
+                    counted_items: vec![CountedItem {
+                        unique_name: "/Lotus/Types/Gameplay/Events/RoadToTauEvent/RoadToTauEventResource".to_owned(),
+                        kind: "Tau Resource".to_owned(),
+                        count: 50,
+                    }],
+                },
+                ..Default::default()
+            },
+        };
+        // Exact alert id: strongest match even if the tag/type drift.
+        assert!(completion.matches_alert(&alert("6ad0d7360dfe89c5d82290a2", "Other", "Survival")));
+        // Tag + normalized mission type (`MT_HIVE` == `Hive`).
+        assert!(completion.matches_alert(&alert("", "RoadToTauEvent", "Hive")));
+        // Tag + shared payout resource when the type strings differ.
+        assert!(info.is_alert());
+        info.mission_type = "MT_SOMETHING_NEW".to_owned();
+        let c2 = MissionCompletion { info: info.clone(), day: "d".to_owned() };
+        assert!(c2.matches_alert(&alert("", "RoadToTauEvent", "Mobile Defense")));
+        // A different tag with no id or type match never strikes.
+        assert!(!completion.matches_alert(&alert("", "SomeOtherEvent", "Survival")));
+    }
+
+    /// Ninth pass §4 audit: parse Seth's real EE.log (gitignored) and
+    /// prove each of the three armed alert missions completes exactly
+    /// once with the identity the log printed. Skipped when the fixture
+    /// is absent (a box that lacks his log).
+    #[test]
+    fn real_fixture_log_yields_the_three_proven_completions() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/ocr-samples/ee-log-2026-10-17.log");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            eprintln!("skip §4 fixture audit: need {}", path.display());
+            return;
+        };
+        let mut log = MissionLog::new();
+        let mut done = Vec::new();
+        for raw in text.lines() {
+            if let Some(c) = log.feed(raw, "2026-10-17") {
+                done.push(c);
+            }
+        }
+        let ids: Vec<&str> = done.iter().map(|c| c.info.alert_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "6ad0d7360dfe89c5d82290a2",
+                "6ad0d7360dfe89c5d82290a4",
+                "6ad0d7360dfe89c5d82290a6",
+            ],
+            "each armed mission completes exactly once, in log order"
+        );
+        assert_eq!(done[0].info.mission_type, "MT_HIVE");
+        assert!(done.iter().all(|c| c.info.alert_tag == "RoadToTauEvent"));
+        assert!(done.iter().all(|c| c.info.reward_items.len() == 1));
+        assert!(done.iter().all(|c| c.day == "2026-10-17"));
     }
 }

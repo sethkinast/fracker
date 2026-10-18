@@ -113,7 +113,7 @@ async fn run_demo(args: &Args) -> Result<(), String> {
         offline: args.offline,
         embed_icons: true,
     };
-    let outcome = report::generate(&cfg).await?;
+    let outcome = report::generate(&cfg, &[]).await?;
     println!("demo: {} -> {}", outcome.summary(), outcome.out.display());
     println!(
         "demo: icons {}/{} · profile MR{} · endpoints: {}",
@@ -163,6 +163,8 @@ async fn run_resident(args: &Args) -> Result<(), String> {
         log_path: log_path.clone(),
         state_dir: config::data_dir(),
         watch_interval_ms: args.watch_interval_ms,
+        serve_port: cfg.serve_port,
+        pop_on_session_start: cfg.pop_on_session_start,
     };
     let shutdown = resident::Shutdown::new();
 

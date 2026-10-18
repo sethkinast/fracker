@@ -234,6 +234,38 @@ pub async fn fetch_profile(
     }
 }
 
+/// Extract a non-negative integer from a JSON value tolerantly.
+///
+/// The daily-cap fields are the numbers the page shows verbatim, so a
+/// field the endpoint encodes as anything other than a bare JSON `u64`
+/// must not silently collapse to `0`. The old code used
+/// `Value::as_u64().unwrap_or(0)`, which turns a float (`7823.0`) or a
+/// numeric string (`"7823"`) into `0` — a partial "remaining" pool then
+/// wrongly renders as *fully spent* (ninth pass §3: the app showed
+/// Syndicates "0 left" while the profile said 7,823). Accept every
+/// numeric shape the endpoint might emit (integer, signed integer,
+/// float, numeric string); reject everything else rather than guess.
+fn json_u32(v: &serde_json::Value) -> Option<u32> {
+    let n: f64 = match v {
+        serde_json::Value::Number(n) => {
+            if let Some(u) = n.as_u64() {
+                u as f64
+            } else if let Some(i) = n.as_i64() {
+                i as f64
+            } else {
+                n.as_f64()?
+            }
+        }
+        serde_json::Value::String(s) => s.trim().parse::<f64>().ok()?,
+        _ => return None,
+    };
+    if !n.is_finite() || n < 0.0 {
+        return None;
+    }
+    // These are integer counts; round half away from zero and saturate.
+    Some(n.round().min(u32::MAX as f64) as u32)
+}
+
 pub fn parse_profile(text: &str) -> Result<ProfileSnapshot, String> {
     let v: serde_json::Value =
         serde_json::from_str(text).map_err(|e| format!("profile: {e}"))?;
@@ -254,8 +286,8 @@ pub fn parse_profile(text: &str) -> Result<ProfileSnapshot, String> {
         .to_owned();
     let mastery_rank = first
         .get("PlayerLevel")
-        .and_then(|p| p.as_u64())
-        .unwrap_or(0) as u32;
+        .and_then(json_u32)
+        .unwrap_or(0);
     let xp = first
         .get("LoadOutInventory")
         .and_then(|l| l.get("XPInfo"))
@@ -282,9 +314,7 @@ pub fn parse_profile(text: &str) -> Result<ProfileSnapshot, String> {
                 .collect()
         })
         .unwrap_or_default();
-    let num = |key: &str| -> u32 {
-        first.get(key).and_then(|x| x.as_u64()).unwrap_or(0) as u32
-    };
+    let num = |key: &str| -> u32 { first.get(key).and_then(json_u32).unwrap_or(0) };
     let mut per_family = std::collections::HashMap::new();
     if let Some(obj) = v
         .get("Results")
@@ -294,8 +324,8 @@ pub fn parse_profile(text: &str) -> Result<ProfileSnapshot, String> {
         for (k, val) in obj {
             if let Some(fam) = k.strip_prefix("DailyAffiliation") {
                 if !fam.is_empty() {
-                    if let Some(n) = val.as_u64() {
-                        per_family.insert(fam.to_owned(), n as u32);
+                    if let Some(n) = json_u32(val) {
+                        per_family.insert(fam.to_owned(), n);
                     }
                 }
             }
@@ -640,6 +670,34 @@ mod tests {
     #[test]
     fn profile_missing_results_errors() {
         assert!(parse_profile("{}").is_err());
+    }
+
+    /// Ninth pass §3: a partial daily-cap value must survive whatever
+    /// numeric shape the endpoint uses. A float or numeric string used to
+    /// be silently zeroed by `as_u64()`, which rendered a partly-spent
+    /// pool as "0 left" — collapse to the raw value instead.
+    #[test]
+    fn daily_caps_parse_float_and_numeric_string_without_zeroing() {
+        let text = r#"{"Results": [{
+            "DisplayName": "T", "AccountId": {"$oid": "x"}, "PlayerLevel": 30.0,
+            "LoadOutInventory": {"XPInfo": []},
+            "DailyAffiliation": 7823.0,
+            "DailyAffiliationCetus": "31000",
+            "DailyAffiliationQuills": 31000,
+            "DailyFocus": 357977.0
+        }]}"#;
+        let snap = parse_profile(text).unwrap();
+        assert_eq!(snap.mastery_rank, 30, "float PlayerLevel");
+        assert_eq!(snap.daily.affiliation_remaining, 7823, "float bare pool");
+        assert_eq!(snap.daily.focus_remaining, 357_977, "float focus");
+        assert_eq!(snap.daily.per_family.get("Cetus"), Some(&31_000), "string family");
+        assert_eq!(snap.daily.per_family.get("Quills"), Some(&31_000), "int family");
+        // Garbage / negative values are rejected, not guessed.
+        let bad = r#"{"Results": [{"LoadOutInventory": {"XPInfo": []},
+            "DailyAffiliation": "not a number", "DailyFocus": -5}]}"#;
+        let snap = parse_profile(bad).unwrap();
+        assert_eq!(snap.daily.affiliation_remaining, 0);
+        assert_eq!(snap.daily.focus_remaining, 0);
     }
 
     #[tokio::test]

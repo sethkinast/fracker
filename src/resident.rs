@@ -27,13 +27,13 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, watch};
 
-use crate::capture::{self, CaptureData, CaptureSession};
+use crate::capture::{self, CaptureData, CaptureLog, CaptureSession, CaptureStage};
 use crate::ocr::StockState as OcrStock;
 use crate::report::{self, ReportConfig};
 use crate::state::AppState;
 use crate::tray::{FrackerTray, TrayCommand, TrayStatus};
 use crate::watch::LogWatcher;
-use crate::{elog, portal, screencast};
+use crate::{elog, portal, screencast, server, ticks};
 
 /// What asked for a report run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,18 +92,29 @@ pub struct ResidentOptions {
     pub state_dir: PathBuf,
     /// Watch wait tick in milliseconds (also the poll fallback).
     pub watch_interval_ms: i32,
+    /// Loopback HTTP port to serve the plan on (ninth pass §2). Falls back
+    /// to an ephemeral port when taken; 0 = always ephemeral.
+    pub serve_port: u16,
+    /// Open the plan page automatically on session start (item 40b).
+    pub pop_on_session_start: bool,
 }
 
 /// A message from the Capture Inventory worker thread to the resident
-/// loop (eighth pass §2).
+/// loop (eighth pass §2, ninth pass §1).
 enum CaptureEvent {
+    /// The lifecycle reached a new stage (consent → connecting → …).
+    Stage(CaptureStage),
     /// Live per-bucket stack counts while scrolling.
     Progress(capture::CaptureCounts),
     /// The capture ended cleanly; the session carries the union of stacks
     /// and which buckets were touched (for the partial-safe finalize).
     Finished(Box<CaptureSession>),
-    /// The capture aborted; the message is shown to Seth, never swallowed.
-    Failed(String),
+    /// The capture aborted; `stage` names the failing lifecycle stage and
+    /// `message` is the verbatim D-Bus/PipeWire error. Never swallowed.
+    Failed {
+        stage: &'static str,
+        message: String,
+    },
 }
 
 /// A running Capture Inventory worker. Dropping/stopping it ends the
@@ -130,6 +141,36 @@ pub async fn run(
     mut cmds: Option<mpsc::UnboundedReceiver<TrayCommand>>,
 ) -> Result<(), String> {
     let (trigger_tx, mut trigger_rx) = mpsc::unbounded_channel::<Trigger>();
+    let capture_log = CaptureLog::open(&opts.state_dir);
+    // Ninth pass §4: the log-proven mission ledger the watch thread fills
+    // and every report reads. Shared so the report path always sees the
+    // latest completions, and seeded from persisted state so a restart
+    // mid-session keeps its strikes.
+    let completions: Arc<Mutex<Vec<elog::MissionCompletion>>> = Arc::new(Mutex::new(Vec::new()));
+    // Ninth pass §2: the resident serves the plan itself on loopback, so
+    // ticks persist server-side and "Open plan page" is a plain browser
+    // URL (no file handoff, no chooser). Best-effort: a bind failure
+    // leaves page_url unset and Open falls back to the file path.
+    let tick_path = ticks::TickStore::file(&opts.state_dir);
+    let tick_store = Arc::new(Mutex::new(ticks::TickStore::load(&tick_path)));
+    let plan_server = match server::serve(
+        opts.serve_port,
+        opts.report.out.clone(),
+        tick_path.clone(),
+        tick_store.clone(),
+    ) {
+        Ok(s) => {
+            println!("resident: serving the plan at {}", s.url());
+            if let Ok(mut st) = status.lock() {
+                st.page_url = Some(s.url().to_owned());
+            }
+            Some(s)
+        }
+        Err(e) => {
+            eprintln!("resident: plan server unavailable ({e}); opening the file path instead");
+            None
+        }
+    };
     let watch_thread = spawn_watch(
         opts.log_path.clone(),
         opts.watch_interval_ms,
@@ -137,6 +178,7 @@ pub async fn run(
         status.clone(),
         trigger_tx,
         shutdown.receiver(),
+        completions.clone(),
     );
 
     let mut sd = shutdown.receiver();
@@ -158,24 +200,31 @@ pub async fn run(
                 // Coalesce a burst (e.g. session start + mission end in
                 // one read) into a single report run.
                 while trigger_rx.try_recv().is_ok() {}
-                do_report(&opts, &status, &tray, trigger).await;
+                do_report(&opts, &status, &tray, trigger, &completions).await;
+                // Ninth pass §2/item 40b: a new EE.log at game start is
+                // regenerated AND opened (behind the fullscreen game is
+                // fine). pop_on_session_start is the §9 switch.
+                if trigger == Trigger::SessionStart && opts.pop_on_session_start {
+                    open_page(&opts, &status, &tray, &completions, &plan_server).await;
+                }
             }
             cmd = recv_cmd(&mut cmds) => {
                 match cmd {
                     Some(TrayCommand::Regenerate) => {
-                        do_report(&opts, &status, &tray, Trigger::Manual).await;
+                        do_report(&opts, &status, &tray, Trigger::Manual, &completions).await;
                     }
                     Some(TrayCommand::OpenPage) => {
-                        open_page(&opts, &status, &tray).await;
+                        open_page(&opts, &status, &tray, &completions, &plan_server).await;
                     }
                     Some(TrayCommand::CaptureInventory) => {
-                        toggle_capture(&opts, &status, &tray, &mut capture).await;
+                        toggle_capture(&opts, &status, &tray, &mut capture, &capture_log).await;
                     }
                     Some(TrayCommand::Quit) | None => break Ok(()),
                 }
             }
             _ = tick.tick() => {
-                pump_capture(&opts, &status, &tray, &mut capture).await;
+                pump_capture(&opts, &status, &tray, &mut capture, &capture_log, &completions)
+                    .await;
             }
         }
     };
@@ -187,6 +236,32 @@ pub async fn run(
     result
 }
 
+/// Move the shared capture lifecycle to `stage` and append the transition
+/// to the capture log (ninth pass §1: every transition is instrumented).
+fn set_capture_stage(status: &Arc<Mutex<TrayStatus>>, log: &CaptureLog, stage: CaptureStage) {
+    if let Ok(mut s) = status.lock() {
+        s.capture.set_stage(stage);
+        let line = s.capture.status_line();
+        log.record("stage", &line);
+    }
+}
+
+/// Record a capture failure at `stage`: the verbatim message goes to the
+/// log and the lifecycle lands in the visible Error state.
+fn fail_capture(
+    status: &Arc<Mutex<TrayStatus>>,
+    log: &CaptureLog,
+    stage: &'static str,
+    message: &str,
+) {
+    log.record(stage, message);
+    if let Ok(mut s) = status.lock() {
+        s.capture.fail(stage, message);
+        let line = s.capture.status_line();
+        log.record("stage", &line);
+    }
+}
+
 /// Toggle the Capture Inventory flow: start a ScreenCast session when
 /// idle, ask the running one to stop when capturing.
 async fn toggle_capture(
@@ -194,35 +269,28 @@ async fn toggle_capture(
     status: &Arc<Mutex<TrayStatus>>,
     tray: &Option<ksni::Handle<FrackerTray>>,
     capture: &mut Option<CaptureRun>,
+    log: &CaptureLog,
 ) {
     if let Some(run) = capture.as_ref() {
         run.stop.store(true, Ordering::Relaxed);
-        if let Ok(mut s) = status.lock() {
-            s.capture_line = Some("stopping capture…".to_owned());
-        }
+        set_capture_stage(status, log, CaptureStage::Finalizing);
+        log.record("finalizing", "stop requested by the tray toggle");
         refresh_tray(tray).await;
         return;
     }
 
-    if let Ok(mut s) = status.lock() {
-        s.capturing = true;
-        s.capture_line = Some("opening ScreenCast consent…".to_owned());
-        s.last_error = None;
-    }
+    set_capture_stage(status, log, CaptureStage::ConsentPending);
+    log.record("consent pending", "asking the ScreenCast portal for consent");
     refresh_tray(tray).await;
 
-    match start_capture(opts, status).await {
+    match start_capture(opts, status, log).await {
         Ok(run) => {
             println!("resident: capture started");
             *capture = Some(run);
         }
         Err(e) => {
             eprintln!("resident: capture start failed: {e}");
-            if let Ok(mut s) = status.lock() {
-                s.capturing = false;
-                s.capture_line = None;
-                s.last_error = Some(format!("capture: {e}"));
-            }
+            fail_capture(status, log, "consent pending", &e);
             refresh_tray(tray).await;
         }
     }
@@ -232,27 +300,46 @@ async fn toggle_capture(
 async fn start_capture(
     opts: &ResidentOptions,
     status: &Arc<Mutex<TrayStatus>>,
+    log: &CaptureLog,
 ) -> Result<CaptureRun, String> {
-    if let Ok(mut s) = status.lock() {
-        s.capture_line = Some("opening ScreenCast consent…".to_owned());
-    }
     let token = screencast::load_restore_token(&opts.state_dir);
+    match token.as_ref() {
+        Some(_) => log.record("consent pending", "using saved restore token"),
+        None => log.record(
+            "consent pending",
+            "no restore token yet (first run) — full consent required",
+        ),
+    }
     let negotiated = screencast::negotiate(token).await?;
+    log.record(
+        "consent pending",
+        &format!(
+            "consent granted; remote fd ready (restore_token {})",
+            if negotiated.restore_token.is_some() {
+                "issued"
+            } else {
+                "unchanged"
+            },
+        ),
+    );
     if let Some(tok) = negotiated.restore_token.clone() {
         if let Err(e) = screencast::save_restore_token(&opts.state_dir, &tok) {
             // A token we cannot persist costs Seth a consent dialog next
             // time; it is not fatal, but it is visible.
             eprintln!("resident: could not save ScreenCast token: {e}");
+            log.record("consent pending", &format!("could not save token: {e}"));
         }
     }
+    // Consent is done; the worker owns connecting → capturing.
+    set_capture_stage(status, log, CaptureStage::Connecting);
     let (tx, events) = std::sync::mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = stop.clone();
     let data_dir = opts.report.data_dir.clone();
-    let join = std::thread::spawn(move || capture_worker(data_dir, negotiated, stop_thread, tx));
-    if let Ok(mut s) = status.lock() {
-        s.capture_line = Some("Capture: 0 relic stacks, 0 parts, 0 arcanes".to_owned());
-    }
+    let worker_log = log.clone();
+    let join = std::thread::spawn(move || {
+        capture_worker(data_dir, negotiated, stop_thread, tx, worker_log)
+    });
     Ok(CaptureRun {
         stop,
         events,
@@ -262,30 +349,41 @@ async fn start_capture(
 
 /// The blocking capture worker: load content, connect PipeWire, and drain
 /// frames through the §2 pipeline until stopped. Every failure is sent to
-/// the loop as a visible [`CaptureEvent::Failed`].
+/// the loop as a visible [`CaptureEvent::Failed`] naming its stage.
 fn capture_worker(
     data_dir: PathBuf,
     negotiated: screencast::Negotiated,
     stop: Arc<AtomicBool>,
     tx: std::sync::mpsc::Sender<CaptureEvent>,
+    log: CaptureLog,
 ) {
-    let fail = |msg: String| {
-        let _ = tx.send(CaptureEvent::Failed(msg));
-    };
     let data = match CaptureData::load(&data_dir) {
         Ok(d) => d,
-        Err(e) => return fail(format!("capture data: {e}")),
+        Err(e) => {
+            return send_failed(&tx, "connecting", format!("capture data: {e}"));
+        }
     };
     let Some(layout) = data.layouts.get("relic").cloned() else {
-        return fail("capture: no relic layout in capture/layouts.toml".to_owned());
+        return send_failed(
+            &tx,
+            "connecting",
+            "capture: no relic layout in capture/layouts.toml".to_owned(),
+        );
     };
     let Some(engine) = crate::ocr::TesseractCliEngine::probe(layout) else {
-        return fail("capture: tesseract unavailable".to_owned());
+        return send_failed(&tx, "connecting", "capture: tesseract unavailable".to_owned());
     };
-    let mut source = match screencast::ScreenCastSource::new(negotiated, stop.clone()) {
+    let mut source = match screencast::ScreenCastSource::new(negotiated, stop.clone(), log.clone())
+    {
         Ok(s) => s,
-        Err(e) => return fail(format!("capture: {e}")),
+        Err(e) => {
+            return send_failed(&tx, "connecting", format!("capture: {e}"));
+        }
     };
+    // The stream is connected; from here the lifecycle is Capturing until
+    // the drain ends.
+    let _ = tx.send(CaptureEvent::Stage(CaptureStage::Capturing));
+    log.record("capturing", "draining frames (scroll your inventory)");
     let ctx = data.context();
     let idle = data.classifier.idle_stop_frames;
     let progress_tx = tx.clone();
@@ -303,23 +401,32 @@ fn capture_worker(
         Ok(session) => {
             let _ = tx.send(CaptureEvent::Finished(Box::new(session)));
         }
-        Err(e) => fail(format!("capture: {e}")),
+        Err(e) => send_failed(&tx, "capturing", format!("capture: {e}")),
     }
 }
 
-/// Drain the capture worker's events: refresh live counts, and on
-/// completion finalize the stock + regenerate the plan.
+/// Send a staged failure to the resident loop.
+fn send_failed(tx: &std::sync::mpsc::Sender<CaptureEvent>, stage: &'static str, message: String) {
+    let _ = tx.send(CaptureEvent::Failed { stage, message });
+}
+
+/// Drain the capture worker's events: apply lifecycle stages, refresh live
+/// counts, and on completion finalize the stock + regenerate the plan.
 async fn pump_capture(
     opts: &ResidentOptions,
     status: &Arc<Mutex<TrayStatus>>,
     tray: &Option<ksni::Handle<FrackerTray>>,
     capture: &mut Option<CaptureRun>,
+    log: &CaptureLog,
+    completions: &Arc<Mutex<Vec<elog::MissionCompletion>>>,
 ) {
     let Some(run) = capture.as_ref() else { return };
+    let mut stages: Vec<CaptureStage> = Vec::new();
     let mut latest: Option<capture::CaptureCounts> = None;
     let mut finished: Option<CaptureEvent> = None;
     loop {
         match run.events.try_recv() {
+            Ok(CaptureEvent::Stage(s)) => stages.push(s),
             Ok(CaptureEvent::Progress(c)) => latest = Some(c),
             Ok(ev) => {
                 finished = Some(ev);
@@ -327,38 +434,43 @@ async fn pump_capture(
             }
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => {
-                finished = Some(CaptureEvent::Failed(
-                    "capture worker stopped unexpectedly".to_owned(),
-                ));
+                finished = Some(CaptureEvent::Failed {
+                    stage: "capturing",
+                    message: "capture worker stopped unexpectedly".to_owned(),
+                });
                 break;
             }
         }
     }
 
+    let mut changed = false;
+    for stage in stages {
+        if let Ok(mut s) = status.lock() {
+            s.capture.set_stage(stage);
+            log.record("stage", &s.capture.status_line());
+            changed = true;
+        }
+    }
     if let Some(c) = latest {
         if finished.is_none() {
             if let Ok(mut s) = status.lock() {
-                s.capture_line = Some(format!(
-                    "Capture: {} relic stacks, {} parts, {} arcanes",
-                    c.relic_stacks, c.parts, c.arcanes
-                ));
+                s.capture.set_counts(c);
+                changed = true;
             }
-            refresh_tray(tray).await;
         }
+    }
+    if changed {
+        refresh_tray(tray).await;
     }
 
     match finished {
         Some(CaptureEvent::Finished(session)) => {
-            finalize_capture(opts, status, tray, *session).await;
+            finalize_capture(opts, status, tray, *session, log, completions).await;
             stop_capture(capture);
         }
-        Some(CaptureEvent::Failed(e)) => {
-            eprintln!("resident: capture failed: {e}");
-            if let Ok(mut s) = status.lock() {
-                s.capturing = false;
-                s.capture_line = None;
-                s.last_error = Some(e);
-            }
+        Some(CaptureEvent::Failed { stage, message }) => {
+            eprintln!("resident: capture failed ({stage}): {message}");
+            fail_capture(status, log, stage, &message);
             stop_capture(capture);
             refresh_tray(tray).await;
         }
@@ -374,12 +486,13 @@ async fn finalize_capture(
     status: &Arc<Mutex<TrayStatus>>,
     tray: &Option<ksni::Handle<FrackerTray>>,
     session: CaptureSession,
+    log: &CaptureLog,
+    completions: &Arc<Mutex<Vec<elog::MissionCompletion>>>,
 ) {
+    set_capture_stage(status, log, CaptureStage::Finalizing);
     if !session.has_any() {
-        if let Ok(mut s) = status.lock() {
-            s.capturing = false;
-            s.capture_line = Some("Capture: nothing collected".to_owned());
-        }
+        log.record("finalizing", "nothing collected — stock untouched");
+        set_capture_stage(status, log, CaptureStage::Idle);
         refresh_tray(tray).await;
         return;
     }
@@ -391,10 +504,7 @@ async fn finalize_capture(
             Err(e) => {
                 // Never clobber a stock file we cannot read.
                 eprintln!("resident: capture finalize: {e}");
-                if let Ok(mut s) = status.lock() {
-                    s.capturing = false;
-                    s.last_error = Some(format!("capture finalize: {e}"));
-                }
+                fail_capture(status, log, "finalizing", &format!("capture finalize: {e}"));
                 refresh_tray(tray).await;
                 return;
             }
@@ -404,22 +514,17 @@ async fn finalize_capture(
     session.finalize_into(&mut existing);
     if let Err(e) = existing.write_to(path) {
         eprintln!("resident: capture finalize: {e}");
-        if let Ok(mut s) = status.lock() {
-            s.capturing = false;
-            s.last_error = Some(format!("capture finalize: {e}"));
-        }
+        fail_capture(status, log, "finalizing", &format!("capture finalize: {e}"));
         refresh_tray(tray).await;
         return;
     }
 
     let summary = capture::captured_summary(&session);
     println!("resident: {summary} -> {}", path.display());
-    if let Ok(mut s) = status.lock() {
-        s.capturing = false;
-        s.capture_line = Some(summary);
-    }
+    log.record("finalizing", &format!("{summary} -> {}", path.display()));
     // Regenerate the plan from the fresh stock (and refresh the tray).
-    do_report(opts, status, tray, Trigger::Manual).await;
+    do_report(opts, status, tray, Trigger::Manual, completions).await;
+    set_capture_stage(status, log, CaptureStage::Idle);
 }
 
 /// Stop the worker (if any) and reap its thread.
@@ -446,9 +551,14 @@ async fn do_report(
     status: &Arc<Mutex<TrayStatus>>,
     tray: &Option<ksni::Handle<FrackerTray>>,
     trigger: Trigger,
+    completions: &Arc<Mutex<Vec<elog::MissionCompletion>>>,
 ) {
     println!("resident: regenerating page ({trigger:?})");
-    match report::generate(&opts.report).await {
+    let proven: Vec<elog::MissionCompletion> = completions
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+    match report::generate(&opts.report, &proven).await {
         Ok(outcome) => {
             if let Ok(mut s) = status.lock() {
                 s.last_report = Some(chrono::Local::now().format("%H:%M:%S").to_string());
@@ -470,18 +580,25 @@ async fn do_report(
     refresh_tray(tray).await;
 }
 
-/// "Open plan page": generate when the report does not exist yet, then
-/// open it via the OpenURI `OpenFile` portal (with an `xdg-open` fallback
-/// only for an absent portal). A portal refusal is surfaced, never silent.
+/// "Open plan page" (ninth pass §2): open the loopback URL via the
+/// OpenURI portal (default browser, no chooser) when the server is up,
+/// else fall back to the OpenFile route on the rendered path. The report
+/// is generated first when missing. A failure is surfaced, never silent.
 async fn open_page(
     opts: &ResidentOptions,
     status: &Arc<Mutex<TrayStatus>>,
     tray: &Option<ksni::Handle<FrackerTray>>,
+    completions: &Arc<Mutex<Vec<elog::MissionCompletion>>>,
+    plan_server: &Option<server::PlanServer>,
 ) {
     let out = &opts.report.out;
     if !out.exists() {
         println!("resident: no report yet; generating before open");
-        if let Err(e) = report::generate(&opts.report).await {
+        let proven: Vec<elog::MissionCompletion> = completions
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        if let Err(e) = report::generate(&opts.report, &proven).await {
             eprintln!("resident: report failed: {e}");
             if let Ok(mut s) = status.lock() {
                 s.last_error = Some(e);
@@ -490,12 +607,16 @@ async fn open_page(
             return;
         }
     }
-    match portal::open_plan(out).await {
-        Ok(()) => {
+    let opened = match plan_server {
+        Some(s) => portal::open_url(s.url()).await.map(|()| s.url().to_owned()),
+        None => portal::open_plan(out).await.map(|()| out.display().to_string()),
+    };
+    match opened {
+        Ok(target) => {
             if let Ok(mut s) = status.lock() {
                 s.last_error = None;
             }
-            println!("resident: opened {}", out.display());
+            println!("resident: opened {target}");
         }
         Err(e) => {
             eprintln!("resident: open failed: {e}");
@@ -523,6 +644,7 @@ fn spawn_watch(
     status: Arc<Mutex<TrayStatus>>,
     trigger_tx: mpsc::UnboundedSender<Trigger>,
     shutdown: watch::Receiver<bool>,
+    completions: Arc<Mutex<Vec<elog::MissionCompletion>>>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         if let Err(e) = watch_loop(
@@ -532,6 +654,7 @@ fn spawn_watch(
             status.clone(),
             trigger_tx,
             shutdown,
+            completions,
         ) {
             eprintln!("resident: watch stopped: {e}");
             if let Ok(mut s) = status.lock() {
@@ -539,6 +662,11 @@ fn spawn_watch(
             }
         }
     })
+}
+
+/// The UTC date (`YYYY-MM-DD`) the §4 mission ledger is scoped to.
+fn today_utc() -> String {
+    chrono::Utc::now().format("%Y-%m-%d").to_string()
 }
 
 /// The watch loop: reconcile, tail, classify, trigger, persist.
@@ -549,6 +677,7 @@ fn watch_loop(
     status: Arc<Mutex<TrayStatus>>,
     trigger_tx: mpsc::UnboundedSender<Trigger>,
     shutdown: watch::Receiver<bool>,
+    completions: Arc<Mutex<Vec<elog::MissionCompletion>>>,
 ) -> Result<(), String> {
     let mut st = AppState::load(&state_dir)?;
     let mut watcher = LogWatcher::open(&log_path)?;
@@ -563,12 +692,37 @@ fn watch_loop(
     let mut last_tick = Instant::now();
     let mut last_inode = watcher.position().inode;
 
+    // Ninth pass §4: the mission ledger. `missions` pairs each armed
+    // `MissionInfo` block with its end-of-match success marker; proven
+    // completions are stamped with the UTC day, persisted in app state,
+    // and published to the shared ledger every report reads.
+    let mut missions = elog::MissionLog::new();
+    let mut today = today_utc();
+    st.mission_completions.retain(|c| c.day == today);
+    if let Ok(mut g) = completions.lock() {
+        *g = st.mission_completions.clone();
+    }
+
     loop {
         if *shutdown.borrow() {
             break;
         }
         let lines = watcher.next_lines(interval_ms)?;
         let pos = watcher.position();
+
+        // A UTC day rollover retires yesterday's completions: the ledger
+        // is today-scoped (ninth pass §4).
+        let mut rolled = false;
+        let now_day = today_utc();
+        if now_day != today {
+            today = now_day;
+            st.mission_completions.retain(|c| c.day == today);
+            if let Ok(mut g) = completions.lock() {
+                g.retain(|c| c.day == today);
+            }
+            rolled = true;
+        }
+
         // A fresh inode (file appeared or rotated) is a hard session edge
         // (addendum #37): the tracker sees an infinite gap so a re-login
         // reads as a start, and the appearance itself fires a report.
@@ -594,6 +748,16 @@ fn watch_loop(
             if ev.as_ref().map_or(false, |e| e.is_mission_end()) {
                 let _ = trigger_tx.send(Trigger::MissionEnd);
             }
+            // §4: prove a mission from its armed identity + success marker.
+            if let Some(done) = missions.feed(raw, &today) {
+                st.mission_completions.push(done.clone());
+                if let Ok(mut g) = completions.lock() {
+                    g.push(done);
+                }
+                // A proven completion is worth a fresh page even when the
+                // marker did not classify as a mission-end event.
+                let _ = trigger_tx.send(Trigger::MissionEnd);
+            }
         }
         // One session start per read, whether from the file edge or a
         // `Logged in` line (they often arrive together).
@@ -601,7 +765,7 @@ fn watch_loop(
             let _ = trigger_tx.send(Trigger::SessionStart);
         }
 
-        let dirty = !lines.is_empty() || pos != st.log_position;
+        let dirty = !lines.is_empty() || pos != st.log_position || rolled;
         st.log_position = pos;
         if dirty {
             st.save(&state_dir)?;
@@ -661,6 +825,7 @@ mod tests {
             status,
             tx,
             shutdown.receiver(),
+            Arc::new(Mutex::new(Vec::new())),
         );
 
         // No file yet: nothing fires.
@@ -695,7 +860,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let shutdown = Shutdown::new();
         let status = Arc::new(Mutex::new(TrayStatus::default()));
-        let handle = spawn_watch(log.clone(), 20, state.clone(), status, tx, shutdown.receiver());
+        let handle = spawn_watch(log.clone(), 20, state.clone(), status, tx, shutdown.receiver(), Arc::new(Mutex::new(Vec::new())));
         assert_eq!(recv_trigger(&mut rx), Some(Trigger::SessionStart));
         // Drain any stragglers.
         while rx.try_recv().is_ok() {}

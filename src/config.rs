@@ -23,6 +23,11 @@ pub struct Config {
     /// Endless missions always default to the normal path (brain-off
     /// beats scaling enemies) regardless of this toggle.
     pub steel_path_tiebreak: bool,
+    /// Loopback HTTP port the resident serves the plan on (ninth pass
+    /// §2). The stored default; when it is taken the server falls back to
+    /// an ephemeral port and records the live URL for the tray's Open
+    /// action. 0 = always pick an ephemeral port.
+    pub serve_port: u16,
 }
 
 impl Default for Config {
@@ -33,6 +38,7 @@ impl Default for Config {
             xuerian_token: String::new(),
             pins: Vec::new(),
             steel_path_tiebreak: true,
+            serve_port: 8791,
         }
     }
 }
@@ -76,6 +82,9 @@ impl Config {
             .and_then(|v| v.as_bool())
         {
             cfg.steel_path_tiebreak = v;
+        }
+        if let Some(v) = table.get("serve_port").and_then(|v| v.as_integer()) {
+            cfg.serve_port = v.clamp(0, 65535) as u16;
         }
         Ok((cfg, ConfigSource::File))
     }
@@ -216,6 +225,7 @@ mod tests {
         assert_eq!(cfg.xuerian_token, "");
         assert!(cfg.pins.is_empty());
         assert!(cfg.use_seed_targets());
+        assert_eq!(cfg.serve_port, 8791, "sane stored default loopback port");
     }
 
     #[test]
@@ -233,6 +243,7 @@ pop_on_session_start = false
 xuerian_token = "sekrit"
 pins = ["Khora Prime Blueprint", "Ivara Prime Chassis Blueprint"]
 steel_path_tiebreak = false
+serve_port = 9123
 "#;
         let (cfg, src) = Config::from_toml(text).unwrap();
         assert_eq!(src, ConfigSource::File);
@@ -242,6 +253,15 @@ steel_path_tiebreak = false
         assert_eq!(cfg.pins.len(), 2);
         assert!(!cfg.use_seed_targets());
         assert!(!cfg.steel_path_tiebreak);
+        assert_eq!(cfg.serve_port, 9123);
+    }
+
+    #[test]
+    fn serve_port_is_clamped_to_a_valid_range() {
+        let (cfg, _) = Config::from_toml("serve_port = 99999\n").unwrap();
+        assert_eq!(cfg.serve_port, 65535);
+        let (zero, _) = Config::from_toml("serve_port = 0\n").unwrap();
+        assert_eq!(zero.serve_port, 0, "0 = ephemeral");
     }
 
     #[test]

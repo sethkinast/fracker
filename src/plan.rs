@@ -37,6 +37,10 @@ pub struct PlanInput<'a> {
     /// Normalized gear names of the last two prime releases (radshare gate).
     pub recent_gear: &'a HashSet<String>,
     pub steel_path_tiebreak: bool,
+    /// Log-proven mission completions (ninth pass §4): the resident's
+    /// accumulated, today-scoped ledger. Used to strike live alerts that
+    /// the log positively matched (never inferred).
+    pub completed_missions: &'a [crate::elog::MissionCompletion],
     /// Runtime estimates/thresholds (loaded from `data/`).
     pub tuning: &'a Tuning,
 }
@@ -208,6 +212,9 @@ pub struct AlertView {
     pub mission_type: String,
     pub payout: String,
     pub left: String,
+    /// Proven complete in the EE.log (ninth pass §4): the row renders
+    /// struck-through. Only ever true on a positive identity match.
+    pub done: bool,
 }
 
 /// Live rotation ∩ unmastered vaulted items: the tool's showcase
@@ -1533,11 +1540,17 @@ fn donow_alerts(input: &PlanInput<'_>) -> (Vec<AlertView>, Vec<AlertView>) {
             .iter()
             .map(|c| format!("{}× {}", c.count, c.kind))
             .collect();
+        // Ninth pass §4: strike only on a positive log match.
+        let done = input
+            .completed_missions
+            .iter()
+            .any(|c| c.matches_alert(alert));
         let view = AlertView {
             node: alert.mission.node.clone(),
             mission_type: alert.mission.mission_type.clone(),
             payout: payout.join(", "),
             left: mins_left_label(input.now, expiry),
+            done,
         };
         if alert.is_lotus() {
             lotus.push(view);
@@ -1599,6 +1612,7 @@ fn goal_cards_for(input: &PlanInput<'_>, active: &[String]) -> Vec<GoalCard> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::elog;
     use crate::model::{Fissure, RelicTables, Roster, WorldState};
 
     fn tuning() -> Tuning {
@@ -1813,6 +1827,7 @@ mod tests {
             pins: &[],
             recent_gear: &recent,
             steel_path_tiebreak: true,
+            completed_missions: &[],
             tuning: &tuning(),
         });
         assert_eq!(p.focus.len(), 3, "at most 3 parts");
@@ -1906,6 +1921,7 @@ mod tests {
             pins: &[],
             recent_gear: &recent,
             steel_path_tiebreak: true,
+            completed_missions: &[],
             tuning: &tuning(),
         });
         let order: Vec<&str> = p.goals.iter().map(|g| g.gear.as_str()).collect();
@@ -1948,6 +1964,7 @@ mod tests {
             pins: &[],
             recent_gear: &recent,
             steel_path_tiebreak: true,
+            completed_missions: &[],
             tuning: &tuning(),
         });
         assert_eq!(unpinned.goals[0].gear, "Khora Prime");
@@ -1963,6 +1980,7 @@ mod tests {
             pins: &pins,
             recent_gear: &recent,
             steel_path_tiebreak: true,
+            completed_missions: &[],
             tuning: &tuning(),
         });
         assert_eq!(p.goals[0].gear, "Zakti Prime");
@@ -2027,6 +2045,7 @@ mod tests {
                 pins: &pins,
                 recent_gear: &recent,
                 steel_path_tiebreak: true,
+                completed_missions: &[],
                 tuning: &tuning(),
             })
         };
@@ -2109,6 +2128,7 @@ mod tests {
             pins: &pins,
             recent_gear: &recent,
             steel_path_tiebreak: true,
+            completed_missions: &[],
             tuning: &t,
         });
         assert_eq!(p.event_alerts.len(), 1, "expired alert drops out");
@@ -2131,11 +2151,85 @@ mod tests {
             pins: &pins,
             recent_gear: &recent,
             steel_path_tiebreak: true,
+            completed_missions: &[],
             tuning: &t,
         });
         assert!(q.event_alerts.is_empty() && q.lotus_alerts.is_empty());
         let b = q.baro.expect("trader live mid-window");
         assert_eq!(b.location, "Orcus Relay (Pluto)");
         assert!(!b.ends_in.is_empty());
+    }
+
+    /// Ninth pass §4: a log-proven completion strikes exactly the alert
+    /// it positively identifies, and nothing else.
+    #[test]
+    fn log_completed_alert_renders_struck_only_on_a_positive_match() {
+        let tables = mini_tables();
+        let roster = mini_roster();
+        let now: DateTime<Utc> = "2026-10-16T02:55:00Z".parse().unwrap();
+        let mut alerts = vec![
+            syn_alert("e1", "RoadToTauEvent", "Event Alert Title", "2026-10-16T03:00:00Z", true),
+            syn_alert("e2", "RoadToTauEvent", "Event Alert Title", "2026-10-16T03:10:00Z", true),
+        ];
+        // The sibling carries the same tag but a different mission type,
+        // so only the positively identified alert may strike.
+        alerts[1].mission.mission_type = "Extermination".to_owned();
+        let world = WorldState {
+            alerts,
+            ..Default::default()
+        };
+        let owned = OwnedEquipment::empty();
+        let stock = RelicStock::Unknown;
+        let wants = vec!["Khora Prime Blueprint".to_owned()];
+        let pins: Vec<String> = Vec::new();
+        let recent: HashSet<String> = HashSet::new();
+        let t = tuning();
+
+        let completion = elog::MissionCompletion {
+            info: elog::MissionInfo {
+                alert_id: "e1".to_owned(),
+                alert_tag: "RoadToTauEvent".to_owned(),
+                mission_type: "MT_SURVIVAL".to_owned(),
+                ..Default::default()
+            },
+            day: "2026-10-16".to_owned(),
+        };
+        let completions = vec![completion];
+        let p = plan(&PlanInput {
+            now,
+            world: &world,
+            owned: &owned,
+            wants: &wants,
+            roster: &roster,
+            relics: &tables,
+            stock: &stock,
+            pins: &pins,
+            recent_gear: &recent,
+            steel_path_tiebreak: true,
+            completed_missions: &completions,
+            tuning: &t,
+        });
+        assert_eq!(p.event_alerts.len(), 2);
+        let e1 = p.event_alerts.iter().find(|a| a.left == "5m").unwrap();
+        let e2 = p.event_alerts.iter().find(|a| a.left == "15m").unwrap();
+        assert!(e1.done, "the positively identified alert is struck");
+        assert!(!e2.done, "a sibling alert is never struck by inference");
+
+        // With no log state, nothing is struck (auto/manual parity).
+        let q = plan(&PlanInput {
+            now,
+            world: &world,
+            owned: &owned,
+            wants: &wants,
+            roster: &roster,
+            relics: &tables,
+            stock: &stock,
+            pins: &pins,
+            recent_gear: &recent,
+            steel_path_tiebreak: true,
+            completed_missions: &[],
+            tuning: &t,
+        });
+        assert!(q.event_alerts.iter().all(|a| !a.done));
     }
 }

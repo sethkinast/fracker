@@ -105,13 +105,16 @@ fn donow_alert_section(
     for a in alerts {
         let est = tuning.missions.base_minutes(&a.mission_type) as u32
             + tuning.missions.overhead as u32;
+        let done_cls = if a.done { " done" } else { "" };
+        let done_note = if a.done { " · log &check;" } else { "" };
         h.push_str(&format!(
-            "<div class=\"card exp {cls}\"><span class=\"exp-title\">{} ({}) — {}</span>\n<span class=\"exp-sub\">{} left · ~{}m</span></div>\n",
+            "<div class=\"card exp {cls}{done_cls}\"><span class=\"exp-title\">{} ({}) — {}</span>\n<span class=\"exp-sub\">{} left · ~{}m{}</span></div>\n",
             esc(&a.node),
             esc(&a.mission_type),
             esc(&a.payout),
             esc(&a.left),
             est,
+            done_note,
         ));
     }
     h.push_str("</div>\n");
@@ -187,7 +190,11 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     }
     h.push_str("<style>\n");
     h.push_str(CSS);
-    h.push_str("\n</style>\n</head>\n<body>\n<div class=\"wrap\">\n");
+    h.push_str("\n</style>\n</head>\n");
+    // The in-game day the tick store is keyed by (ninth pass §2): the plan
+    // date, read by the client + the loopback server when applying ticks.
+    let day = ctx.generated_label.get(..10).unwrap_or("");
+    h.push_str(&format!("<body data-day=\"{}\">\n<div class=\"wrap\">\n", esc(day)));
 
     // ---- header ----
     h.push_str("<header class=\"masthead\">\n");
@@ -450,35 +457,7 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     h.push_str("<section><h2>Today</h2>\n<div class=\"bars\">\n");
     let caps = &ctx.tuning.planner.daily_caps;
     match &ctx.daily {
-        Some(d) => {
-            h.push_str(&pool_bar(
-                "Focus",
-                d.focus_remaining,
-                d.focus_cap,
-                false,
-            ));
-            h.push_str(&pool_bar(
-                caps.label_for("main"),
-                d.affiliation_remaining,
-                d.affiliation_cap,
-                false,
-            ));
-            let have: HashMap<&str, u32> =
-                d.families.iter().map(|(k, v)| (k.as_str(), *v)).collect();
-            for fam in &caps.families {
-                if fam.eq_ignore_ascii_case("pvp") {
-                    continue;
-                }
-                if let Some(remaining) = have.get(fam.as_str()).copied() {
-                    h.push_str(&pool_bar(
-                        caps.label_for(fam),
-                        remaining,
-                        d.affiliation_cap,
-                        true,
-                    ));
-                }
-            }
-        }
+        Some(d) => h.push_str(&pool_bars_html(d, caps)),
         None => {
             let (focus_cap, stand_cap) = match ctx.mastery_rank {
                 Some(mr) => (
@@ -777,6 +756,39 @@ fn fmt_int(n: u32) -> String {
     out.chars().rev().collect()
 }
 
+/// The pass-4 daily pool bars — Focus (full size), the bare shared
+/// `DailyAffiliation` pool labelled via the data-owned map (full size),
+/// then one slim bar per family. The remaining values are the profile's
+/// own REMAINING amounts, printed verbatim (never estimated, never
+/// arithmetic-transformed). Public so the ninth-pass §3 audit test can
+/// assert rendered remaining == the profile's raw values for every pool,
+/// including the bare one.
+pub fn pool_bars_html(d: &DailyRender, caps: &crate::tuning::DailyCapsTuning) -> String {
+    let mut h = String::new();
+    h.push_str(&pool_bar("Focus", d.focus_remaining, d.focus_cap, false));
+    h.push_str(&pool_bar(
+        caps.label_for("main"),
+        d.affiliation_remaining,
+        d.affiliation_cap,
+        false,
+    ));
+    let have: HashMap<&str, u32> = d.families.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+    for fam in &caps.families {
+        if fam.eq_ignore_ascii_case("pvp") {
+            continue;
+        }
+        if let Some(remaining) = have.get(fam.as_str()).copied() {
+            h.push_str(&pool_bar(
+                caps.label_for(fam),
+                remaining,
+                d.affiliation_cap,
+                true,
+            ));
+        }
+    }
+    h
+}
+
 /// One standing/focus pool bar: remaining-of-cap, terse label. Full
 /// pools dim (`bar-full`) — the pattern is the information. Family
 /// pools render slim; Focus + the main pool render full-size.
@@ -843,6 +855,8 @@ section { margin-bottom: 6px; }
 .do-sub { color: #7e8898; margin-top: 6px; }
 .expiring { display: grid; gap: 2px; margin-top: 8px; }
 .exp { padding: 12px 16px; }
+.exp.done { opacity: .5; }
+.exp.done .exp-title { text-decoration: line-through; }
 .exp-title { font-family: Rajdhani, sans-serif; font-weight: 600; font-size: 16px; }
 .exp-sub { color: #7e8898; font-size: 13px; display: block; margin-top: 2px; }
 .slate { display: grid; gap: 2px; }
@@ -1003,28 +1017,53 @@ details.alt { margin-top: 6px; font-size: 13px; color: #7e8898; }
 "#;
 
 const JS: &str = r#"
-// Checkbox persistence: localStorage keyed by plan-item id + in-game date.
+// Checkbox ticks: the resident's loopback HTTP server is the store of
+// record (POST /tick, keyed by item id + in-game day) and re-applies the
+// ticks it injects onto <body data-fracker-ticks> (base64 JSON) on every
+// serve. localStorage remains only a progressive cache for a file://
+// page. The 60s meta-refresh reloads the served page, so ticks survive.
 (function () {
-  var date = document.querySelector('.stamp');
-  var day = (date ? date.textContent : '').slice(0, 10).replace(/[^0-9-]/g, '');
+  var day = document.body.getAttribute('data-day') || '';
+  var served = document.body.hasAttribute('data-fracker-ticks');
+  var done = {};
+  try {
+    var raw = document.body.getAttribute('data-fracker-ticks');
+    if (raw) {
+      var store = JSON.parse(atob(raw)).days || {};
+      (store[day] || []).forEach(function (i) { done[i] = true; });
+    }
+  } catch (e) {}
   function key(id) { return 'fracker:' + day + ':' + id; }
+  function host(box) { return box.closest('.chunk,.nw,.wk,.bar,.card'); }
+  function paint(box, on) {
+    var h = host(box);
+    if (h) { h.classList.toggle('done', on); }
+    if (box.checked !== on) { box.checked = on; }
+  }
   document.querySelectorAll('input[type=checkbox][data-id]').forEach(function (box) {
     var id = box.getAttribute('data-id');
-    try {
-      if (localStorage.getItem(key(id)) === '1' && !box.checked) { box.checked = true; }
-    } catch (e) {}
+    var on = !!done[id];
+    // localStorage is only a fallback for a file:// page: when the
+    // resident serves the page, its tick store is authoritative.
+    if (!served) {
+      try { if (localStorage.getItem(key(id)) === '1') { on = true; } } catch (e) {}
+    }
+    if (on) { paint(box, true); }
     box.addEventListener('change', function () {
-      var host = box.closest('.chunk,.nw,.wk,.bar,.card');
-      if (host) { host.classList.toggle('done', box.checked); }
+      var checked = box.checked;
+      paint(box, checked);
       try {
-        if (box.checked) { localStorage.setItem(key(id), '1'); }
+        if (checked) { localStorage.setItem(key(id), '1'); }
         else { localStorage.removeItem(key(id)); }
       } catch (e) {}
+      try {
+        fetch('/tick', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: id, day: day, done: checked })
+        });
+      } catch (e) {}
     });
-    if (box.checked) {
-      var host = box.closest('.chunk,.nw,.wk,.bar,.card');
-      if (host) { host.classList.add('done'); }
-    }
   });
 })();
 "#;
@@ -1070,6 +1109,14 @@ mod tests {
         assert!(html.contains("color-scheme: dark"), "refresh-flash rule");
         assert!(html.contains("http-equiv=\"refresh\""), "meta refresh");
         assert!(html.contains("localStorage"), "checkbox persistence");
+        assert!(
+            html.contains("data-day=\""),
+            "the in-game day is on the body for tick keying (§2)"
+        );
+        assert!(
+            html.contains("fetch('/tick'"),
+            "checkbox changes POST to the loopback server (§2)"
+        );
         assert!(html.contains("Rajdhani"), "game-adjacent type");
         assert!(html.contains("clip-path"), "chamfered cards");
         // v2 tabs: empty plan has no loud line; all three tabs render.
@@ -1380,12 +1427,14 @@ mod tests {
                 mission_type: "Survival".to_owned(),
                 payout: "50× Road To Tau Event Resource".to_owned(),
                 left: "25m".to_owned(),
+                done: true,
             }],
             lotus_alerts: vec![AlertView {
                 node: "Larunda (Mercury)".to_owned(),
                 mission_type: "Capture".to_owned(),
                 payout: "Orokin Catalyst".to_owned(),
                 left: "1h05m".to_owned(),
+                done: false,
             }],
             resurgence: Some(ResurgenceView {
                 contact: "Varzia".to_owned(),
@@ -1409,6 +1458,9 @@ mod tests {
         assert!(html.contains("50× Road To Tau Event Resource"));
         assert!(html.contains("25m left"));
         assert!(html.contains("Larunda (Mercury)"));
+        // Ninth pass §4: a log-proven alert renders struck with the proof.
+        assert!(html.contains("class=\"card exp evt done\""));
+        assert!(html.contains("log &check;"));
         let evt_pos = html.find("Nimus (Eris)").unwrap();
         let lotus_pos = html.find("Larunda (Mercury)").unwrap();
         assert!(evt_pos < lotus_pos, "events render before gifts");

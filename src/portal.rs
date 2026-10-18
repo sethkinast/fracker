@@ -98,6 +98,57 @@ pub async fn open_plan(path: &Path) -> Result<(), String> {
     }
 }
 
+/// Open an `http://` URL (ninth pass §2) with the user's default browser.
+///
+/// This is the loopback-served plan page route: portal `OpenURI` first
+/// (default browser, no chooser, no FD handoff), `xdg-open` only when the
+/// portal itself is unreachable. A portal refusal is surfaced, never
+/// hidden.
+pub async fn open_url(url: &str) -> Result<(), String> {
+    match open_via_openuri_portal(url).await {
+        Ok(()) => Ok(()),
+        Err(PortalError::Unavailable(why)) => match open_via_xdg_open_url(url) {
+            Ok(()) => Ok(()),
+            Err(fallback) => Err(format!(
+                "OpenURI portal unavailable ({why}); xdg-open fallback: {fallback}"
+            )),
+        },
+        Err(PortalError::Failed(why)) => Err(why),
+    }
+}
+
+/// `org.freedesktop.portal.OpenURI.OpenURI(parent_window, uri, options)`,
+/// awaiting the request's `Response` signal.
+async fn open_via_openuri_portal(url: &str) -> Result<(), PortalError> {
+    let conn = zbus::Connection::session()
+        .await
+        .map_err(|e| PortalError::Unavailable(format!("session bus: {e}")))?;
+    let unique = conn
+        .unique_name()
+        .map(|n| n.as_str().to_owned())
+        .ok_or_else(|| PortalError::Unavailable("session bus has no unique name".to_owned()))?;
+
+    let token = handle_token();
+    let req_path = request_path(&unique, &token);
+
+    let mut options: HashMap<String, Value> = HashMap::new();
+    options.insert("handle_token".to_owned(), Value::from(token));
+    let body = ("", url, options);
+    portal_open(&conn, &req_path, || async {
+        conn.call_method(
+            Some(PORTAL_DEST),
+            PORTAL_PATH,
+            Some(OPENURI_IFACE),
+            "OpenURI",
+            &body,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| PortalError::Unavailable(format!("OpenURI call: {e}")))
+    })
+    .await
+}
+
 /// `org.freedesktop.portal.OpenURI.OpenFile(parent_window, fd, options)`
 /// with an FD opened from the app-owned file, awaiting the `Response`.
 async fn open_via_openfile_portal(path: &Path) -> Result<(), PortalError> {
@@ -116,9 +167,39 @@ async fn open_via_openfile_portal(path: &Path) -> Result<(), PortalError> {
     let token = handle_token();
     let req_path = request_path(&unique, &token);
 
-    // Subscribe to the request's Response *before* the call so the signal
-    // cannot be missed (the handle is predictable from the token).
-    let req_proxy = zbus::Proxy::new(&conn, PORTAL_DEST, req_path.as_str(), REQUEST_IFACE)
+    let mut options: HashMap<String, Value> = HashMap::new();
+    options.insert("handle_token".to_owned(), Value::from(token));
+    let fd = Fd::from(std::os::fd::OwnedFd::from(file));
+    let body = ("", fd, options);
+    portal_open(&conn, &req_path, || async {
+        conn.call_method(
+            Some(PORTAL_DEST),
+            PORTAL_PATH,
+            Some(OPENURI_IFACE),
+            "OpenFile",
+            &body,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| PortalError::Unavailable(format!("OpenFile call: {e}")))
+    })
+    .await
+}
+
+/// Subscribe to a portal request's `Response` *before* sending the call
+/// (the request handle is predictable from the token, so the signal can
+/// never race the subscription), send it, then await and classify the
+/// answer. Shared by `OpenURI` and `OpenFile`.
+async fn portal_open<F, Fut>(
+    conn: &zbus::Connection,
+    req_path: &str,
+    send: F,
+) -> Result<(), PortalError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), PortalError>>,
+{
+    let req_proxy = zbus::Proxy::new(conn, PORTAL_DEST, req_path, REQUEST_IFACE)
         .await
         .map_err(|e| PortalError::Unavailable(format!("portal request proxy: {e}")))?;
     let mut responses = req_proxy
@@ -126,19 +207,7 @@ async fn open_via_openfile_portal(path: &Path) -> Result<(), PortalError> {
         .await
         .map_err(|e| PortalError::Unavailable(format!("subscribe Response: {e}")))?;
 
-    let mut options: HashMap<String, Value> = HashMap::new();
-    options.insert("handle_token".to_owned(), Value::from(token));
-    let fd = Fd::from(std::os::fd::OwnedFd::from(file));
-    let body = ("", fd, options);
-    conn.call_method(
-        Some(PORTAL_DEST),
-        PORTAL_PATH,
-        Some(OPENURI_IFACE),
-        "OpenFile",
-        &body,
-    )
-    .await
-    .map_err(|e| PortalError::Unavailable(format!("OpenFile call: {e}")))?;
+    send().await?;
 
     let signal = tokio::time::timeout(RESPONSE_TIMEOUT, responses.next())
         .await
@@ -195,9 +264,13 @@ pub(crate) fn handle_token() -> String {
 /// a detached thread so a long-lived browser handoff never blocks or leaks
 /// a zombie.
 fn open_via_xdg_open(path: &Path) -> Result<(), String> {
-    let uri = file_uri(path);
+    open_via_xdg_open_url(&file_uri(path))
+}
+
+/// Dev/unsandboxed fallback for a plain URL (the loopback plan page).
+fn open_via_xdg_open_url(url: &str) -> Result<(), String> {
     let mut child = std::process::Command::new("xdg-open")
-        .arg(&uri)
+        .arg(url)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
