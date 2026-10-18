@@ -158,13 +158,6 @@ fn titlecase(s: &str) -> String {
     }
 }
 
-fn world_age(world: &WorldState) -> String {
-    if world.timestamp.is_empty() {
-        return "unknown age".to_owned();
-    }
-    format!("as of {}", esc(&world.timestamp))
-}
-
 fn rarity_class(r: crate::plan::Rarity) -> &'static str {
     match r {
         crate::plan::Rarity::Common => "chip-common",
@@ -196,104 +189,35 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     let day = ctx.generated_label.get(..10).unwrap_or("");
     h.push_str(&format!("<body data-day=\"{}\">\n<div class=\"wrap\">\n", esc(day)));
 
-    // ---- header ----
-    h.push_str("<header class=\"masthead\">\n");
-    h.push_str("<div class=\"brand\">FRACKER</div>\n");
-    h.push_str(&format!(
-        "<div class=\"stamp\">plan generated {} &middot; world state {} &middot; targets: {}</div>\n",
-        esc(&ctx.generated_label),
-        esc(&world_age(ctx.world)),
-        esc(&ctx.targets_status),
-    ));
-    h.push_str("</header>\n");
+    // ---- slim header: brand + three status pills + one-line stamp ----
+    h.push_str(&header_html(plan, ctx));
 
-    // ---- tabs: First Crack (≤3-part slate) / Hunt (all primes) / Backlog (all gear) ----
+    // ---- four tabs: First Crack / Hunt / Backlog / Routine ----
+    // (Same CSS-radio mechanism as before; item ids — the tick keys —
+    // are unchanged by the restructure, so moved rows keep identity.)
     h.push_str("<div class=\"tabs\">\n");
     h.push_str("<input type=\"radio\" name=\"tab\" id=\"tab-donow\" checked><label class=\"tab\" for=\"tab-donow\">First Crack</label>\n");
     h.push_str("<input type=\"radio\" name=\"tab\" id=\"tab-hunt\"><label class=\"tab\" for=\"tab-hunt\">Hunt</label>\n");
     h.push_str("<input type=\"radio\" name=\"tab\" id=\"tab-backlog\"><label class=\"tab\" for=\"tab-backlog\">Backlog</label>\n");
+    h.push_str("<input type=\"radio\" name=\"tab\" id=\"tab-routine\"><label class=\"tab\" for=\"tab-routine\">Routine</label>\n");
 
-    // ---- tab 1: do now ----
-    // Pass-4 band, top to bottom: time-limited event alerts (§a),
-    // the separate gift section (§b, hides when empty), the
-    // first-class rotation element (§d), then the ≤3 focus relics
-    // with what they give (§c) + the slate. Exactly ONE loud element
-    // (the current instruction); everything else stays quiet.
+    // ---- tab 1: First Crack — ACTION ONLY ----
+    // Event alerts, the crack queue, the Varzia strip, the pack strip,
+    // and a closing one-liner. NO standing bars, NO weeklies, nothing
+    // routine (that lives under Routine now).
     h.push_str("<div class=\"tabpage\" id=\"page-donow\">\n<section><h2>First crack</h2>\n");
     donow_alert_section(&mut h, &ctx.tuning.planner.alert_sections.event_header, &plan.event_alerts, ctx.tuning, "evt");
     donow_alert_section(&mut h, &ctx.tuning.planner.alert_sections.lotus_header, &plan.lotus_alerts, ctx.tuning, "lotus");
+    h.push_str(&crack_queue_html(plan, ctx));
     if let Some(r) = &plan.resurgence {
+        h.push_str(&resurgence_strip_html(r));
+    }
+    h.push_str(&pack_strip_html(ctx));
+    if !plan.notes.is_empty() {
         h.push_str(&format!(
-            "<div class=\"card resurg-first\"><span class=\"resurg-line\">{} — {} ({}) · ends {}</span>\n<span class=\"resurg-sub\">Vaulted relics for {} while the rotation is live.</span></div>\n",
-            esc(&r.contact),
-            esc(&r.gears.join(", ")),
-            esc(&r.location),
-            esc(&r.ends_in),
-            esc(&r.currency),
+            "<div class=\"closing\">{}</div>\n",
+            esc(&plan.notes.join(" · ")),
         ));
-    }
-    if !plan.focus.is_empty() {
-        h.push_str("<div class=\"focus\">\n");
-        for f in &plan.focus {
-            h.push_str(&format!(
-                "<span class=\"focus-part\">{}&nbsp;{} · {} · {}</span>\n",
-                icon_span(&f.gear, ctx, "focus-icon"),
-                esc(&f.part),
-                esc(&f.gear),
-                esc(&f.era),
-            ));
-        }
-        h.push_str("</div>\n");
-    }
-    let top: Vec<&crate::plan::Chunk> =
-        plan.chunks.iter().filter(|c| c.tier == 1).collect();
-    if top.is_empty() {
-        h.push_str("<div class=\"card quiet\">Nothing expiring.</div>\n");
-    } else {
-        let first = top[0];
-        h.push_str(&format!(
-            "<div class=\"card donow\"><div class=\"do-text\">{}<span class=\"do-label\">{}</span></div>\n<div class=\"do-sub\">{} &middot; {}</div></div>\n",
-            chunk_icon(first, ctx),
-            esc(&first.title),
-            esc(&first.minutes_label),
-            esc(&first.why),
-        ));
-        if top.len() > 1 {
-            h.push_str("<div class=\"expiring\">\n");
-            for c in &top[1..] {
-                h.push_str(&format!(
-                    "<div class=\"card exp\">{}<span class=\"exp-title\">{}</span>\n<span class=\"exp-sub\">{} &middot; {}</span></div>\n",
-                    chunk_icon(c, ctx),
-                    esc(&c.title),
-                    esc(&c.minutes_label),
-                    esc(&c.why),
-                ));
-            }
-            h.push_str("</div>\n");
-        }
-    }
-    // slate chunks (quiet rows)
-    let slate: Vec<&crate::plan::Chunk> =
-        plan.chunks.iter().filter(|c| c.tier == 2 || c.tier == 3).collect();
-    if slate.is_empty() {
-        h.push_str("<div class=\"card quiet\">No live cracks.</div>\n");
-    } else {
-        h.push_str("<div class=\"slate\">\n");
-        for c in &slate {
-            let proven = ctx.proven_done.contains(&c.id);
-            h.push_str(&format!(
-                "<label class=\"card chunk{}\"><input type=\"checkbox\" data-id=\"{}\"{}>\n<span class=\"chunk-body\"><span class=\"chunk-head\">{}<span class=\"chunk-title\">{}</span></span>\n<span class=\"chunk-meta\">{} &middot; {}</span>\n<span class=\"chunk-why\">{}</span></span></label>\n",
-                if proven { " done" } else { "" },
-                esc(&c.id),
-                if proven { " checked" } else { "" },
-                chunk_icon(c, ctx),
-                esc(&c.title),
-                esc(&c.minutes_label),
-                esc(&c.kind),
-                esc(&c.why),
-            ));
-        }
-        h.push_str("</div>\n");
     }
     h.push_str("</section>\n</div>\n");
 
@@ -339,45 +263,180 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
         }
         h.push_str("</div>\n");
     }
-    h.push_str("</section>\n</div>\n</div>\n");
+    h.push_str("</section>\n</div>\n");
 
-    // ---- Trader section (pass 4): his OWN section, present only
-    // while a trader window covers now — gone when he leaves. ----
-    if let Some(b) = &plan.baro {
-        h.push_str(&format!("<section><h2>{}</h2>\n", esc(&b.vendor)));
-        h.push_str(&format!(
-            "<div class=\"card vendor\"><span class=\"vendor-line\">{} · ends {}</span>\n<span class=\"vendor-sub\">Biweekly window — check inventory.</span></div>\n",
-            esc(&b.location),
-            esc(&b.ends_in),
-        ));
-        h.push_str("</section>\n");
+    // ---- tab 4: routine — the daily/weekly surface ----
+    h.push_str(&routine_html(ctx));
+    h.push_str("</div>\n");
+
+    // checkbox persistence: the resident's loopback server is the store
+    // of record; localStorage remains a progressive cache for file://.
+    h.push_str("<script>\n");
+    h.push_str(JS);
+    h.push_str("\n</script>\n</div>\n</body>\n</html>\n");
+    h
+}
+
+/// One-line status countdown for a world-state expiry, relative to the
+/// plan's own timestamp ("in 2d", "in 5h", "in 25m"). Presentation only:
+/// no plan data or scoring changes.
+fn relative_countdown(ctx: &RenderContext<'_>, expiry: &str) -> String {
+    let now = ctx
+        .world
+        .timestamp
+        .parse::<chrono::DateTime<chrono::Utc>>()
+        .ok();
+    let then = expiry.parse::<chrono::DateTime<chrono::Utc>>().ok();
+    match (now, then) {
+        (Some(now), Some(then)) => {
+            let mins = (then - now).num_minutes();
+            if mins <= 0 {
+                "now".to_owned()
+            } else if mins < 60 {
+                format!("in {mins}m")
+            } else if mins < 48 * 60 {
+                format!("in {}h", mins / 60)
+            } else {
+                format!("in {}d", mins / (24 * 60))
+            }
+        }
+        _ => "—".to_owned(),
     }
+}
 
-    // ---- Event pack strip (content all from the pack TOML) ----
-    if let Some(pack) = &ctx.pack {
-        if pack.live {
-            h.push_str(&format!("<section><h2>{}</h2>\n", esc(&titlecase(&pack.pack_name))));
-            let health = match pack.contegorus_health {
-                Some(v) => format!("{} {:.2}", pack.event_label, v),
-                None => format!("{} —", pack.event_label),
-            };
+/// The slim header: brand, three status pills (Baro countdown, Varzia
+/// summary, Targets summary), and one one-line stamp (MR, generated
+/// time, world state, backlog count, profile state). The old multi-block
+/// header boilerplate is gone. Pill labels come from the tuning tables;
+/// countdown values come from the plan/world state, never invented.
+fn header_html(plan: &Plan, ctx: &RenderContext<'_>) -> String {
+    let vendor = esc(&ctx.tuning.planner.vendor.name);
+    let contact = esc(&ctx.tuning.planner.resurgence.contact);
+    let baro = match &plan.baro {
+        Some(b) => format!("{} &middot; {}", esc(&b.ends_in), esc(&b.location)),
+        None => match &ctx.world.baro {
+            Some(vt) => relative_countdown(ctx, &vt.expiry),
+            None => "—".to_owned(),
+        },
+    };
+    let varzia = match &plan.resurgence {
+        Some(r) => format!("{} gears &middot; {}", r.gears.len(), esc(&r.ends_in)),
+        None => "—".to_owned(),
+    };
+    let mr = ctx
+        .mastery_rank
+        .map(|m| m.to_string())
+        .unwrap_or_else(|| "—".to_owned());
+    let mut h = String::new();
+    h.push_str("<header class=\"masthead\">\n<div class=\"brand\">FRACKER</div>\n");
+    h.push_str("<div class=\"pills\">\n");
+    h.push_str(&format!(
+        "<span class=\"pill pill-baro\"><b>{vendor}</b> {baro}</span>\n"
+    ));
+    h.push_str(&format!(
+        "<span class=\"pill pill-varzia\"><b>{contact}</b> {varzia}</span>\n"
+    ));
+    h.push_str(&format!(
+        "<span class=\"pill pill-targets\">{}</span>\n",
+        esc(&ctx.targets_status),
+    ));
+    h.push_str("</div>\n");
+    h.push_str(&format!(
+        "<div class=\"stamp\">MR{mr} &middot; {} &middot; {} &middot; {}</div>\n",
+        esc(&ctx.generated_label),
+        esc(&ctx.world_status),
+        esc(&ctx.targets_status),
+    ));
+    h.push_str("</header>\n");
+    h
+}
+
+/// The crack queue is cracks + relic acquisition. The event alerts, the
+/// rotation, and the trader have their own surfaces on First Crack (the
+/// Events subsection, the Varzia strip, the Baro pill), so their tier-1
+/// chunks never duplicate here. Unknown kinds still render — nothing is
+/// deleted, only de-duplicated.
+fn queue_chunk(c: &crate::plan::Chunk) -> bool {
+    !matches!(c.kind.as_str(), "event alert" | "prime resurgence" | "vendor")
+}
+
+/// The crack queue: the ≤3 focus parts, the loud expiring chunk, the
+/// rest of the expiring row, the tier 2/3 slate, then any farms (quiet,
+/// still action). Mission / relic / refinement / target part / chance /
+/// time all ride the existing chunk + deal strings.
+fn crack_queue_html(plan: &Plan, ctx: &RenderContext<'_>) -> String {
+    let mut h = String::new();
+    h.push_str("<h3 class=\"blockhead\">Crack queue</h3>\n");
+    if !plan.focus.is_empty() {
+        h.push_str("<div class=\"focus\">\n");
+        for f in &plan.focus {
             h.push_str(&format!(
-                "<div class=\"card tau\"><span class=\"tau-line\">{} · ends {}</span><span class=\"tau-line\">{} · {}</span><span class=\"tau-line\">{}</span></div>\n",
-                esc(&pack.payout_label),
-                esc(&pack.expires_label),
-                esc(&pack.gated_label),
-                esc(&health),
-                esc(&pack.arcane_line),
+                "<span class=\"focus-part\">{}&nbsp;{} · {} · {}</span>\n",
+                icon_span(&f.gear, ctx, "focus-icon"),
+                esc(&f.part),
+                esc(&f.gear),
+                esc(&f.era),
             ));
-            h.push_str("</section>\n");
+        }
+        h.push_str("</div>\n");
+    }
+    let top: Vec<&crate::plan::Chunk> = plan
+        .chunks
+        .iter()
+        .filter(|c| c.tier == 1 && queue_chunk(c))
+        .collect();
+    if top.is_empty() {
+        h.push_str("<div class=\"card quiet\">Nothing expiring.</div>\n");
+    } else {
+        let first = top[0];
+        h.push_str(&format!(
+            "<div class=\"card donow\"><div class=\"do-text\">{}<span class=\"do-label\">{}</span></div>\n<div class=\"do-sub\">{} &middot; {}</div></div>\n",
+            chunk_icon(first, ctx),
+            esc(&first.title),
+            esc(&first.minutes_label),
+            esc(&first.why),
+        ));
+        if top.len() > 1 {
+            h.push_str("<div class=\"expiring\">\n");
+            for c in &top[1..] {
+                h.push_str(&format!(
+                    "<div class=\"card exp\">{}<span class=\"exp-title\">{}</span>\n<span class=\"exp-sub\">{} &middot; {}</span></div>\n",
+                    chunk_icon(c, ctx),
+                    esc(&c.title),
+                    esc(&c.minutes_label),
+                    esc(&c.why),
+                ));
+            }
+            h.push_str("</div>\n");
         }
     }
-
-    // ---- farms ----
-    h.push_str("<section><h2>Farms</h2>\n");
-    if plan.farms.is_empty() {
-        h.push_str("<div class=\"card quiet\">No farms — vaulted wants are crack-or-park.</div>\n");
+    let slate: Vec<&crate::plan::Chunk> = plan
+        .chunks
+        .iter()
+        .filter(|c| (c.tier == 2 || c.tier == 3) && queue_chunk(c))
+        .collect();
+    if slate.is_empty() {
+        h.push_str("<div class=\"card quiet\">No live cracks.</div>\n");
     } else {
+        h.push_str("<div class=\"slate\">\n");
+        for c in &slate {
+            let proven = ctx.proven_done.contains(&c.id);
+            h.push_str(&format!(
+                "<label class=\"card chunk{}\"><input type=\"checkbox\" data-id=\"{}\"{}>\n<span class=\"chunk-body\"><span class=\"chunk-head\">{}<span class=\"chunk-title\">{}</span></span>\n<span class=\"chunk-meta\">{} &middot; {}</span>\n<span class=\"chunk-why\">{}</span></span></label>\n",
+                if proven { " done" } else { "" },
+                esc(&c.id),
+                if proven { " checked" } else { "" },
+                chunk_icon(c, ctx),
+                esc(&c.title),
+                esc(&c.minutes_label),
+                esc(&c.kind),
+                esc(&c.why),
+            ));
+        }
+        h.push_str("</div>\n");
+    }
+    if !plan.farms.is_empty() {
+        h.push_str("<h3 class=\"blockhead\">Farms</h3>\n");
         for f in &plan.farms {
             h.push_str(&format!(
                 "<div class=\"card farm\"><div class=\"farm-title\">Farm: {} ({}) — {}</div>\n<div class=\"farm-sub\">Relics: {} &middot; score {:.1}/h</div></div>\n",
@@ -389,22 +448,141 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
             ));
         }
     }
-    for n in &plan.notes {
-        h.push_str(&format!("<div class=\"card quiet\">{}</div>\n", esc(n)));
-    }
-    h.push_str("</section>\n");
+    h
+}
 
-    // ---- 4. season acts (pass 4: own section; name + DESCRIPTION
-    // everywhere acts render — the name alone doesn't say what to
-    // do; header from the tuning tables, never Rust) ----
+/// The Varzia / Prime Resurgence strip: first-class on First Crack.
+fn resurgence_strip_html(r: &crate::plan::ResurgenceView) -> String {
+    format!(
+        "<div class=\"card resurg-first\"><span class=\"resurg-line\">{} — {} ({}) · ends {}</span>\n<span class=\"resurg-sub\">Vaulted relics for {} while the rotation is live.</span></div>\n",
+        esc(&r.contact),
+        esc(&r.gears.join(", ")),
+        esc(&r.location),
+        esc(&r.ends_in),
+        esc(&r.currency),
+    )
+}
+
+/// The event pack strip (Taubound): payout, gate, community health, and
+/// the remaining-arcanes line. Content all from the pack TOML.
+fn pack_strip_html(ctx: &RenderContext<'_>) -> String {
+    let Some(pack) = &ctx.pack else {
+        return String::new();
+    };
+    if !pack.live {
+        return String::new();
+    }
+    let health = match pack.contegorus_health {
+        Some(v) => format!("{} {:.2}", pack.event_label, v),
+        None => format!("{} —", pack.event_label),
+    };
+    format!(
+        "<h3 class=\"blockhead\">{}</h3>\n<div class=\"card tau pack-strip\"><span class=\"tau-line\">{} · ends {}</span><span class=\"tau-line\">{} · {}</span><span class=\"tau-line\">{}</span></div>\n",
+        esc(&titlecase(&pack.pack_name)),
+        esc(&pack.payout_label),
+        esc(&pack.expires_label),
+        esc(&pack.gated_label),
+        esc(&health),
+        esc(&pack.arcane_line),
+    )
+}
+
+/// Tab 4, Routine: the daily/weekly surface in one place.
+/// - "Today": standing + focus as compact inline number chips with slim
+///   bars, then the sortie line with its reset time.
+/// - "This week": the weeklies board (server-side ticks as of pass 9)
+///   as compact tick rows with time estimates, then the act board.
+fn routine_html(ctx: &RenderContext<'_>) -> String {
+    let mut h = String::new();
+    h.push_str("<div class=\"tabpage\" id=\"page-routine\">\n<section><h2>Routine</h2>\n");
+    h.push_str("<h3 class=\"blockhead\">Today</h3>\n<div class=\"pools\">\n");
+    let caps = &ctx.tuning.planner.daily_caps;
+    match &ctx.daily {
+        Some(d) => h.push_str(&pool_bars_html(d, caps)),
+        None => {
+            let (focus_cap, stand_cap) = match ctx.mastery_rank {
+                Some(mr) => (
+                    fmt_int(caps.focus_base + caps.focus_per_mr * mr),
+                    fmt_int(caps.standing_base + caps.standing_per_mr * mr),
+                ),
+                None => (
+                    caps.fallback_focus_label.clone(),
+                    caps.fallback_standing_label.clone(),
+                ),
+            };
+            h.push_str(&format!(
+                "<div class=\"card quiet\">Focus cap {focus_cap} · Standing cap {stand_cap} — profile offline.</div>\n"
+            ));
+        }
+    }
+    h.push_str("</div>\n");
+    // Sortie: a single tick row with its reset time (unchanged tick key).
+    let sortie = &ctx.tuning.planner.sortie;
+    let sortie_done = ctx.weekly_done.contains_key(&sortie.ledger_id);
+    h.push_str(&format!(
+        "<label class=\"card bar sortie\"><input type=\"checkbox\" data-id=\"{id}\"{checked}>\n<span class=\"bar-name\">{name}</span>\n<span class=\"bar-meta\">{reset}{proven}</span></label>\n",
+        id = esc(&sortie.ledger_id),
+        checked = if sortie_done { " checked" } else { "" },
+        name = esc(&sortie.name),
+        reset = esc(&sortie.reset_label),
+        proven = if sortie_done { " · log" } else { "" },
+    ));
+    // "This week": the weeklies board + the act board.
+    h.push_str("<h3 class=\"blockhead\">This week</h3>\n");
+    h.push_str(&weeklies_html(ctx));
+    h.push_str(&nightwave_html(ctx));
+    h.push_str("</section>\n</div>\n");
+    h
+}
+
+/// The weeklies board (existing WEEKLIES content set), file order =
+/// render order; flagged items render last and visually quiet. Tick keys
+/// are `wk-{id}` — the same ids as before the move into Routine.
+fn weeklies_html(ctx: &RenderContext<'_>) -> String {
+    let mut h = String::new();
+    h.push_str("<div class=\"wk-grid\">\n");
+    for w in weekly_board(ctx.tuning) {
+        let done_label = ctx.weekly_done.get(&w.id).cloned().unwrap_or_default();
+        let done = !done_label.is_empty();
+        h.push_str(&format!(
+            "<label class=\"wk{item_class}{small_class}\"><input type=\"checkbox\" data-id=\"wk-{id}\"{checked}>\n<span class=\"wk-name\">{name}</span>\n<span class=\"wk-meta\">{limit} &middot; {time}</span>\n<span class=\"wk-obs\">{obs}{proven}</span></label>\n",
+            item_class = if done { " done" } else { "" },
+            small_class = if w.deprioritized { " wk-small" } else { "" },
+            id = w.id,
+            checked = if done { " checked" } else { "" },
+            name = esc(&w.name),
+            limit = esc(&w.limit),
+            time = esc(&w.time),
+            obs = esc(&w.obs),
+            proven = if done { format!(" &middot; proven {}", esc(&done_label)) } else { String::new() },
+        ));
+    }
+    h.push_str("</div>\n");
+    h
+}
+
+/// The act board (Nightwave): name + DESCRIPTION everywhere acts render
+/// — the name alone doesn't say what to do. Header from the tuning
+/// tables, never Rust; tick keys are `nw-{id}`.
+fn nightwave_html(ctx: &RenderContext<'_>) -> String {
+    let mut h = String::new();
     let season_title = ctx.tuning.planner.nightwave.name.as_str();
-    h.push_str(&format!("<section><h2>{}</h2>\n", esc(season_title)));
+    h.push_str(&format!("<h3 class=\"blockhead\">{}</h3>\n", esc(season_title)));
     match &ctx.world.nightwave {
         Some(nw) if !nw.active_challenges.is_empty() => {
-            h.push_str(&format!("<div class=\"nw-season\">Season {} — acts, never a standing total.</div>\n", nw.season));
+            h.push_str(&format!(
+                "<div class=\"nw-season\">Season {} — acts, never a standing total.</div>\n",
+                nw.season,
+            ));
             h.push_str("<div class=\"nw-grid\">\n");
             for a in &nw.active_challenges {
-                let tag = if a.is_daily { "daily" } else if a.is_elite { "elite" } else { "weekly" };
+                let tag = if a.is_daily {
+                    "daily"
+                } else if a.is_elite {
+                    "elite"
+                } else {
+                    "weekly"
+                };
                 let done = ctx.proven_done.contains(&a.id);
                 h.push_str(&format!(
                     "<label class=\"nw{item_class}\"><input type=\"checkbox\" data-id=\"nw-{id}\"{checked}>\n<span class=\"nw-title\">{title}</span>\n<span class=\"nw-desc\">{desc}</span>\n<span class=\"nw-meta\">{tag} &middot; {standing} standing</span></label>\n",
@@ -427,82 +605,6 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
             ));
         }
     }
-    h.push_str("</section>\n");
-
-    // ---- 5. this week ----
-    h.push_str("<section><h2>This week</h2>\n<div class=\"wk-grid\">\n");
-    for w in weekly_board(ctx.tuning) {
-        let done_label = ctx.weekly_done.get(&w.id).cloned().unwrap_or_default();
-        let done = !done_label.is_empty();
-        h.push_str(&format!(
-            "<label class=\"wk{item_class}{small_class}\"><input type=\"checkbox\" data-id=\"wk-{id}\"{checked}>\n<span class=\"wk-name\">{name}</span>\n<span class=\"wk-meta\">{limit} &middot; {time}</span>\n<span class=\"wk-obs\">{obs}{proven}</span></label>\n",
-            item_class = if done { " done" } else { "" },
-            small_class = if w.deprioritized { " wk-small" } else { "" },
-            id = w.id,
-            checked = if done { " checked" } else { "" },
-            name = esc(&w.name),
-            limit = esc(&w.limit),
-            time = esc(&w.time),
-            obs = esc(&w.obs),
-            proven = if done { format!(" &middot; proven {}", esc(&done_label)) } else { String::new() },
-        ));
-    }
-    h.push_str("</div>\n</section>\n");
-
-    // ---- 6. today's bars (pass 4 §28: one slim bar per standing
-    // pool — profile REMAINING values, never estimated — plus the
-    // focus bar. Terse labels; full pools dim (the pattern is the
-    // information). PvP is dropped with the Conclave cut.)
-    // ----
-    h.push_str("<section><h2>Today</h2>\n<div class=\"bars\">\n");
-    let caps = &ctx.tuning.planner.daily_caps;
-    match &ctx.daily {
-        Some(d) => h.push_str(&pool_bars_html(d, caps)),
-        None => {
-            let (focus_cap, stand_cap) = match ctx.mastery_rank {
-                Some(mr) => (
-                    fmt_int(caps.focus_base + caps.focus_per_mr * mr),
-                    fmt_int(caps.standing_base + caps.standing_per_mr * mr),
-                ),
-                None => (
-                    caps.fallback_focus_label.clone(),
-                    caps.fallback_standing_label.clone(),
-                ),
-            };
-            h.push_str(&format!(
-                "<div class=\"card quiet\">Focus cap {focus_cap} · Standing cap {stand_cap} — profile offline.</div>\n"
-            ));
-        }
-    }
-    let sortie = &ctx.tuning.planner.sortie;
-    let sortie_done = ctx.weekly_done.contains_key(&sortie.ledger_id);
-    h.push_str(&format!(
-        "<label class=\"card bar\"><input type=\"checkbox\" data-id=\"{id}\"{checked}>\n<span class=\"bar-name\">{name}</span>\n<span class=\"bar-meta\">{reset}{proven}</span></label>\n",
-        id = esc(&sortie.ledger_id),
-        checked = if sortie_done { " checked" } else { "" },
-        name = esc(&sortie.name),
-        reset = esc(&sortie.reset_label),
-        proven = if sortie_done { " · log" } else { "" },
-    ));
-    h.push_str("</div>\n</section>\n");
-
-    // ---- footer: targets snapshot ----
-    let total_wants: usize = plan.goals.iter().map(|g| g.wants.len()).sum();
-    let live_resurg = plan.goals.iter().filter(|g| g.resurgence_live).count();
-    h.push_str("<footer><section><h2>Targets</h2>\n");
-    h.push_str(&format!(
-        "<div class=\"card snap\">{} goals · {} parts · {} {}-live</div>\n",
-        plan.goals.len(),
-        total_wants,
-        live_resurg,
-        ctx.tuning.planner.resurgence.contact,
-    ));
-    h.push_str("</section></footer>\n");
-
-    // checkbox persistence: localStorage keyed by item id + in-game date.
-    h.push_str("<script>\n");
-    h.push_str(JS);
-    h.push_str("\n</script>\n</div>\n</body>\n</html>\n");
     h
 }
 
@@ -756,13 +858,13 @@ fn fmt_int(n: u32) -> String {
     out.chars().rev().collect()
 }
 
-/// The pass-4 daily pool bars — Focus (full size), the bare shared
-/// `DailyAffiliation` pool labelled via the data-owned map (full size),
-/// then one slim bar per family. The remaining values are the profile's
-/// own REMAINING amounts, printed verbatim (never estimated, never
-/// arithmetic-transformed). Public so the ninth-pass §3 audit test can
-/// assert rendered remaining == the profile's raw values for every pool,
-/// including the bare one.
+/// The pass-4 daily pool bars — now the Routine tab's compact "Today"
+/// strip: Focus + the bare shared `DailyAffiliation` pool (full size),
+/// then one slim inline number chip per family. Remaining values are the
+/// profile's own REMAINING amounts, printed verbatim (never estimated,
+/// never arithmetic-transformed). Public so the ninth-pass §3 audit test
+/// can assert rendered remaining == the profile's raw values for every
+/// pool, including the bare one.
 pub fn pool_bars_html(d: &DailyRender, caps: &crate::tuning::DailyCapsTuning) -> String {
     let mut h = String::new();
     h.push_str(&pool_bar("Focus", d.focus_remaining, d.focus_cap, false));
@@ -789,9 +891,10 @@ pub fn pool_bars_html(d: &DailyRender, caps: &crate::tuning::DailyCapsTuning) ->
     h
 }
 
-/// One standing/focus pool bar: remaining-of-cap, terse label. Full
-/// pools dim (`bar-full`) — the pattern is the information. Family
-/// pools render slim; Focus + the main pool render full-size.
+/// One standing/focus pool chip: a compact inline label + value with a
+/// slim 5px bar. Full pools dim (`bar-full`) — the pattern is the
+/// information. The `bar-name` text stays `{label} · {remaining} /
+/// {cap} left` (the §3 audit parses it back to the raw values).
 fn pool_bar(name: &str, remaining: u32, cap: u32, slim: bool) -> String {
     let pct = if cap == 0 {
         0.0
@@ -800,7 +903,7 @@ fn pool_bar(name: &str, remaining: u32, cap: u32, slim: bool) -> String {
     };
     let full = cap > 0 && remaining >= cap;
     format!(
-        "<div class=\"card bar{slim}{full}\"><div class=\"bar-name\">{} · {} / {} left</div>\n<div class=\"bar-track\"><div class=\"bar-fill\" style=\"width:{:.0}%\"></div></div></div>\n",
+        "<div class=\"pool{slim}{full}\"><span class=\"bar-name\">{} · {} / {} left</span>\n<span class=\"bar-track\"><span class=\"bar-fill\" style=\"width:{:.0}%\"></span></span></div>\n",
         esc(name),
         fmt_int(remaining),
         fmt_int(cap),
@@ -830,109 +933,181 @@ html {
 body {
   margin: 0; background: transparent; color: #c9d2de;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  line-height: 1.45;
+  line-height: 1.4;
 }
-.wrap { max-width: 1080px; margin: 0 auto; padding: 28px 22px 60px; }
-h1, h2, h3, .brand, .do-text, .chunk-title, .goal-name, .farm-title {
+.wrap { max-width: 1080px; margin: 0 auto; padding: 18px 18px 48px; }
+h1, h2, h3, .brand, .do-text, .chunk-title, .bname, .farm-title {
   font-family: Rajdhani, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 h2 {
-  font-size: 12px; letter-spacing: .18em; text-transform: uppercase;
-  color: #7e8898; margin: 34px 0 12px; font-weight: 600;
+  font-size: 11px; letter-spacing: .18em; text-transform: uppercase;
+  color: #7e8898; margin: 20px 0 8px; font-weight: 600;
 }
-section { margin-bottom: 6px; }
-.masthead { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
-.brand { font-size: 26px; font-weight: 700; letter-spacing: .3em; color: #bfa05a; }
-.stamp { color: #7e8898; font-size: 13px; }
+h2:first-child { margin-top: 4px; }
+section { margin-bottom: 4px; }
+/* slim header: one row — brand, pills, stamp */
+.masthead { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.brand { font-size: 20px; font-weight: 700; letter-spacing: .28em; color: #bfa05a; }
+.pills { display: flex; gap: 6px; flex-wrap: wrap; }
+.pill {
+  font-size: 11px; color: #c9d2de; background: #131824; border: 1px solid #1f2735;
+  padding: 3px 9px; white-space: nowrap;
+  clip-path: polygon(5px 0, 100% 0, 100% calc(100% - 5px), calc(100% - 5px) 100%, 0 100%, 0 5px);
+}
+.pill b { color: #bfa05a; font-weight: 600; }
+.stamp { color: #7e8898; font-size: 11px; margin-left: auto; }
 .card {
   background: #151a23; border: 1px solid #232b38; border-radius: 0;
   clip-path: polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px);
-  padding: 20px 22px; margin: 10px 0;
+  padding: 10px 13px; margin: 6px 0;
 }
 .quiet { color: #7e8898; }
+.blockhead {
+  font-size: 11px; letter-spacing: .16em; text-transform: uppercase;
+  color: #7e8898; margin: 16px 0 6px; font-weight: 600;
+}
+.closing { color: #7e8898; font-size: 12px; margin-top: 8px; }
 .donow { border-color: #bfa05a; }
-.do-text { font-size: 31px; font-weight: 700; color: #aee3ef; line-height: 1.2; display: flex; align-items: center; gap: 12px; }
-.do-sub { color: #7e8898; margin-top: 6px; }
-.expiring { display: grid; gap: 2px; margin-top: 8px; }
-.exp { padding: 12px 16px; }
+.do-text { font-size: 18px; font-weight: 700; color: #aee3ef; line-height: 1.2; display: flex; align-items: center; gap: 8px; }
+.do-sub { color: #7e8898; margin-top: 3px; font-size: 12px; }
+.expiring { display: grid; gap: 2px; margin-top: 4px; }
+.exp { padding: 7px 11px; }
 .exp.done { opacity: .5; }
 .exp.done .exp-title { text-decoration: line-through; }
-.exp-title { font-family: Rajdhani, sans-serif; font-weight: 600; font-size: 16px; }
-.exp-sub { color: #7e8898; font-size: 13px; display: block; margin-top: 2px; }
+.exp-title { font-family: Rajdhani, sans-serif; font-weight: 600; font-size: 13px; }
+.exp-sub { color: #7e8898; font-size: 11px; display: block; margin-top: 1px; }
 .slate { display: grid; gap: 2px; }
-.chunk { display: flex; gap: 12px; align-items: flex-start; cursor: pointer; }
+.chunk { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; }
 .chunk.done { opacity: .45; }
 .chunk.done .chunk-title { text-decoration: line-through; }
-.chunk input { margin-top: 5px; accent-color: #bfa05a; }
-.chunk-body { display: flex; flex-direction: column; gap: 2px; }
-.chunk-title { font-size: 19px; font-weight: 600; }
-.chunk-meta { color: #7e8898; font-size: 13px; }
-.chunk-why { font-size: 14px; }
-.goals { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; margin-top: 12px; }
-.goal-head { display: flex; gap: 12px; align-items: center; }
+.chunk input { margin-top: 3px; accent-color: #bfa05a; }
+.chunk-body { display: flex; flex-direction: column; gap: 1px; }
+.chunk-title { font-size: 14px; font-weight: 600; }
+.chunk-meta { color: #7e8898; font-size: 11px; }
+.chunk-why { font-size: 12px; }
 .portrait {
-  width: 46px; height: 46px; flex: none; display: flex; align-items: center; justify-content: center;
-  font-family: Rajdhani, sans-serif; font-size: 24px; font-weight: 700; color: #bfa05a;
+  width: 38px; height: 38px; flex: none; display: flex; align-items: center; justify-content: center;
+  font-family: Rajdhani, sans-serif; font-size: 19px; font-weight: 700; color: #bfa05a;
   background: #0d1117; border: 1px solid #232b38;
   clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
 }
-.goal-titles { display: flex; flex-direction: column; }
-.goal-name { font-size: 19px; font-weight: 700; }
-.goal-sub { color: #7e8898; font-size: 12px; display: flex; gap: 8px; align-items: center; }
-.vaulted { color: #7e8898; border: 1px solid #7e8898; padding: 0 6px; font-size: 11px; letter-spacing: .12em; }
-.resurg { color: #bfa05a; border: 1px solid #bfa05a; padding: 0 6px; font-size: 11px; letter-spacing: .12em; }
+.portrait.has-icon { position: relative; overflow: hidden; }
+.portrait.has-icon img {
+  position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
+  background: #0d1117;
+}
+.vaulted { color: #7e8898; border: 1px solid #7e8898; padding: 0 6px; font-size: 10px; letter-spacing: .12em; }
+.resurg { color: #bfa05a; border: 1px solid #bfa05a; padding: 0 6px; font-size: 10px; letter-spacing: .12em; }
 .pips { display: inline-flex; gap: 5px; margin-left: auto; }
-.pip { width: 11px; height: 11px; border-radius: 50%; border: 1px solid #7e8898; }
+.pip { width: 10px; height: 10px; border-radius: 50%; border: 1px solid #7e8898; }
 .pip.have { background: #bfa05a; border-color: #bfa05a; }
 .pip.need { background: transparent; border-color: #c9d2de; }
 .pip.unknown { background: transparent; border-style: dashed; }
-.part { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; padding: 7px 0; border-top: 1px solid #1c2330; font-size: 14px; }
-.part-name { font-weight: 600; }
-.part-state { font-size: 12px; color: #7e8898; text-transform: uppercase; letter-spacing: .1em; }
-.part-state.need { color: #c9d2de; }
-.relic-list { font-size: 12px; color: #7e8898; }
-.relic.is-vaulted { opacity: .75; }
-.action { margin-top: 10px; padding: 10px 12px; background: #0d1420; border-left: 3px solid #aee3ef; font-size: 15px; color: #aee3ef; }
+.action { margin-top: 8px; padding: 7px 10px; background: #0d1420; border-left: 3px solid #aee3ef; font-size: 13px; color: #aee3ef; }
 .action-parked { border-color: #3a4354; color: #7e8898; }
 .action-resurgence { border-color: #bfa05a; color: #e8d9ae; }
 .action-farm, .action-wait { border-color: #7e8898; color: #c9d2de; }
 .chip-common, .chip-uncommon, .chip-rare {
-  font-size: 12px; padding: 1px 8px; border: 1px solid;
+  font-size: 11px; padding: 1px 8px; border: 1px solid;
   clip-path: polygon(5px 0, 100% 0, 100% calc(100% - 5px), calc(100% - 5px) 100%, 0 100%, 0 5px);
 }
 .chip-common { color: #b08d4f; border-color: #b08d4f; }
 .chip-uncommon { color: #c0c8d4; border-color: #c0c8d4; }
 .chip-rare { color: #e3c878; border-color: #e3c878; }
-.nw-grid, .wk-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; }
+.nw-grid, .wk-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px; }
 .nw, .wk {
-  display: flex; flex-direction: column; gap: 2px; background: #131824; border: 1px solid #1f2735;
-  padding: 10px 12px; font-size: 13px; cursor: pointer;
+  display: flex; flex-direction: column; gap: 1px; background: #131824; border: 1px solid #1f2735;
+  padding: 7px 10px; font-size: 12px; cursor: pointer;
   clip-path: polygon(7px 0, 100% 0, 100% calc(100% - 7px), calc(100% - 7px) 100%, 0 100%, 0 7px);
 }
 .nw.done, .wk.done { opacity: .45; }
 .nw.done .nw-title, .wk.done .wk-name { text-decoration: line-through; }
 .nw input, .wk input, .bar input { accent-color: #bfa05a; }
-.nw-meta, .wk-meta, .wk-obs { color: #7e8898; font-size: 12px; }
-.wk-small { opacity: .8; font-size: 12px; }
-.nw-season { color: #7e8898; font-size: 13px; margin-bottom: 8px; }
-.caveat { color: #7e8898; font-size: 12px; margin-top: 6px; }
-.bars { display: grid; gap: 2px; }
+.nw-meta, .wk-meta, .wk-obs { color: #7e8898; font-size: 11px; }
+.wk-small { opacity: .8; font-size: 11px; }
+.nw-season { color: #7e8898; font-size: 12px; margin-bottom: 6px; }
+.caveat { color: #7e8898; font-size: 11px; margin-top: 5px; }
+/* Routine "Today": compact pool chips + one sortie line */
+.pools { display: flex; flex-wrap: wrap; gap: 5px; }
+.pool {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: #131824; border: 1px solid #1f2735; padding: 4px 9px;
+  clip-path: polygon(6px 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%, 0 6px);
+}
+.pool .bar-name { font-family: Rajdhani, sans-serif; font-weight: 600; font-size: 12px; white-space: nowrap; }
+.pool .bar-track { height: 5px; width: 72px; background: #0d1117; margin: 0; }
+.pool .bar-fill { display: block; height: 5px; background: #bfa05a; }
+.pool.slim .bar-name { font-size: 11px; font-weight: 500; }
+.pool.slim .bar-track { width: 54px; }
+.pool.bar-full { opacity: .45; }
 .bar { cursor: pointer; }
-.bar-name { font-family: Rajdhani, sans-serif; font-weight: 600; font-size: 16px; }
-.bar-track { height: 6px; background: #0d1117; margin: 8px 0 4px; }
-.bar-fill { height: 6px; background: #bfa05a; }
-.bar-meta { color: #7e8898; font-size: 12px; }
-.est { font-size: 11px; color: #7e8898; border: 1px solid #7e8898; padding: 0 5px; letter-spacing: .1em; }
+.bar-name { font-family: Rajdhani, sans-serif; font-weight: 600; font-size: 13px; }
+.bar-track { height: 5px; background: #0d1117; margin: 6px 0 3px; }
+.bar-fill { height: 5px; background: #bfa05a; }
+.bar-meta { color: #7e8898; font-size: 11px; }
 .snap { color: #c9d2de; }
-footer { margin-top: 10px; }
-details.alt { margin-top: 6px; font-size: 13px; color: #7e8898; }
-/* v2 tabs: First Crack vs Backlog (same palette, no new colors) */
-.tabs { margin-top: 8px; }
+/* First Crack focus trio (≤3 parts, terse) + parent icons */
+.focus { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
+.focus-part { font-size: 12px; color: #bfa05a; border: 1px solid #bfa05a; padding: 2px 9px; display: inline-flex; align-items: center; gap: 6px; }
+.focus-icon, .chunk-icon {
+  width: 20px; height: 20px; flex: none; position: relative; overflow: hidden;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-family: Rajdhani, sans-serif; font-size: 11px; font-weight: 700; color: #bfa05a;
+  background: #0d1117; border: 1px solid #232b38;
+}
+.focus-icon img, .chunk-icon img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #0d1117; }
+.do-text .chunk-icon { width: 26px; height: 26px; font-size: 15px; border-color: #bfa05a; }
+.chunk-head { display: inline-flex; align-items: center; gap: 8px; }
+/* backlog compact lines */
+.bline {
+  display: flex; gap: 8px; align-items: center; font-size: 12px;
+  background: #131824; border: 1px solid #1f2735; padding: 4px 9px;
+}
+.miniport {
+  width: 22px; height: 22px; flex: none; display: inline-flex; align-items: center; justify-content: center;
+  font-family: Rajdhani, sans-serif; font-size: 12px; font-weight: 700; color: #bfa05a;
+  background: #0d1117; border: 1px solid #232b38; position: relative; overflow: hidden;
+}
+.miniport img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #0d1117; }
+.bkind { color: #7e8898; font-size: 10px; text-transform: uppercase; letter-spacing: .1em; margin-left: auto; }
+/* backlog: parent groups with aligned part rows */
+.backlog-head { color: #7e8898; font-size: 12px; margin: 2px 0 6px; }
+.backlog { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 8px; }
+.bgroup { margin: 0; }
+.bhead { display: flex; gap: 8px; align-items: center; }
+.bname { font-family: Rajdhani, sans-serif; font-size: 15px; font-weight: 700; }
+.bcount { color: #7e8898; font-size: 11px; margin-left: auto; }
+.brow {
+  display: grid; grid-template-columns: minmax(88px, 1.1fr) minmax(140px, 1.9fr) 42px 42px;
+  gap: 8px; align-items: baseline; padding: 4px 0; border-top: 1px solid #1c2330;
+  font-size: 12px;
+}
+.bpart { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.brelic { color: #7e8898; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.brelic.is-vaulted { opacity: .7; }
+.bstock, .bcracks { text-align: right; color: #c9d2de; font-variant-numeric: tabular-nums; }
+.nonprime-h { font-size: 11px; letter-spacing: .18em; text-transform: uppercase; color: #7e8898; margin: 14px 0 6px; }
+.nonprime { display: grid; gap: 5px; }
+.npcat { display: flex; gap: 10px; font-size: 12px; background: #131824; border: 1px solid #1f2735; padding: 6px 10px; }
+.npcat-name { color: #bfa05a; font-weight: 600; white-space: nowrap; }
+.npcat-items { color: #7e8898; }
+/* First Crack strips: Varzia + the event pack */
+.resurg-first { border-color: #bfa05a; display: flex; flex-direction: column; gap: 2px; }
+.resurg-line { font-family: Rajdhani, sans-serif; font-weight: 700; font-size: 15px; color: #e8d9ae; }
+.resurg-sub { color: #7e8898; font-size: 12px; }
+.tau { display: flex; flex-direction: column; gap: 1px; font-size: 13px; border-color: #bfa05a; }
+.donow-sub { font-size: 11px; letter-spacing: .18em; text-transform: uppercase; color: #7e8898; margin: 14px 0 5px; font-weight: 600; }
+.nw-title { font-weight: 600; }
+.nw-desc { font-size: 12px; }
+.farm-title { font-family: Rajdhani, sans-serif; font-weight: 600; font-size: 14px; }
+.farm-sub { color: #7e8898; font-size: 11px; }
+/* v2 tabs: First Crack / Hunt / Backlog / Routine (same palette) */
+.tabs { margin-top: 6px; }
 .tabs input[name=tab] { display: none; }
 .tab {
-  display: inline-block; padding: 8px 22px; margin-right: 6px; cursor: pointer;
-  font-family: Rajdhani, sans-serif; font-weight: 700; font-size: 15px;
-  letter-spacing: .14em; text-transform: uppercase; color: #7e8898;
+  display: inline-block; padding: 6px 16px; margin-right: 5px; cursor: pointer;
+  font-family: Rajdhani, sans-serif; font-weight: 700; font-size: 13px;
+  letter-spacing: .12em; text-transform: uppercase; color: #7e8898;
   background: #131824; border: 1px solid #1f2735;
   clip-path: polygon(7px 0, 100% 0, 100% calc(100% - 7px), calc(100% - 7px) 100%, 0 100%, 0 7px);
 }
@@ -940,80 +1115,11 @@ details.alt { margin-top: 6px; font-size: 13px; color: #7e8898; }
 #tab-donow:checked ~ #page-donow { display: block; }
 #tab-hunt:checked ~ #page-hunt { display: block; }
 #tab-backlog:checked ~ #page-backlog { display: block; }
+#tab-routine:checked ~ #page-routine { display: block; }
 #tab-donow:checked ~ label[for=tab-donow] { color: #aee3ef; border-color: #aee3ef; }
 #tab-hunt:checked ~ label[for=tab-hunt] { color: #aee3ef; border-color: #aee3ef; }
 #tab-backlog:checked ~ label[for=tab-backlog] { color: #aee3ef; border-color: #aee3ef; }
-/* do-now focus trio (≤3 parts, terse) */
-.focus { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
-.focus-part { font-size: 13px; color: #bfa05a; border: 1px solid #bfa05a; padding: 2px 10px; display: inline-flex; align-items: center; gap: 6px; }
-/* sixth pass §2: First Crack parent icons (focus parts + chunk rows) */
-.focus-icon, .chunk-icon {
-  width: 22px; height: 22px; flex: none; position: relative; overflow: hidden;
-  display: inline-flex; align-items: center; justify-content: center;
-  font-family: Rajdhani, sans-serif; font-size: 12px; font-weight: 700; color: #bfa05a;
-  background: #0d1117; border: 1px solid #232b38;
-}
-.focus-icon img, .chunk-icon img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #0d1117; }
-.do-text .chunk-icon { width: 32px; height: 32px; font-size: 18px; border-color: #bfa05a; }
-.chunk-head { display: inline-flex; align-items: center; gap: 10px; }
-/* backlog compact lines */
-.bline {
-  display: flex; gap: 10px; align-items: center; font-size: 13px;
-  background: #131824; border: 1px solid #1f2735; padding: 5px 10px;
-}
-.miniport {
-  width: 24px; height: 24px; flex: none; display: inline-flex; align-items: center; justify-content: center;
-  font-family: Rajdhani, sans-serif; font-size: 13px; font-weight: 700; color: #bfa05a;
-  background: #0d1117; border: 1px solid #232b38; position: relative; overflow: hidden;
-}
-.miniport img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #0d1117; }
-.bkind { color: #7e8898; font-size: 11px; text-transform: uppercase; letter-spacing: .1em; margin-left: auto; }
-/* backlog: parent groups with aligned part rows */
-.backlog-head { color: #7e8898; font-size: 13px; margin: 2px 0 8px; }
-.backlog { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; }
-.bgroup { margin: 0; }
-.bhead { display: flex; gap: 10px; align-items: center; }
-.bname { font-family: Rajdhani, sans-serif; font-size: 18px; font-weight: 700; }
-.bcount { color: #7e8898; font-size: 12px; margin-left: auto; }
-.brow {
-  display: grid; grid-template-columns: minmax(92px, 1.1fr) minmax(150px, 1.9fr) 44px 44px;
-  gap: 8px; align-items: baseline; padding: 5px 0; border-top: 1px solid #1c2330;
-  font-size: 13px;
-}
-.bpart { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.brelic { color: #7e8898; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.brelic.is-vaulted { opacity: .7; }
-.bstock, .bcracks { text-align: right; color: #c9d2de; font-variant-numeric: tabular-nums; }
-.portrait.has-icon { position: relative; overflow: hidden; }
-.portrait.has-icon img {
-  position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
-  background: #0d1117;
-}
-.nonprime-h { font-size: 12px; letter-spacing: .18em; text-transform: uppercase; color: #7e8898; margin: 18px 0 8px; }
-.nonprime { display: grid; gap: 6px; }
-.npcat { display: flex; gap: 10px; font-size: 13px; background: #131824; border: 1px solid #1f2735; padding: 8px 12px; }
-.npcat-name { color: #bfa05a; font-weight: 600; white-space: nowrap; }
-.npcat-items { color: #7e8898; }
-.tau { display: flex; flex-direction: column; gap: 2px; font-size: 14px; border-color: #bfa05a; }
-/* pass 4: do-now alert subsections (hide when empty — never rendered) */
-.donow-sub { font-size: 11px; letter-spacing: .18em; text-transform: uppercase; color: #7e8898; margin: 16px 0 6px; font-weight: 600; }
-/* pass 4: first-class rotation element */
-.resurg-first { border-color: #bfa05a; display: flex; flex-direction: column; gap: 2px; }
-.resurg-line { font-family: Rajdhani, sans-serif; font-weight: 700; font-size: 19px; color: #e8d9ae; }
-.resurg-sub { color: #7e8898; font-size: 13px; }
-/* pass 4: act descriptions (name alone doesn't say what to do) */
-.nw-title { font-weight: 600; }
-.nw-desc { font-size: 13px; }
-/* pass 4: per-pool slim bars; full pools dim */
-.bar.slim { padding: 10px 14px; }
-.bar.slim .bar-name { font-size: 13px; font-weight: 600; }
-.bar.slim .bar-track { height: 4px; margin: 6px 0 2px; }
-.bar.slim .bar-fill { height: 4px; }
-.bar-full { opacity: .45; }
-/* pass 4: live trader window */
-.vendor { border-color: #bfa05a; display: flex; flex-direction: column; gap: 2px; }
-.vendor-line { font-family: Rajdhani, sans-serif; font-weight: 700; font-size: 19px; color: #e8d9ae; }
-.vendor-sub { color: #7e8898; font-size: 13px; }
+#tab-routine:checked ~ label[for=tab-routine] { color: #aee3ef; border-color: #aee3ef; }
 "#;
 
 const JS: &str = r#"
@@ -1099,11 +1205,16 @@ mod tests {
         };
         let html = render_plan(&plan, &ctx);
         for section in [
-            "First crack", "Hunt", "Backlog", "Farms", "Nightwave", "This week",
-            "Today", "Targets",
+            "First crack", "Hunt", "Backlog", "Routine", "Today", "This week",
+            "Nightwave",
         ] {
             assert!(html.contains(section), "missing section: {section}");
         }
+        // Pass 10 IA: the routine surface is NOT on the action-only tab.
+        assert!(
+            !html.contains("<h2>Today</h2>"),
+            "standing/sortie are not their own always-on section"
+        );
         assert!(!html.contains("Do now"), "tab renamed to First Crack (sixth pass §2)");
         assert!(!html.contains("Do Now"), "no user-visible Do Now copy");
         assert!(html.contains("color-scheme: dark"), "refresh-flash rule");
@@ -1119,9 +1230,15 @@ mod tests {
         );
         assert!(html.contains("Rajdhani"), "game-adjacent type");
         assert!(html.contains("clip-path"), "chamfered cards");
-        // v2 tabs: empty plan has no loud line; all three tabs render.
+        // v2 tabs: empty plan has no loud line; all four tabs render.
         assert!(!html.contains("card donow"), "no loud line without tier-1 chunks");
-        assert!(html.contains("tab-donow") && html.contains("tab-hunt") && html.contains("tab-backlog"), "three tabs");
+        assert!(
+            html.contains("tab-donow")
+                && html.contains("tab-hunt")
+                && html.contains("tab-backlog")
+                && html.contains("tab-routine"),
+            "four tabs"
+        );
     }
 
     #[test]
@@ -1468,9 +1585,11 @@ mod tests {
         assert!(html.contains("resurg-first"));
         assert!(html.contains("Ivara Prime"));
         assert!(html.contains("in 13d"));
-        // Trader owns a section with location + countdown.
-        assert!(html.contains("card vendor"));
+        // Pass 10 IA: the trader is a slim header status pill now (no
+        // separate always-on section), still carrying location + countdown.
+        assert!(html.contains("pill-baro"));
         assert!(html.contains("Orcus Relay (Pluto)"));
+        assert!(html.contains("in 20h"));
     }
 
     #[test]
@@ -1533,8 +1652,9 @@ mod tests {
         };
         let ctx = section_ctx(&world, &t, &weekly, &proven, &icons, &cats, Some(daily));
         let html = render_plan(&Plan::default(), &ctx);
-        // Focus + main standing + one slim bar per family (12).
-        assert_eq!(html.matches("card bar slim").count(), 12);
+        // Focus + main standing + one slim chip per family (12), all
+        // under the Routine tab's compact "Today" strip.
+        assert_eq!(html.matches("pool slim").count(), 12);
         assert!(html.contains("Focus · 214,545 / 400,000 left"));
         // Labels come from the data-owned map: main pool is "Syndicates",
         // not the raw bare "Standing"; Cetus renders as its player-facing
@@ -1624,5 +1744,85 @@ mod tests {
         let html = render_plan(&plan, &ctx);
         assert!(!html.contains("https://"), "demo fetches nothing external");
         assert!(html.contains("data:image/png;base64,"), "embedded icons stay");
+    }
+
+    /// The HTML slice for one `<div class="tabpage" id="page-X">` block
+    /// (from the id to the next tabpage or, for the last tab, the script).
+    fn tabpage<'a>(html: &'a str, id: &str) -> &'a str {
+        let needle = format!("id=\"page-{id}\"");
+        let start = html
+            .find(&needle)
+            .unwrap_or_else(|| panic!("missing {needle}"));
+        let rest = &html[start..];
+        let end = rest[1..]
+            .find("class=\"tabpage\"")
+            .map(|i| i + 1)
+            .unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// Pass 10 IA: four tabs, in order — First Crack / Hunt / Backlog /
+    /// Routine.
+    #[test]
+    fn four_tabs_render_in_order() {
+        let t = crate::tuning::Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let ctx = section_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
+        let html = render_plan(&Plan::default(), &ctx);
+        let mut last = 0usize;
+        for label in ["First Crack", "Hunt", "Backlog", "Routine"] {
+            let needle = format!(">{label}</label>");
+            let pos = html
+                .find(&needle)
+                .unwrap_or_else(|| panic!("missing tab {label}"));
+            assert!(pos >= last, "tab {label} renders out of order");
+            last = pos;
+        }
+    }
+
+    /// Pass 10 IA: the standing/focus surface and the weeklies board live
+    /// under Routine and NOT under First Crack (the action-only tab).
+    #[test]
+    fn routine_owns_standing_and_weeklies_not_first_crack() {
+        let t = crate::tuning::Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let daily = DailyRender {
+            affiliation_remaining: 0,
+            affiliation_cap: 31_000,
+            focus_remaining: 214_545,
+            focus_cap: 400_000,
+            families: vec![("Cetus".to_owned(), 6_300)],
+        };
+        let ctx = section_ctx(&world, &t, &weekly, &proven, &icons, &cats, Some(daily));
+        let html = render_plan(&Plan::default(), &ctx);
+        let donow = tabpage(&html, "donow");
+        let routine = tabpage(&html, "routine");
+
+        // Under Routine: standing chips, the sortie line with its reset,
+        // and the weeklies board with stable `wk-*` tick keys.
+        assert!(routine.contains("Syndicates · 0 / 31,000 left"), "standing under Routine");
+        assert!(routine.contains("Focus · 214,545 / 400,000 left"), "focus under Routine");
+        assert!(routine.contains("Ostron · 6,300 / 31,000 left"), "family chip under Routine");
+        assert!(routine.contains("sortie-daily"), "sortie tick key under Routine");
+        assert!(routine.contains(&t.planner.sortie.reset_label), "sortie reset time under Routine");
+        assert!(routine.contains("this week") || routine.contains("This week"), "weeklies header under Routine");
+        assert!(routine.contains("Archon Hunt"), "weeklies board under Routine");
+        assert!(routine.contains("wk-archon"), "weekly tick key under Routine");
+
+        // NOT under First Crack.
+        assert!(!donow.contains("Syndicates ·"), "no standing on First Crack");
+        assert!(!donow.contains("Focus ·"), "no focus bar on First Crack");
+        assert!(!donow.contains("Archon Hunt"), "no weeklies on First Crack");
+        assert!(!donow.contains("wk-archon"), "no weekly tick keys on First Crack");
+        assert!(!donow.contains("sortie-daily"), "no sortie on First Crack");
+        assert!(!donow.contains("This week"), "no weeklies header on First Crack");
     }
 }
