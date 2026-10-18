@@ -75,6 +75,50 @@ const RESPONSE_SUCCESS: u32 = 0;
 /// expects so the regression cannot silently return.
 const OPEN_PIPEWIRE_REMOTE_REPLY_SIGNATURE: &str = "h";
 
+/// A ScreenCast negotiation failure that **names the stage it happened
+/// at** (eleventh pass §2, addendum 40a).
+///
+/// Pre-fix, every negotiation failure was flattened to a `String`, so the
+/// tray had no choice but to render it under whatever stage the machine
+/// was last in — "consent pending" — even when the failure was the
+/// post-consent `OpenPipeWireRemote` fd. Carrying the stage lets the tray
+/// name what actually failed, never the last state the machine was in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NegotiateError {
+    /// The lifecycle stage that failed: `"consent pending"` for the
+    /// consent-gated calls, `"remote-fd"` for the `OpenPipeWireRemote`
+    /// reply (which only runs *after* consent is granted).
+    pub stage: &'static str,
+    /// The verbatim portal/D-Bus error, surfaced as-is.
+    pub message: String,
+}
+
+impl NegotiateError {
+    /// A failure in a consent-gated call: `CreateSession`, `SelectSources`
+    /// or `Start` (each waits on the user's dialog).
+    pub fn consent(message: impl Into<String>) -> Self {
+        Self {
+            stage: "consent pending",
+            message: message.into(),
+        }
+    }
+
+    /// A failure fetching the PipeWire remote fd from a session whose
+    /// consent has **already** been granted.
+    pub fn remote_fd(message: impl Into<String>) -> Self {
+        Self {
+            stage: "remote-fd",
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for NegotiateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
 /// How long any one portal round-trip may take. `SelectSources` waits on a
 /// human clicking a consent dialog, so this is generous; it only exists to
 /// stop a wedged portal from hanging the tray forever.
@@ -98,16 +142,18 @@ pub struct Negotiated {
 }
 
 /// Drive the full ScreenCast portal handshake and return the PipeWire
-/// remote. Any failure is a `String` the caller shows (tray status), so a
-/// missing portal, a refusal, or a timeout is never silent.
-pub async fn negotiate(restore_token: Option<String>) -> Result<Negotiated, String> {
-    let conn = zbus::Connection::session()
-        .await
-        .map_err(|e| format!("ScreenCast portal unavailable (no session bus): {e}"))?;
+/// remote. Any failure is a [`NegotiateError`] naming the stage that
+/// failed, so the tray can surface exactly where the handshake broke (a
+/// missing portal, a refusal, a timeout, or the post-consent remote fd)
+/// rather than the last state the machine was in.
+pub async fn negotiate(restore_token: Option<String>) -> Result<Negotiated, NegotiateError> {
+    let conn = zbus::Connection::session().await.map_err(|e| {
+        NegotiateError::consent(format!("ScreenCast portal unavailable (no session bus): {e}"))
+    })?;
     let unique = conn
         .unique_name()
         .map(|n| n.as_str().to_owned())
-        .ok_or_else(|| "session bus has no unique name".to_owned())?;
+        .ok_or_else(|| NegotiateError::consent("session bus has no unique name"))?;
 
     // 1. CreateSession — the handle_token names the *request* and the
     //    session_handle_token names the *session*.
@@ -120,14 +166,15 @@ pub async fn negotiate(restore_token: Option<String>) -> Result<Negotiated, Stri
         Value::from(session_token.clone()),
     );
     let results = portal_request(&conn, &unique, "CreateSession", &handle, &(opts,)).await?;
-    let session = results
-        .get("session_handle")
-        .ok_or_else(|| "ScreenCast CreateSession returned no session handle".to_owned())?;
+    let session = results.get("session_handle").ok_or_else(|| {
+        NegotiateError::consent("ScreenCast CreateSession returned no session handle")
+    })?;
     let session_path: String = <&str>::try_from(session)
-        .map_err(|e| format!("ScreenCast session handle: {e}"))?
+        .map_err(|e| NegotiateError::consent(format!("ScreenCast session handle: {e}")))?
         .to_owned();
-    let session = ObjectPath::try_from(session_path.as_str())
-        .map_err(|e| format!("ScreenCast session path {session_path:?}: {e}"))?;
+    let session = ObjectPath::try_from(session_path.as_str()).map_err(|e| {
+        NegotiateError::consent(format!("ScreenCast session path {session_path:?}: {e}"))
+    })?;
 
     // 2. SelectSources — monitors + windows, hidden cursor, persistent.
     let handle = crate::portal::handle_token();
@@ -191,7 +238,9 @@ pub async fn negotiate(restore_token: Option<String>) -> Result<Negotiated, Stri
             &(session.clone(), HashMap::<String, Value>::new()),
         )
         .await
-        .map_err(|e| format!("ScreenCast OpenPipeWireRemote failed: {e}"))?;
+        .map_err(|e| {
+            NegotiateError::remote_fd(format!("ScreenCast OpenPipeWireRemote failed: {e}"))
+        })?;
     // The reply signature is checked here (debug builds) and again by the
     // typed deserialize below, so the `h`-not-`v` trap can never slip by.
     debug_assert_eq!(
@@ -205,7 +254,7 @@ pub async fn negotiate(restore_token: Option<String>) -> Result<Negotiated, Stri
     let reply_fd: zbus::zvariant::OwnedFd = msg
         .body()
         .deserialize()
-        .map_err(|e| format!("ScreenCast remote fd: {e}"))?;
+        .map_err(|e| NegotiateError::remote_fd(format!("ScreenCast remote fd: {e}")))?;
     let fd: OwnedFd = reply_fd.into();
 
     Ok(Negotiated {
@@ -224,18 +273,20 @@ async fn portal_request<B>(
     method: &str,
     handle_token: &str,
     args: &B,
-) -> Result<HashMap<String, OwnedValue>, String>
+) -> Result<HashMap<String, OwnedValue>, NegotiateError>
 where
     B: Serialize + DynamicType,
 {
     let req_path = crate::portal::request_path(unique, handle_token);
     let proxy = zbus::Proxy::new(conn, PORTAL_DEST, req_path.as_str(), REQUEST_IFACE)
         .await
-        .map_err(|e| format!("ScreenCast request proxy ({method}): {e}"))?;
+        .map_err(|e| NegotiateError::consent(format!("ScreenCast request proxy ({method}): {e}")))?;
     let mut responses = proxy
         .receive_signal("Response")
         .await
-        .map_err(|e| format!("ScreenCast subscribe Response ({method}): {e}"))?;
+        .map_err(|e| {
+            NegotiateError::consent(format!("ScreenCast subscribe Response ({method}): {e}"))
+        })?;
 
     conn.call_method(
         Some(PORTAL_DEST),
@@ -245,18 +296,29 @@ where
         args,
     )
     .await
-    .map_err(|e| format!("ScreenCast {method} call: {e}"))?;
+    .map_err(|e| NegotiateError::consent(format!("ScreenCast {method} call: {e}")))?;
 
     let signal = tokio::time::timeout(RESPONSE_TIMEOUT, responses.next())
         .await
-        .map_err(|_| format!("ScreenCast {method}: no response within {}s", RESPONSE_TIMEOUT.as_secs()))?
-        .ok_or_else(|| format!("ScreenCast {method}: response stream ended early"))?;
+        .map_err(|_| {
+            NegotiateError::consent(format!(
+                "ScreenCast {method}: no response within {}s",
+                RESPONSE_TIMEOUT.as_secs()
+            ))
+        })?
+        .ok_or_else(|| {
+            NegotiateError::consent(format!("ScreenCast {method}: response stream ended early"))
+        })?;
     let (code, results): (u32, HashMap<String, OwnedValue>) = signal
         .body()
         .deserialize()
-        .map_err(|e| format!("ScreenCast {method}: malformed response: {e}"))?;
+        .map_err(|e| {
+            NegotiateError::consent(format!("ScreenCast {method}: malformed response: {e}"))
+        })?;
     if code != RESPONSE_SUCCESS {
-        return Err(format!("ScreenCast {method} refused (response {code})"));
+        return Err(NegotiateError::consent(format!(
+            "ScreenCast {method} refused (response {code})"
+        )));
     }
     Ok(results)
 }
@@ -266,12 +328,15 @@ where
 ///
 /// The advertised `size` is only a hint; the authoritative dimensions come
 /// off each PipeWire buffer (see [`StreamCtx`]), so we do not parse it here.
-fn parse_streams(streams: Option<OwnedValue>) -> Result<(u32, u32), String> {
-    let streams = streams.ok_or_else(|| "ScreenCast Start returned no streams".to_owned())?;
+fn parse_streams(streams: Option<OwnedValue>) -> Result<(u32, u32), NegotiateError> {
+    let streams = streams
+        .ok_or_else(|| NegotiateError::consent("ScreenCast Start returned no streams"))?;
     let arr = zbus::zvariant::Array::<'static>::try_from(streams)
-        .map_err(|e| format!("ScreenCast streams: {e}"))?;
+        .map_err(|e| NegotiateError::consent(format!("ScreenCast streams: {e}")))?;
     if arr.is_empty() {
-        return Err("ScreenCast Start selected no streams".to_owned());
+        return Err(NegotiateError::consent(
+            "ScreenCast Start selected no streams",
+        ));
     }
     Ok((0, 0))
 }
@@ -1232,5 +1297,21 @@ mod tests {
             OPEN_PIPEWIRE_REMOTE_REPLY_SIGNATURE,
             "the OpenPipeWireRemote reply must be typed as an fd, not a variant"
         );
+    }
+
+    #[test]
+    fn negotiate_failures_name_the_stage_that_failed() {
+        // Consent-gated calls name consent; the fd call runs AFTER consent
+        // is granted and must name remote-fd, so the tray can never render
+        // "error (consent pending)" for a remote-fd failure (item 40a).
+        assert_eq!(NegotiateError::consent("boom").stage, "consent pending");
+        assert_eq!(
+            NegotiateError::consent("boom").to_string(),
+            "boom",
+            "the verbatim message survives"
+        );
+        let fd = NegotiateError::remote_fd("ScreenCast remote fd: mismatched signature");
+        assert_eq!(fd.stage, "remote-fd");
+        assert_eq!(fd.message, "ScreenCast remote fd: mismatched signature");
     }
 }
