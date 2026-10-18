@@ -251,3 +251,18 @@ it refines the brief where they disagree. For the next worker pass.
     and collects stacks as they scroll past, deduped by stack
     identity. The CLI --ocr-ingest path remains as a debug /
     calibration tool only.
+40. **Live-test round 2 (Seth, 2026-10-17, v0.3.0).** (a) Capture
+    Inventory: consent granted, then nothing — no state change,
+    no feedback. The capture lifecycle must be a visible state
+    machine in the tray (consent -> connecting -> capturing with
+    live counts -> error WITH the reason), and logged to a file.
+    (b) On a new EE.log the plan should not only regenerate, it
+    should OPEN (his expectation at game start). Opening must
+    land in his browser with no app-chooser dialog, every time.
+    (c) Standing math is wrong live: the profile field
+    DailyAffiliation IS the remaining amount (7823 tonight,
+    matching his in-game readout) yet the app showed 0 left for
+    Syndicates. (d) Alerts he completed this session still show
+    undone after regeneration despite the resident watching
+    since session start — log-derived completions must reach
+    the report the resident generates.
