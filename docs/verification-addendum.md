@@ -275,3 +275,15 @@ it refines the brief where they disagree. For the next worker pass.
     a tiny loopback HTTP server in-process: stable origin,
     ticks POST to the server and persist in app data,
     opening is a plain http:// URL in the default browser.
+42. **IA pass — Seth's design (2026-10-18).** Seth authored the
+    target IA himself in a worked HTML file (his session-plan
+    export, iterated by hand). Decisions: FOUR tabs — First
+    Crack / Hunt / Backlog / **Routine** (new). First Crack is
+    action-only: event alerts, crack queue, Varzia strip, pack
+    strip — no standing bars, no weeklies. Routine owns the
+    daily/weekly surface: standing + focus as compact numbers
+    with slim bars, sortie, the weeklies board. Slim header:
+    one row, brand + status pills (Baro / Varzia / Targets) +
+    one-line stamp. Density down everywhere: 5px bars, tighter
+    spacing, less boilerplate per card. His file is the spec;
+    the renderer conforms to it (pass 10).
