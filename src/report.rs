@@ -205,7 +205,7 @@ pub async fn generate(cfg: &ReportConfig) -> Result<ReportOutcome, String> {
             }
             Err(e) => {
                 endpoint_failures.push(format!("profile: {e}"));
-                profile_from_fixture(&tuning, &cfg.data_dir, &cfg.fixtures)?
+                profile_fallback(&tuning, &cfg.data_dir, &cfg.cache_dir, &cfg.fixtures)?
             }
         },
         None => profile_from_fixture(&tuning, &cfg.data_dir, &cfg.fixtures)?,
@@ -406,6 +406,28 @@ fn profile_from_fixture(
     Ok((o, snap.mastery_rank, d, "fixture".to_owned()))
 }
 
+/// Profile for a report when the live fetch failed. The on-disk live cache
+/// is a real per-day REMAINING snapshot (possibly an hour or two stale, but
+/// the profile's own numbers); the recorded fallback fixture is a fixed
+/// older snapshot. Prefer the cache so a transient endpoint failure never
+/// silently swaps in an unrelated (and possibly stale/zeroed) daily state
+/// — then fall back to the fixture. Ninth pass §3.
+fn profile_fallback(
+    tuning: &Tuning,
+    data_dir: &std::path::Path,
+    cache_dir: &std::path::Path,
+    fixtures: &std::path::Path,
+) -> Result<(OwnedEquipment, u32, Option<render::DailyRender>, String), String> {
+    let cached = cache_dir.join(format!("profile-{PROFILE_ACCOUNT_ID}.json"));
+    if let Ok(text) = std::fs::read_to_string(&cached) {
+        if let Ok(snap) = fetch::parse_profile(&text) {
+            let (o, d) = profile_context(tuning, data_dir, &snap);
+            return Ok((o, snap.mastery_rank, d, "cache".to_owned()));
+        }
+    }
+    profile_from_fixture(tuning, data_dir, fixtures)
+}
+
 /// Demo icon embedding: download each goal's parent icon, shrink to a
 /// ≤128px thumbnail (python3 + PIL when available), and return the
 /// parent-name -> data-URI map plus embedded/fallback counts. Any
@@ -529,5 +551,78 @@ mod tests {
         );
         assert!(!cfg.embed_icons);
         assert_eq!(cfg.out, PathBuf::from("/tmp/plan.html"));
+    }
+
+    /// Ninth pass §3 audit: the page must render each pool's REMAINING
+    /// exactly as the profile reports it — including the bare shared
+    /// `DailyAffiliation` pool, whose partial value the app reported as
+    /// "0 left". Runs against the live snapshot when present (gitignored;
+    /// skipped on a box that lacks it).
+    #[test]
+    fn live_profile_renders_every_pool_at_its_raw_remaining() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let live = root.join("fixtures/ocr-samples/profile-2026-10-17.json");
+        let Ok(text) = std::fs::read_to_string(&live) else {
+            eprintln!(
+                "skip §3 audit: need the live profile fixture at {}",
+                live.display()
+            );
+            return;
+        };
+        let raw: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let raw = &raw["Results"][0];
+        let snap = fetch::parse_profile(&text).unwrap();
+        let tuning = Tuning::load(&root.join("data")).unwrap();
+        let caps = &tuning.planner.daily_caps;
+        let (_owned, daily) = profile_context(&tuning, &root.join("data"), &snap);
+        let daily = daily.expect("daily render from the live profile");
+        let html = render::pool_bars_html(&daily, caps);
+
+        // Parse the rendered bar-name lines back into label -> remaining.
+        let mut rendered = HashMap::new();
+        for chunk in html.split("class=\"bar-name\">").skip(1) {
+            let text = chunk.split('<').next().unwrap();
+            let (label, rest) = text.split_once(" · ").expect("label · value");
+            let (rem, _cap) = rest.split_once(" / ").expect("value / cap");
+            rendered.insert(label.to_owned(), rem.replace(',', "").parse::<u32>().unwrap());
+        }
+
+        // Focus.
+        let raw_focus = raw["DailyFocus"].as_u64().unwrap() as u32;
+        assert_eq!(
+            rendered.get("Focus"),
+            Some(&raw_focus),
+            "Focus renders its raw remaining"
+        );
+        assert_eq!(snap.daily.focus_remaining, raw_focus);
+
+        // The bare shared pool ("Syndicates") — the reported defect.
+        let raw_main = raw["DailyAffiliation"].as_u64().unwrap() as u32;
+        assert_eq!(
+            rendered.get(caps.label_for("main")),
+            Some(&raw_main),
+            "the bare DailyAffiliation pool renders its raw remaining"
+        );
+        assert_eq!(snap.daily.affiliation_remaining, raw_main);
+
+        // Every family pool, including the untouched (at-cap) ones.
+        let mut families = 0;
+        for (k, v) in raw.as_object().unwrap() {
+            let Some(fam) = k.strip_prefix("DailyAffiliation") else {
+                continue;
+            };
+            if fam.is_empty() || fam.eq_ignore_ascii_case("pvp") {
+                continue;
+            }
+            let raw_val = v.as_u64().unwrap() as u32;
+            assert_eq!(
+                rendered.get(caps.label_for(fam)),
+                Some(&raw_val),
+                "family {fam} renders its raw remaining"
+            );
+            families += 1;
+        }
+        assert_eq!(families, 12, "all 12 family pools audited");
+        assert_eq!(rendered.len(), families + 2, "Focus + bare pool + families");
     }
 }

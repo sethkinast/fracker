@@ -450,35 +450,7 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     h.push_str("<section><h2>Today</h2>\n<div class=\"bars\">\n");
     let caps = &ctx.tuning.planner.daily_caps;
     match &ctx.daily {
-        Some(d) => {
-            h.push_str(&pool_bar(
-                "Focus",
-                d.focus_remaining,
-                d.focus_cap,
-                false,
-            ));
-            h.push_str(&pool_bar(
-                caps.label_for("main"),
-                d.affiliation_remaining,
-                d.affiliation_cap,
-                false,
-            ));
-            let have: HashMap<&str, u32> =
-                d.families.iter().map(|(k, v)| (k.as_str(), *v)).collect();
-            for fam in &caps.families {
-                if fam.eq_ignore_ascii_case("pvp") {
-                    continue;
-                }
-                if let Some(remaining) = have.get(fam.as_str()).copied() {
-                    h.push_str(&pool_bar(
-                        caps.label_for(fam),
-                        remaining,
-                        d.affiliation_cap,
-                        true,
-                    ));
-                }
-            }
-        }
+        Some(d) => h.push_str(&pool_bars_html(d, caps)),
         None => {
             let (focus_cap, stand_cap) = match ctx.mastery_rank {
                 Some(mr) => (
@@ -775,6 +747,39 @@ fn fmt_int(n: u32) -> String {
         out.push(ch);
     }
     out.chars().rev().collect()
+}
+
+/// The pass-4 daily pool bars — Focus (full size), the bare shared
+/// `DailyAffiliation` pool labelled via the data-owned map (full size),
+/// then one slim bar per family. The remaining values are the profile's
+/// own REMAINING amounts, printed verbatim (never estimated, never
+/// arithmetic-transformed). Public so the ninth-pass §3 audit test can
+/// assert rendered remaining == the profile's raw values for every pool,
+/// including the bare one.
+pub fn pool_bars_html(d: &DailyRender, caps: &crate::tuning::DailyCapsTuning) -> String {
+    let mut h = String::new();
+    h.push_str(&pool_bar("Focus", d.focus_remaining, d.focus_cap, false));
+    h.push_str(&pool_bar(
+        caps.label_for("main"),
+        d.affiliation_remaining,
+        d.affiliation_cap,
+        false,
+    ));
+    let have: HashMap<&str, u32> = d.families.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+    for fam in &caps.families {
+        if fam.eq_ignore_ascii_case("pvp") {
+            continue;
+        }
+        if let Some(remaining) = have.get(fam.as_str()).copied() {
+            h.push_str(&pool_bar(
+                caps.label_for(fam),
+                remaining,
+                d.affiliation_cap,
+                true,
+            ));
+        }
+    }
+    h
 }
 
 /// One standing/focus pool bar: remaining-of-cap, terse label. Full
