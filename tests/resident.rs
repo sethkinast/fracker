@@ -6,11 +6,14 @@
 //! trigger. The tray is deliberately absent here, which also exercises
 //! the §4 "tray absence never changes watch/report behavior" guarantee.
 
+use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use fracker::report::ReportConfig;
 use fracker::resident::{run_headless, ResidentOptions, Shutdown};
+use fracker::tray::TrayStatus;
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -52,6 +55,8 @@ async fn headless_resident_reports_on_new_ee_log_without_manual_trigger() {
         log_path: log_path.clone(),
         state_dir: base.join("state"),
         watch_interval_ms: 25,
+        serve_port: 0,
+        pop_on_session_start: false,
     };
     let shutdown = Shutdown::new();
     let sd = shutdown.clone();
@@ -102,6 +107,8 @@ async fn resident_starts_and_stops_cleanly_with_no_log_at_all() {
         log_path: base.join("log/EE.log"),
         state_dir: base.join("state"),
         watch_interval_ms: 25,
+        serve_port: 0,
+        pop_on_session_start: false,
     };
     let shutdown = Shutdown::new();
     let sd = shutdown.clone();
@@ -203,6 +210,8 @@ async fn headless_resident_strikes_log_completed_alerts_in_the_report() {
         log_path: log_path.clone(),
         state_dir: base.join("state"),
         watch_interval_ms: 25,
+        serve_port: 0,
+        pop_on_session_start: false,
     };
     let shutdown = Shutdown::new();
     let sd = shutdown.clone();
@@ -253,5 +262,111 @@ async fn headless_resident_strikes_log_completed_alerts_in_the_report() {
     let state = std::fs::read_to_string(base.join("state/state.json")).unwrap();
     assert!(state.contains("mission_completions"), "completions persisted");
     assert!(state.contains("6ad0d7360dfe89c5d82290a2"), "Hive completion recorded");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// One blocking loopback HTTP round-trip (the resident's own §2 server).
+fn http(base_url: &str, method: &str, path: &str, body: Option<&str>) -> String {
+    let addr = base_url
+        .trim_start_matches("http://")
+        .trim_end_matches('/');
+    let mut stream = std::net::TcpStream::connect(addr).expect("connect loopback server");
+    let body = body.unwrap_or("");
+    let req = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(req.as_bytes()).unwrap();
+    let mut out = String::new();
+    stream.read_to_string(&mut out).unwrap();
+    out
+}
+
+/// The first `data-id="…"` value in a page.
+fn first_data_id(html: &str) -> Option<String> {
+    let start = html.find("data-id=\"")? + "data-id=\"".len();
+    let rest = &html[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_owned())
+}
+
+/// Ninth pass §2 integration gate: the resident serves the plan on
+/// 127.0.0.1, re-applies server-side ticks, and records the live URL for
+/// the tray's Open action. Offline + hermetic.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resident_serves_the_plan_over_loopback_and_persists_ticks() {
+    let base = scrape_dir("serve");
+    let log_path = base.join("log/EE.log");
+    let out = base.join("out/plan.html");
+    let status = Arc::new(Mutex::new(TrayStatus::default()));
+    let opts = ResidentOptions {
+        report: offline_report_config(&base),
+        log_path: log_path.clone(),
+        state_dir: base.join("state"),
+        watch_interval_ms: 25,
+        serve_port: 0,
+        pop_on_session_start: false,
+    };
+    let shutdown = Shutdown::new();
+    let sd = shutdown.clone();
+    let st = status.clone();
+    let task = tokio::spawn(async move { fracker::resident::run(opts, sd, None, st, None).await });
+
+    // A session-start EE.log drives one report, and the server records its URL.
+    {
+        let mut f = std::fs::File::create(&log_path).unwrap();
+        writeln!(f, "14.148 Sys [Info]: Logged in Jenterrobahne").unwrap();
+        f.flush().unwrap();
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let url = loop {
+        let recorded = status.lock().unwrap().page_url.clone();
+        if out.exists() {
+            if let Some(url) = recorded {
+                break url;
+            }
+        }
+        if Instant::now() > deadline {
+            shutdown.trigger();
+            let _ = task.await;
+            panic!("resident never served the plan");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(
+        url.starts_with("http://127.0.0.1:"),
+        "server binds loopback only, got {url}"
+    );
+
+    // GET / serves the real report with the tick JSON spliced in.
+    let page = http(&url, "GET", "/", None);
+    assert!(page.contains("200 OK"));
+    assert!(page.contains("<html"), "the plan page is served");
+    assert!(page.contains("data-fracker-ticks="), "ticks injected");
+    let id = first_data_id(&page).expect("the page has checkboxes");
+    let day = {
+        let s = page.find("data-day=\"").unwrap() + "data-day=\"".len();
+        let rest = &page[s..];
+        rest[..rest.find('"').unwrap()].to_owned()
+    };
+    assert!(day.len() == 10, "plan day present, got {day:?}");
+
+    // POST /tick stores it server-side...
+    let body = format!(r#"{{"id":"{id}","day":"{day}","done":true}}"#);
+    let posted = http(&url, "POST", "/tick", Some(&body));
+    assert!(posted.contains("200 OK"), "tick accepted: {posted}");
+    // ...persisted to the app data dir, keyed by id + day...
+    let ticks = std::fs::read_to_string(base.join("state/ticks.json")).unwrap();
+    assert!(
+        ticks.contains(&id) && ticks.contains(&day),
+        "tick persisted keyed by id + day: {ticks}"
+    );
+    // ...and re-applied on the next serve.
+    let page2 = http(&url, "GET", "/", None);
+    assert!(page2.contains("data-fracker-ticks="));
+
+    shutdown.trigger();
+    task.await.expect("resident task did not panic").expect("clean exit");
     let _ = std::fs::remove_dir_all(&base);
 }

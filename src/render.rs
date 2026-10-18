@@ -190,7 +190,11 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     }
     h.push_str("<style>\n");
     h.push_str(CSS);
-    h.push_str("\n</style>\n</head>\n<body>\n<div class=\"wrap\">\n");
+    h.push_str("\n</style>\n</head>\n");
+    // The in-game day the tick store is keyed by (ninth pass §2): the plan
+    // date, read by the client + the loopback server when applying ticks.
+    let day = ctx.generated_label.get(..10).unwrap_or("");
+    h.push_str(&format!("<body data-day=\"{}\">\n<div class=\"wrap\">\n", esc(day)));
 
     // ---- header ----
     h.push_str("<header class=\"masthead\">\n");
@@ -1013,28 +1017,53 @@ details.alt { margin-top: 6px; font-size: 13px; color: #7e8898; }
 "#;
 
 const JS: &str = r#"
-// Checkbox persistence: localStorage keyed by plan-item id + in-game date.
+// Checkbox ticks: the resident's loopback HTTP server is the store of
+// record (POST /tick, keyed by item id + in-game day) and re-applies the
+// ticks it injects onto <body data-fracker-ticks> (base64 JSON) on every
+// serve. localStorage remains only a progressive cache for a file://
+// page. The 60s meta-refresh reloads the served page, so ticks survive.
 (function () {
-  var date = document.querySelector('.stamp');
-  var day = (date ? date.textContent : '').slice(0, 10).replace(/[^0-9-]/g, '');
+  var day = document.body.getAttribute('data-day') || '';
+  var served = document.body.hasAttribute('data-fracker-ticks');
+  var done = {};
+  try {
+    var raw = document.body.getAttribute('data-fracker-ticks');
+    if (raw) {
+      var store = JSON.parse(atob(raw)).days || {};
+      (store[day] || []).forEach(function (i) { done[i] = true; });
+    }
+  } catch (e) {}
   function key(id) { return 'fracker:' + day + ':' + id; }
+  function host(box) { return box.closest('.chunk,.nw,.wk,.bar,.card'); }
+  function paint(box, on) {
+    var h = host(box);
+    if (h) { h.classList.toggle('done', on); }
+    if (box.checked !== on) { box.checked = on; }
+  }
   document.querySelectorAll('input[type=checkbox][data-id]').forEach(function (box) {
     var id = box.getAttribute('data-id');
-    try {
-      if (localStorage.getItem(key(id)) === '1' && !box.checked) { box.checked = true; }
-    } catch (e) {}
+    var on = !!done[id];
+    // localStorage is only a fallback for a file:// page: when the
+    // resident serves the page, its tick store is authoritative.
+    if (!served) {
+      try { if (localStorage.getItem(key(id)) === '1') { on = true; } } catch (e) {}
+    }
+    if (on) { paint(box, true); }
     box.addEventListener('change', function () {
-      var host = box.closest('.chunk,.nw,.wk,.bar,.card');
-      if (host) { host.classList.toggle('done', box.checked); }
+      var checked = box.checked;
+      paint(box, checked);
       try {
-        if (box.checked) { localStorage.setItem(key(id), '1'); }
+        if (checked) { localStorage.setItem(key(id), '1'); }
         else { localStorage.removeItem(key(id)); }
       } catch (e) {}
+      try {
+        fetch('/tick', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: id, day: day, done: checked })
+        });
+      } catch (e) {}
     });
-    if (box.checked) {
-      var host = box.closest('.chunk,.nw,.wk,.bar,.card');
-      if (host) { host.classList.add('done'); }
-    }
   });
 })();
 "#;
@@ -1080,6 +1109,14 @@ mod tests {
         assert!(html.contains("color-scheme: dark"), "refresh-flash rule");
         assert!(html.contains("http-equiv=\"refresh\""), "meta refresh");
         assert!(html.contains("localStorage"), "checkbox persistence");
+        assert!(
+            html.contains("data-day=\""),
+            "the in-game day is on the body for tick keying (§2)"
+        );
+        assert!(
+            html.contains("fetch('/tick'"),
+            "checkbox changes POST to the loopback server (§2)"
+        );
         assert!(html.contains("Rajdhani"), "game-adjacent type");
         assert!(html.contains("clip-path"), "chamfered cards");
         // v2 tabs: empty plan has no loud line; all three tabs render.

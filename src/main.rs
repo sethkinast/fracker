@@ -163,6 +163,8 @@ async fn run_resident(args: &Args) -> Result<(), String> {
         log_path: log_path.clone(),
         state_dir: config::data_dir(),
         watch_interval_ms: args.watch_interval_ms,
+        serve_port: cfg.serve_port,
+        pop_on_session_start: cfg.pop_on_session_start,
     };
     let shutdown = resident::Shutdown::new();
 

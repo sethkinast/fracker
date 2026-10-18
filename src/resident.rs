@@ -33,7 +33,7 @@ use crate::report::{self, ReportConfig};
 use crate::state::AppState;
 use crate::tray::{FrackerTray, TrayCommand, TrayStatus};
 use crate::watch::LogWatcher;
-use crate::{elog, portal, screencast};
+use crate::{elog, portal, screencast, server, ticks};
 
 /// What asked for a report run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +92,11 @@ pub struct ResidentOptions {
     pub state_dir: PathBuf,
     /// Watch wait tick in milliseconds (also the poll fallback).
     pub watch_interval_ms: i32,
+    /// Loopback HTTP port to serve the plan on (ninth pass §2). Falls back
+    /// to an ephemeral port when taken; 0 = always ephemeral.
+    pub serve_port: u16,
+    /// Open the plan page automatically on session start (item 40b).
+    pub pop_on_session_start: bool,
 }
 
 /// A message from the Capture Inventory worker thread to the resident
@@ -142,6 +147,30 @@ pub async fn run(
     // latest completions, and seeded from persisted state so a restart
     // mid-session keeps its strikes.
     let completions: Arc<Mutex<Vec<elog::MissionCompletion>>> = Arc::new(Mutex::new(Vec::new()));
+    // Ninth pass §2: the resident serves the plan itself on loopback, so
+    // ticks persist server-side and "Open plan page" is a plain browser
+    // URL (no file handoff, no chooser). Best-effort: a bind failure
+    // leaves page_url unset and Open falls back to the file path.
+    let tick_path = ticks::TickStore::file(&opts.state_dir);
+    let tick_store = Arc::new(Mutex::new(ticks::TickStore::load(&tick_path)));
+    let plan_server = match server::serve(
+        opts.serve_port,
+        opts.report.out.clone(),
+        tick_path.clone(),
+        tick_store.clone(),
+    ) {
+        Ok(s) => {
+            println!("resident: serving the plan at {}", s.url());
+            if let Ok(mut st) = status.lock() {
+                st.page_url = Some(s.url().to_owned());
+            }
+            Some(s)
+        }
+        Err(e) => {
+            eprintln!("resident: plan server unavailable ({e}); opening the file path instead");
+            None
+        }
+    };
     let watch_thread = spawn_watch(
         opts.log_path.clone(),
         opts.watch_interval_ms,
@@ -172,6 +201,12 @@ pub async fn run(
                 // one read) into a single report run.
                 while trigger_rx.try_recv().is_ok() {}
                 do_report(&opts, &status, &tray, trigger, &completions).await;
+                // Ninth pass §2/item 40b: a new EE.log at game start is
+                // regenerated AND opened (behind the fullscreen game is
+                // fine). pop_on_session_start is the §9 switch.
+                if trigger == Trigger::SessionStart && opts.pop_on_session_start {
+                    open_page(&opts, &status, &tray, &completions, &plan_server).await;
+                }
             }
             cmd = recv_cmd(&mut cmds) => {
                 match cmd {
@@ -179,7 +214,7 @@ pub async fn run(
                         do_report(&opts, &status, &tray, Trigger::Manual, &completions).await;
                     }
                     Some(TrayCommand::OpenPage) => {
-                        open_page(&opts, &status, &tray, &completions).await;
+                        open_page(&opts, &status, &tray, &completions, &plan_server).await;
                     }
                     Some(TrayCommand::CaptureInventory) => {
                         toggle_capture(&opts, &status, &tray, &mut capture, &capture_log).await;
@@ -545,14 +580,16 @@ async fn do_report(
     refresh_tray(tray).await;
 }
 
-/// "Open plan page": generate when the report does not exist yet, then
-/// open it via the OpenURI `OpenFile` portal (with an `xdg-open` fallback
-/// only for an absent portal). A portal refusal is surfaced, never silent.
+/// "Open plan page" (ninth pass §2): open the loopback URL via the
+/// OpenURI portal (default browser, no chooser) when the server is up,
+/// else fall back to the OpenFile route on the rendered path. The report
+/// is generated first when missing. A failure is surfaced, never silent.
 async fn open_page(
     opts: &ResidentOptions,
     status: &Arc<Mutex<TrayStatus>>,
     tray: &Option<ksni::Handle<FrackerTray>>,
     completions: &Arc<Mutex<Vec<elog::MissionCompletion>>>,
+    plan_server: &Option<server::PlanServer>,
 ) {
     let out = &opts.report.out;
     if !out.exists() {
@@ -570,12 +607,16 @@ async fn open_page(
             return;
         }
     }
-    match portal::open_plan(out).await {
-        Ok(()) => {
+    let opened = match plan_server {
+        Some(s) => portal::open_url(s.url()).await.map(|()| s.url().to_owned()),
+        None => portal::open_plan(out).await.map(|()| out.display().to_string()),
+    };
+    match opened {
+        Ok(target) => {
             if let Ok(mut s) = status.lock() {
                 s.last_error = None;
             }
-            println!("resident: opened {}", out.display());
+            println!("resident: opened {target}");
         }
         Err(e) => {
             eprintln!("resident: open failed: {e}");
