@@ -321,8 +321,9 @@ fn golden_page_shows_pass4_sections_and_pool_bars() {
     assert!(html.contains("Ivara Prime"));
     assert!(html.contains("Kill 10 Enemies while Sliding"));
     assert!(!html.contains("card vendor\">"));
-    // Per-pool bars: 12 slim family bars, no PvP, remaining labels.
-    assert_eq!(html.matches("card bar slim").count(), 12);
+    // Per-pool chips: 12 slim family chips, no PvP, remaining labels —
+    // the Routine tab's compact "Today" strip (pass 10 IA).
+    assert_eq!(html.matches("pool slim").count(), 12);
     assert!(!html.contains("Pvp"));
     assert!(html.contains("Focus ·"));
     // Slimmed box: kept rows render, cut rows never do.
@@ -338,6 +339,35 @@ fn golden_page_shows_pass4_sections_and_pool_bars() {
         assert!(!html.contains(cut), "cut weekly renders: {cut}");
     }
     assert!(!html.contains("wk-nw-weekly"), "acts own their section now");
+    // Pass 10 IA: four tabs in order; the standing/weeklies surface sits
+    // under Routine and NOT under the action-only First Crack tab.
+    let mut last = 0usize;
+    for label in ["First Crack", "Hunt", "Backlog", "Routine"] {
+        let pos = html.find(&format!(">{label}</label>")).expect("tab label");
+        assert!(pos >= last, "tab {label} renders out of order");
+        last = pos;
+    }
+    let slice = |id: &str| -> &str {
+        let start = html.find(&format!("id=\"page-{id}\"")).expect("tabpage");
+        let rest = &html[start..];
+        let end = rest[1..]
+            .find("class=\"tabpage\"")
+            .map(|i| i + 1)
+            .unwrap_or(rest.len());
+        &rest[..end]
+    };
+    let donow = slice("donow");
+    let routine = slice("routine");
+    assert!(routine.contains("Focus ·"), "focus renders under Routine");
+    assert!(routine.contains("Syndicates ·"), "standing renders under Routine");
+    assert!(routine.contains("Archon Hunt"), "weeklies render under Routine");
+    assert!(routine.contains("wk-archon"), "weekly tick key lives under Routine");
+    assert!(routine.contains("sortie-daily"), "sortie tick key lives under Routine");
+    assert!(!donow.contains("Focus ·"), "no standing/focus on First Crack");
+    assert!(!donow.contains("Syndicates ·"), "no standing on First Crack");
+    assert!(!donow.contains("Archon Hunt"), "no weeklies on First Crack");
+    assert!(!donow.contains("wk-archon"), "no weekly tick keys on First Crack");
+    assert!(!donow.contains("sortie-daily"), "no sortie on First Crack");
 }
 
 #[test]
