@@ -312,20 +312,20 @@ fn golden_page_shows_pass4_sections_and_pool_bars() {
     let html = fracker::render::render_plan(&g.plan, &ctx);
     // Event section live with countdowns; gift section hidden.
     assert!(html.contains(&tuning.planner.alert_sections.event_header));
-    assert!(html.contains("Nimus (Eris)"));
-    assert!(!html.contains(&format!(
-        "<h3 class=\"donow-sub\">{}</h3>",
-        tuning.planner.alert_sections.lotus_header
-    )));
+    assert!(html.contains("<b>Nimus</b>"));
+    assert!(html.contains("Eris"));
+    assert!(!html.contains(&tuning.planner.alert_sections.lotus_header));
     // Rotation element + act descriptions + trader hidden.
     assert!(html.contains("Ivara Prime"));
     assert!(html.contains("Kill 10 Enemies while Sliding"));
     assert!(!html.contains("card vendor\">"));
-    // Per-pool chips: 12 slim family chips, no PvP, remaining labels —
-    // the Routine tab's compact "Today" strip (pass 10 IA).
-    assert_eq!(html.matches("pool slim").count(), 12);
+    // Per-pool caps: Focus + the bare shared pool + 12 families, no
+    // PvP; the visible number is compact, the raw value rides data-left
+    // (twelfth pass §1 / §3).
+    assert_eq!(html.matches("class=\"cap\"").count(), 14);
     assert!(!html.contains("Pvp"));
-    assert!(html.contains("Focus ·"));
+    assert!(html.contains("Focus"));
+    assert!(html.contains("data-left=\""));
     // Slimmed box: kept rows render, cut rows never do.
     assert!(html.contains("Archon Hunt"));
     for cut in [
@@ -339,8 +339,8 @@ fn golden_page_shows_pass4_sections_and_pool_bars() {
         assert!(!html.contains(cut), "cut weekly renders: {cut}");
     }
     assert!(!html.contains("wk-nw-weekly"), "acts own their section now");
-    // Pass 10 IA: four tabs in order; the standing/weeklies surface sits
-    // under Routine and NOT under the action-only First Crack tab.
+    // Twelfth pass §1: four tabs in order; the standing/weeklies surface
+    // sits under Routine and NOT under the action-only First Crack tab.
     let mut last = 0usize;
     for label in ["First Crack", "Hunt", "Backlog", "Routine"] {
         let pos = html.find(&format!(">{label}</label>")).expect("tab label");
@@ -348,26 +348,27 @@ fn golden_page_shows_pass4_sections_and_pool_bars() {
         last = pos;
     }
     let slice = |id: &str| -> &str {
-        let start = html.find(&format!("id=\"page-{id}\"")).expect("tabpage");
+        let needle = format!("<div class=\"page\" id=\"{id}\">");
+        let start = html.find(&needle).expect("page");
         let rest = &html[start..];
         let end = rest[1..]
-            .find("class=\"tabpage\"")
+            .find("<div class=\"page\"")
             .map(|i| i + 1)
             .unwrap_or(rest.len());
         &rest[..end]
     };
-    let donow = slice("donow");
-    let routine = slice("routine");
-    assert!(routine.contains("Focus ·"), "focus renders under Routine");
-    assert!(routine.contains("Syndicates ·"), "standing renders under Routine");
+    let first_crack = slice("p1");
+    let routine = slice("p4");
+    assert!(routine.contains("Focus"), "focus renders under Routine");
+    assert!(routine.contains("Syndicates"), "standing renders under Routine");
     assert!(routine.contains("Archon Hunt"), "weeklies render under Routine");
     assert!(routine.contains("wk-archon"), "weekly tick key lives under Routine");
     assert!(routine.contains("sortie-daily"), "sortie tick key lives under Routine");
-    assert!(!donow.contains("Focus ·"), "no standing/focus on First Crack");
-    assert!(!donow.contains("Syndicates ·"), "no standing on First Crack");
-    assert!(!donow.contains("Archon Hunt"), "no weeklies on First Crack");
-    assert!(!donow.contains("wk-archon"), "no weekly tick keys on First Crack");
-    assert!(!donow.contains("sortie-daily"), "no sortie on First Crack");
+    assert!(!first_crack.contains("Focus"), "no standing/focus on First Crack");
+    assert!(!first_crack.contains("Syndicates"), "no standing on First Crack");
+    assert!(!first_crack.contains("Archon Hunt"), "no weeklies on First Crack");
+    assert!(!first_crack.contains("wk-archon"), "no weekly tick keys on First Crack");
+    assert!(!first_crack.contains("sortie-daily"), "no sortie on First Crack");
 }
 
 #[test]

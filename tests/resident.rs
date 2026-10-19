@@ -222,7 +222,7 @@ async fn headless_resident_strikes_log_completed_alerts_in_the_report() {
     let deadline = Instant::now() + Duration::from_secs(90);
     let html = loop {
         if let Ok(text) = std::fs::read_to_string(&out) {
-            if text.contains("evt done") {
+            if text.contains("row ev done") {
                 break text;
             }
         }
@@ -236,7 +236,7 @@ async fn headless_resident_strikes_log_completed_alerts_in_the_report() {
 
     // Every one of the three completed alerts is struck...
     assert_eq!(
-        html.matches("class=\"card exp evt done\"").count(),
+        html.matches("class=\"row ev done\"").count(),
         3,
         "all three log-completed alerts render struck"
     );
@@ -248,11 +248,11 @@ async fn headless_resident_strikes_log_completed_alerts_in_the_report() {
     );
     // ...and the never-mentioned fourth alert still renders unstruck.
     assert!(
-        html.contains("Larunda (Mercury) (Capture)"),
+        html.contains("<b>Larunda</b>") && html.contains("Capture"),
         "the unmatched alert still renders"
     );
     assert!(
-        html.matches("class=\"card exp evt").count() == 4,
+        html.matches("class=\"row ev").count() == 4,
         "all four event alerts render (three struck, one live)"
     );
 

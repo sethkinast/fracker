@@ -640,6 +640,11 @@ pub struct Alert {
     pub id: String,
     #[serde(default)]
     pub tag: String,
+    /// When this alert instance went live (worldstate `activation`). The
+    /// twelfth-pass §4 activation guard: a completion may only corroborate
+    /// an alert it could actually belong to — observed at/after this time.
+    #[serde(default)]
+    pub activation: String,
     #[serde(default)]
     pub expiry: String,
     #[serde(default)]

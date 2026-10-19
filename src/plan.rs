@@ -168,6 +168,33 @@ pub struct Chunk {
     /// chunks carry their goal's gear; alert/rotation/vendor/farm/
     /// sortie/filler chunks have no single parent (None).
     pub gear: Option<String>,
+    /// Structured crack facts for the twelfth-pass mock's compact crack
+    /// rows (`Systems · +2 also`, `Meso C11`, `Radiant · 10% · 400 tr`).
+    /// None for every non-crack chunk; the human strings (`title`,
+    /// `why`) stay for other consumers.
+    pub crack: Option<CrackInfo>,
+}
+
+/// The compact facts one First-Crack crack row renders (twelfth pass
+/// §1): the target part, the chosen relic at its refinement, the batch,
+/// the per-crack chance, the trace spend and the same-relic coverage.
+#[derive(Debug, Clone, Default)]
+pub struct CrackInfo {
+    pub gear: String,
+    pub part: String,
+    pub relic: String,
+    pub refinement: String,
+    pub chance: f64,
+    /// Relic copies in the crack batch (`×4`).
+    pub batch: u32,
+    /// Total void-trace cost for the batch (`400 tr`).
+    pub traces: u32,
+    /// Other wanted parts the same relic drops (`+2 also`).
+    pub covers: usize,
+    pub fissure_node: String,
+    pub fissure_mission: String,
+    pub steel_path: bool,
+    pub vaulted: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1147,6 +1174,7 @@ fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String], fo
             kind: "event alert".to_owned(),
             expiry: Some(expiry),
             gear: None,
+            crack: None,
         });
     }
     // Prime Resurgence rotation ends: time-boxed value for covered goals.
@@ -1173,6 +1201,7 @@ fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String], fo
                 kind: "prime resurgence".to_owned(),
                 expiry: parse_time(&vt.expiry),
                 gear: None,
+                crack: None,
             });
         }
     }
@@ -1195,6 +1224,7 @@ fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String], fo
                     kind: "vendor".to_owned(),
                     expiry: Some(expiry),
                     gear: None,
+                    crack: None,
                 });
             }
         }
@@ -1305,6 +1335,20 @@ fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String], fo
             },
             expiry: expiry_dt,
             gear: Some(gear.clone()),
+            crack: Some(CrackInfo {
+                gear: gear.clone(),
+                part: part.clone(),
+                relic: cand.relic.clone(),
+                refinement: cand.refinement.name().to_owned(),
+                chance: cand.chance,
+                batch: cand.batch,
+                traces: cand.trace_cost,
+                covers: cand.coverage,
+                fissure_node: pick.fissure.node.clone(),
+                fissure_mission: pick.fissure.mission_type.clone(),
+                steel_path: pick.fissure.is_hard,
+                vaulted: cand.vaulted,
+            }),
         });
         if chunks
             .iter()
@@ -1337,6 +1381,7 @@ fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String], fo
                 kind: "relic farm".to_owned(),
                 expiry: None,
                 gear: None,
+                crack: None,
             });
         }
     }
@@ -1370,6 +1415,7 @@ fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String], fo
                 kind: "sortie (daily)".to_owned(),
                 expiry: parse_time(&sortie.expiry),
                 gear: None,
+                crack: None,
             });
         }
     }
@@ -1392,6 +1438,7 @@ fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String], fo
             kind: "filler".to_owned(),
             expiry: parse_time(&fill.expiry),
             gear: None,
+            crack: None,
         });
     }
 
@@ -2067,6 +2114,7 @@ mod tests {
         Alert {
             id: id.to_owned(),
             tag: tag.to_owned(),
+            activation: String::new(),
             expiry: expiry.to_owned(),
             mission: AlertMission {
                 description: desc.to_owned(),
@@ -2193,6 +2241,7 @@ mod tests {
                 ..Default::default()
             },
             day: "2026-10-16".to_owned(),
+            observed_at: "2026-10-16T02:56:00Z".to_owned(),
         };
         let completions = vec![completion];
         let p = plan(&PlanInput {

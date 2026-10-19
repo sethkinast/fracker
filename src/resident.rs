@@ -18,6 +18,10 @@
 //! report automatically, as does a `Logged in` session start inside one
 //! file and every mission-end event during a session. The manual verb is
 //! just another trigger.
+//!
+//! Auto-open discipline (twelfth pass §2): only a settled `Logged in`
+//! session start may open the plan, and only once per game session. File
+//! churn and regenerations never open; startup replay never opens.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,6 +30,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, watch};
+
+/// Warframe recreates EE.log in bursts before login settles. A `Logged
+/// in` line is only promoted to a session start once the log has been
+/// quiet for this long (twelfth pass §2), so one start yields one open.
+const SESSION_SETTLE: Duration = Duration::from_millis(1500);
+
+/// A vanished EE.log means the game closed. Only after it stays gone for
+/// this long does the next login count as a NEW session, so startup churn
+/// (delete/recreate) cannot re-arm the auto-open.
+const SESSION_END_QUIET: Duration = Duration::from_secs(60);
 
 use crate::capture::{self, CaptureData, CaptureLog, CaptureSession, CaptureStage};
 use crate::ocr::StockState as OcrStock;
@@ -38,9 +52,13 @@ use crate::{elog, portal, screencast, server, ticks};
 /// What asked for a report run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trigger {
-    /// A new EE.log appeared / rotated, or a fresh session started
-    /// (addendum #37).
+    /// A fresh game session started: a `Logged in` line after the app
+    /// was already watching (twelfth pass §2). This — and only this —
+    /// may auto-open the plan.
     SessionStart,
+    /// A new EE.log appeared / rotated (addendum #37): regenerate, but
+    /// never auto-open (twelfth pass §2).
+    FileChanged,
     /// A mission-end event during the session.
     MissionEnd,
     /// The tray's manual Regenerate verb.
@@ -197,14 +215,20 @@ pub async fn run(
                 }
             }
             Some(trigger) = trigger_rx.recv() => {
-                // Coalesce a burst (e.g. session start + mission end in
-                // one read) into a single report run.
-                while trigger_rx.try_recv().is_ok() {}
-                do_report(&opts, &status, &tray, trigger, &completions).await;
-                // Ninth pass §2/item 40b: a new EE.log at game start is
-                // regenerated AND opened (behind the fullscreen game is
-                // fine). pop_on_session_start is the §9 switch.
-                if trigger == Trigger::SessionStart && opts.pop_on_session_start {
+                // Coalesce a burst (session start + file churn + mission
+                // end can all arrive together) into a single report run,
+                // and open only when the burst contained the settled
+                // session start — never because of file churn (§2).
+                let mut burst = vec![trigger];
+                while let Ok(t) = trigger_rx.try_recv() {
+                    burst.push(t);
+                }
+                let session_started = burst.contains(&Trigger::SessionStart);
+                do_report(&opts, &status, &tray, burst[0], &completions).await;
+                // Ninth pass §2/item 40b + twelfth pass §2: the settled
+                // login is the only auto-open trigger, at most once per
+                // session. pop_on_session_start is the §9 switch.
+                if session_started && opts.pop_on_session_start {
                     open_page(&opts, &status, &tray, &completions, &plan_server).await;
                 }
             }
@@ -672,6 +696,12 @@ fn today_utc() -> String {
     chrono::Utc::now().format("%Y-%m-%d").to_string()
 }
 
+/// The UTC wall-clock instant (`RFC 3339`) stamped onto every §4
+/// completion so the activation guard can judge its instance (§4).
+fn now_utc() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
 /// The watch loop: reconcile, tail, classify, trigger, persist.
 fn watch_loop(
     log_path: PathBuf,
@@ -695,6 +725,20 @@ fn watch_loop(
     let mut last_tick = Instant::now();
     let mut last_inode = watcher.position().inode;
 
+    // Twelfth pass §2: when the log already exists at app start, the first
+    // poll reconciles content that predates us. That content is history —
+    // never a game session start — so it must not auto-open the plan. A
+    // log that appears *after* we are watching is a live session, even if
+    // it lands during the first poll window.
+    let mut startup_replay = log_path.exists() || st.log_position.inode != 0;
+    // A login is promoted to SessionStart only after the startup burst has
+    // settled, and each game session may do so exactly once.
+    let mut pending_login: Option<Instant> = None;
+    let mut session_started = false;
+    // When the log has been continuously absent this long, the game
+    // session is over and the next settled login may open again.
+    let mut absent_since: Option<Instant> = None;
+
     // Ninth pass §4: the mission ledger. `missions` pairs each armed
     // `MissionInfo` block with its end-of-match success marker; proven
     // completions are stamped with the UTC day, persisted in app state,
@@ -712,6 +756,20 @@ fn watch_loop(
         }
         let lines = watcher.next_lines(interval_ms)?;
         let pos = watcher.position();
+
+        // §2: a log that stays gone for a while means the game session
+        // ended, arming the next settled login. Brief startup churn
+        // (delete → recreate) is far shorter than SESSION_END_QUIET and
+        // cannot re-arm the auto-open.
+        if pos.inode == 0 {
+            let since = *absent_since.get_or_insert_with(Instant::now);
+            if since.elapsed() >= SESSION_END_QUIET {
+                session_started = false;
+                pending_login = None;
+            }
+        } else {
+            absent_since = None;
+        }
 
         // A UTC day rollover retires yesterday's completions: the ledger
         // is today-scoped (ninth pass §4).
@@ -738,21 +796,20 @@ fn watch_loop(
         last_tick = Instant::now();
         last_inode = pos.inode;
 
-        let mut session_started = new_file;
+        let mut saw_login = false;
         for raw in &lines {
             let line = elog::parse_line(raw);
             let ev = elog::classify(&line);
-            if tracker.feed(ev.as_ref(), gap) {
-                session_started = true;
-            }
+            let _ = tracker.feed(ev.as_ref(), gap);
             if let Some(elog::Event::LoggedIn { name }) = &ev {
                 st.display_name = name.clone();
+                saw_login = true;
             }
             if ev.as_ref().map_or(false, |e| e.is_mission_end()) {
                 let _ = trigger_tx.send(Trigger::MissionEnd);
             }
             // §4: prove a mission from its armed identity + success marker.
-            if let Some(done) = missions.feed(raw, &today) {
+            if let Some(done) = missions.feed(raw, &today, &now_utc()) {
                 st.mission_completions.push(done.clone());
                 if let Ok(mut g) = completions.lock() {
                     g.push(done);
@@ -762,11 +819,28 @@ fn watch_loop(
                 let _ = trigger_tx.send(Trigger::MissionEnd);
             }
         }
-        // One session start per read, whether from the file edge or a
-        // `Logged in` line (they often arrive together).
-        if session_started {
-            let _ = trigger_tx.send(Trigger::SessionStart);
+        // A file appearing or rotating regenerates, but never opens
+        // (twelfth pass §2) — including the startup reconciliation read.
+        // Churn coalesces into one report in `run`.
+        if new_file {
+            let _ = trigger_tx.send(Trigger::FileChanged);
         }
+        if !startup_replay {
+            // Promote a login only once the burst has settled. Repeated
+            // logins and recreated files inside the window coalesce into
+            // one session start; a started session never emits again.
+            if saw_login && !session_started {
+                pending_login.get_or_insert_with(Instant::now);
+            }
+            if let Some(at) = pending_login {
+                if at.elapsed() >= SESSION_SETTLE {
+                    pending_login = None;
+                    session_started = true;
+                    let _ = trigger_tx.send(Trigger::SessionStart);
+                }
+            }
+        }
+        startup_replay = false;
 
         let dirty = !lines.is_empty() || pos != st.log_position || rolled;
         st.log_position = pos;
@@ -793,13 +867,29 @@ mod tests {
     }
 
     fn recv_trigger(rx: &mut mpsc::UnboundedReceiver<Trigger>) -> Option<Trigger> {
-        for _ in 0..200 {
+        for _ in 0..500 {
             if let Ok(t) = rx.try_recv() {
                 return Some(t);
             }
             std::thread::sleep(Duration::from_millis(10));
         }
         None
+    }
+
+    /// Drain everything queued for `window`.
+    fn collect_triggers(
+        rx: &mut mpsc::UnboundedReceiver<Trigger>,
+        window: Duration,
+    ) -> Vec<Trigger> {
+        let deadline = Instant::now() + window;
+        let mut out = Vec::new();
+        while Instant::now() < deadline {
+            while let Ok(t) = rx.try_recv() {
+                out.push(t);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        out
     }
 
     #[test]
@@ -812,9 +902,11 @@ mod tests {
     }
 
     #[test]
-    fn new_log_file_appearance_triggers_a_session_start() {
+    fn new_log_file_appearance_triggers_a_settled_session_start() {
         // The watch thread must fire without a manual trigger when the
         // EE.log appears — this is the §4/#37 guarantee at unit scale.
+        // §2: the file edge regenerates immediately; the login settles
+        // into exactly one SessionStart (the only auto-open trigger).
         let dir = tmpdir("appear");
         let log = dir.join("EE.log");
         let state = dir.join("state");
@@ -840,6 +932,7 @@ mod tests {
         writeln!(f, "14.148 Sys [Info]: Logged in Jenterrobahne").unwrap();
         f.flush().unwrap();
 
+        assert_eq!(recv_trigger(&mut rx), Some(Trigger::FileChanged));
         assert_eq!(recv_trigger(&mut rx), Some(Trigger::SessionStart));
 
         shutdown.trigger();
@@ -852,9 +945,8 @@ mod tests {
         let dir = tmpdir("mission");
         let log = dir.join("EE.log");
         let state = dir.join("state");
-        // Pre-existing file, persisted position 0 == fresh: the first
-        // poll opens it, which fires a session start; we only care that
-        // a mission-end line also triggers.
+        // Pre-existing file at app start is startup replay (§2): the
+        // login is history and must NOT emit a session start / open.
         std::fs::write(
             &log,
             "14.148 Sys [Info]: Logged in Jenterrobahne\n",
@@ -864,9 +956,11 @@ mod tests {
         let shutdown = Shutdown::new();
         let status = Arc::new(Mutex::new(TrayStatus::default()));
         let handle = spawn_watch(log.clone(), 20, state.clone(), status, tx, shutdown.receiver(), Arc::new(Mutex::new(Vec::new())));
-        assert_eq!(recv_trigger(&mut rx), Some(Trigger::SessionStart));
-        // Drain any stragglers.
-        while rx.try_recv().is_ok() {}
+        let startup = collect_triggers(&mut rx, Duration::from_millis(250));
+        assert!(
+            !startup.contains(&Trigger::SessionStart),
+            "startup replay never opens the plan: {startup:?}"
+        );
 
         use std::io::Write;
         let mut f = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
@@ -874,6 +968,81 @@ mod tests {
         f.flush().unwrap();
 
         assert_eq!(recv_trigger(&mut rx), Some(Trigger::MissionEnd));
+
+        shutdown.trigger();
+        handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §2 gate: the v0.4.0 startup sequence is a churn of new-file events
+    /// after the app is already running. It must produce exactly one
+    /// auto-open (one SessionStart), at the settled login — never at app
+    /// start, never per file event, never again for the same session.
+    #[test]
+    fn startup_burst_opens_exactly_once_at_the_settled_login() {
+        let dir = tmpdir("burst");
+        let log = dir.join("EE.log");
+        let state = dir.join("state");
+
+        // App starts with Seth's recorded 2026-10-18 startup-only session
+        // already on disk. Replaying it is history, not a session start.
+        let fixture = include_str!("../fixtures/ocr-samples/ee-log-2026-10-18.log");
+        std::fs::write(&log, fixture).unwrap();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let shutdown = Shutdown::new();
+        let status = Arc::new(Mutex::new(TrayStatus::default()));
+        let handle = spawn_watch(
+            log.clone(),
+            20,
+            state.clone(),
+            status,
+            tx,
+            shutdown.receiver(),
+            Arc::new(Mutex::new(Vec::new())),
+        );
+
+        // App start with no new log: a regeneration may run, never an open.
+        let startup = collect_triggers(&mut rx, Duration::from_millis(400));
+        assert!(
+            !startup.contains(&Trigger::SessionStart),
+            "app startup must not open the plan: {startup:?}"
+        );
+
+        // Warframe startup churn: the log is recreated several times with
+        // the login line in the burst. Every edge may regenerate, but the
+        // whole burst must coalesce into one session start.
+        use std::io::Write;
+        for i in 0..5 {
+            let _ = std::fs::remove_file(&log);
+            let mut f = std::fs::File::create(&log).unwrap();
+            writeln!(f, "0.00{i} Sys [Info]: Logged in Jenterrobahne").unwrap();
+            writeln!(f, "1.00{i} Sys [Info]: startup churn {i}").unwrap();
+            f.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(30));
+        }
+
+        let burst = collect_triggers(&mut rx, Duration::from_millis(2500));
+        assert_eq!(
+            burst.iter().filter(|t| **t == Trigger::SessionStart).count(),
+            1,
+            "exactly one auto-open per session, at login only: {burst:?}"
+        );
+        assert!(
+            burst.contains(&Trigger::FileChanged),
+            "file churn still regenerates: {burst:?}"
+        );
+
+        // A later login line inside the same (still present) session must
+        // not re-open.
+        let mut f = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+        writeln!(f, "2.000 Sys [Info]: Logged in Jenterrobahne").unwrap();
+        f.flush().unwrap();
+        let later = collect_triggers(&mut rx, Duration::from_millis(2000));
+        assert!(
+            !later.contains(&Trigger::SessionStart),
+            "the same session never opens twice: {later:?}"
+        );
 
         shutdown.trigger();
         handle.join().unwrap();
