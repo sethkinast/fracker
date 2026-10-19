@@ -1659,7 +1659,7 @@ mod tests {
     fn least_important_weeklies_render_last() {
         let t = crate::tuning::Tuning::for_tests();
         let board = weekly_board(&t);
-        assert_eq!(board.len(), 16);
+        assert_eq!(board.len(), 14);
         let tail = &board[board.len() - 2..];
         assert!(tail.iter().all(|w| w.deprioritized));
         assert!(board[..board.len() - 2].iter().all(|w| !w.deprioritized));

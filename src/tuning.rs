@@ -492,7 +492,7 @@ mod tests {
     #[test]
     fn tuning_loads_all_four_files() {
         let t = Tuning::for_tests();
-        assert_eq!(t.weeklies.len(), 16);
+        assert_eq!(t.weeklies.len(), 14);
         // Least-important items render last (flagged in data, not code).
         let tail: Vec<&str> = t.weeklies.iter().rev().take(2).map(|w| w.id.as_str()).collect();
         assert!(tail.contains(&"clem") && tail.contains(&"maroo"));

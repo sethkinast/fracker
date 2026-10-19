@@ -3,8 +3,9 @@
 Compiled 2026-10-15 for the session planner (extends BRIEF.md §10 tier 4).
 Anchor reset: **Monday 00:00 UTC** unless an item says otherwise.
 Verified against the community wiki (Reset / activity / vendor pages),
-the live world-state API (`api.warframestat.us/pc/`, sampled
-2026-10-15), and the Update 41 / Update 44 patch notes.
+DE's own world-state feed (`api.warframe.com/cdn/worldState.php`; the
+2026-10-15 research sample used the warframestat mirror, since removed
+from the app), and the Update 41 / Update 44 patch notes.
 
 **Observability legend** (can the planner *know*, not just list?):
 - **(a)** — visible in the public world-state API (this week's content,
@@ -17,11 +18,18 @@ the live world-state API (`api.warframestat.us/pc/`, sampled
 
 ## Tracked subset — pass-4 slimming (2026-10-16)
 
-`data/weeklies.toml` IS the tracked list (15 entries): Archon Hunt,
+`data/weeklies.toml` IS the tracked list (14 entries): Archon Hunt,
 Netracells, Deep + Temporal Archimedea, both Circuit tracks,
 Descendia, Kahl, 1999 Calendar, Palladino, Acrithis, Bird 3,
-Chipper, Clem + Maroo (last, least important). Everything below in
+Clem + Maroo (last, least important). Everything below in
 this file remains the research record; only the TOML renders.
+
+**2026-10-19 audit (brief #14 §5):** every tracked entry was
+re-checked against wiki.warframe.com's [Reset](https://wiki.warframe.com/w/Reset)
+page and each vendor's page. Corrections: Acrithis reset day,
+Palladino's ware list, and the over-broad Yonta removal note (her
+Forma was fabricated, but she has a real — untracked — weekly Kuva).
+One removal: Chipper (no shard). See the per-entry markers below.
 
 Cut, per addendum #27: Nightwave (own section now — no duplication),
 Conclave, Clan, Teshin (rotating item + evergreen caps), Helminth,
@@ -49,11 +57,11 @@ in world state — gone when he leaves.
 | 14 | Conclave weekly challenges | 3 challenges + all-clear bonus/wk — **Fri reset** | varies | (a) challenge list; completion (c) |
 | 15 | Teshin — Steel Path Honors rotation | 1 featured item/wk | 2m (purchase) | (a) current item + costs; purchase (c) |
 | 16 | Teshin — evergreen caps | Veiled Riven Cipher 1/wk; 10k Kuva & Relic Pack ≤25/wk each | 2m | (a) stock list; purchases (c) |
-| 17 | Palladino (Iron Wake) | each ware 1/wk (35 slivers buys all) | 2m | (c) |
-| 18 | Acrithis weekly wares | 5 rotating wares, 1 each/wk — **Sun reset** | 2m | (c) |
-| 19 | ~~Archimedean Yonta — Forma~~ REMOVED 2026-10-19: fabricated, see §19 | — | — | — |
-| 20 | Bird 3 — Shiny Treasures shard | 1 Archon Shard/wk | 2m | (c) |
-| 21 | Chipper — weekly Archon Shard | 1/wk (Garrison Rank 5) | 2m | (c) |
+| 17 | Palladino (Iron Wake) | wares 1 ea/wk (Relics ×10, Transmuters ×3) — **Mon reset** | 2m | (c) |
+| 18 | Acrithis weekly wares | 5 rotating wares, 1 each/wk — **Mon reset** | 2m | (c) |
+| 19 | ~~Archimedean Yonta — Forma~~ REMOVED 2026-10-19: fabricated (no weekly Forma); her only real weekly (35k Kuva) is untracked, see §19 | — | — | — |
+| 20 | Bird 3 — Shiny Treasures shard | 1 Archon Shard/wk (30k standing) | 2m | (c) |
+| 21 | ~~Chipper — weekly Archon Shard~~ REMOVED 2026-10-19: no shard in Chipper's wares, see §21 | — | — | — |
 | 22 | Helminth Invigoration | 3 frames get options/wk | 2m (orbiter) | (c) |
 | 23 | Nightwave Cred Offerings rotation | shop subset rotates/wk | 2m | (c) |
 | 24 | Baro Ki'Teer | **biweekly**, Fri 13:00–Sun 13:00 UTC | 5m | (a) schedule, location, inventory |
@@ -193,7 +201,7 @@ in world state — gone when he leaves.
 - **Limit:** 1 per week, Monday 00:00 UTC. **Time:** ~5m.
 - **Prereqs:** Stolen Dreams quest. **Island:** Origin System.
 - **Observable:** appears as an alert in the in-game world-state
-  window; whether warframestat's `alerts` carries it is unconfirmed
+  window; whether DE's `Alerts` feed carries it is unconfirmed
   — plan on (c) for completion either way.
 
 ### 10. Help Clem (Darvo's weekly)
@@ -279,49 +287,62 @@ in world state — gone when he leaves.
 - **Prereqs:** Steel Path unlocked. **Time:** ~2m at a Relay.
 
 ### 17. Palladino — Iron Wake (Earth)
-- **Weekly wares, each 1/week:** 2× Veiled Riven Mod (10 Riven
-  Slivers each), 35,000 Kuva (10 slivers), 150,000 Credits
-  (5 slivers). Full buyout = 35 slivers/week.
+- **Weekly wares (Riven Slivers; reset Monday 00:00 UTC):**
+  150,000 Credits (5), 6,000 Endo (10), 35,000 Kuva (10),
+  2× Riven Mod (10 each), Veiled Riven Cipher (10) — each 1/wk;
+  Riven Transmuter (10) capped 3/wk; Requiem I–IV Relics (10 each)
+  capped 10/wk apiece; Requiem Ultimatum (10) 1/wk. Iron Wake Scene
+  (10), Rell's Donda (25) and Rell's Emotiles (5 each) have no
+  weekly limit. (Added in Update 42.0, 2026-03-25.)
 - **Prereqs:** Chains of Harrow (Iron Wake access). **Time:** ~2m.
 - **Observable:** (c).
 - **Stale-check:** pre-Update 32.3 sources say Palladino reset on
   **Thursday** — wrong since Feb 2023; it's Monday 00:00 UTC now.
 
 ### 18. Acrithis — Duviri / Dormizone
-- **Weekly rotation:** 5 wares drawn from a pool — Forma BP,
-  5,000 Kuva, Veiled Rivens (Rifle/Melee/Companion Weapon), Orokin
-  Reactor/Catalyst, Exilus & Arcane adapters — priced 10–25
-  **Pathos Clamps** each, 1 purchase each.
-- **Reset is the odd one: Sunday 00:00 UTC** (confirmed on the wiki
-  vendor page and by a 37.0.9 hotfix note) — a day *before* the
-  main weekly reset.
+- **Weekly rotation:** 5 wares drawn from a pool — Orokin
+  Reactor/Catalyst BP, Exilus Warframe/Weapon Adapter, Primary/
+  Secondary Arcane Adapter, Forma BP, one Veiled Riven (Melee/Pistol/
+  Rifle/Kitgun/Zaw/Shotgun/Companion Weapon), 10,000 Kuva — priced
+  10–25 **Pathos Clamps** each, 1 purchase each.
+- **Reset: Monday 00:00 UTC** — the wiki vendor page now lists Monday
+  0:00 UTC, same as the main weekly reset. (An earlier record and a
+  2024 37.0.9 note had it a day early on Sunday; that is retired.)
 - Her separate **daily** offerings and the once-daily arcane are
   daily systems (appendix). **Prereqs:** The Duviri Paradox.
 - **Observable:** (c) — weekly stock is not in the world-state API.
 
 ### 19. Archimedean Yonta — Chrysalith, Zariman
-- **REMOVED (2026-10-19, Seth's catch, wiki-verified):** this
-  section previously claimed a weekly Forma (3/wk for
-  Voidplume Pinions) — fabricated. Yonta has NO weekly ware:
-  she takes Voidplumes for Holdfasts standing and sells
-  Voidplumes (8-hour rotating stock) and Zariman weapon
-  parts. Not a weekly; not on the board.
+- **CORRECTED / untracked (2026-10-19, brief #14 §5, wiki-verified):**
+  this section previously claimed a weekly **Forma** (3/wk for
+  Voidplume Pinions) — fabricated, no such ware exists at any rank.
+  She does have one genuine weekly item: **35,000 Kuva for 5
+  Voidplume Pinions, reset Monday 00:00 UTC** (her page's "Once per
+  week" block and the Reset vendor list). She otherwise takes
+  Voidplumes for Holdfasts standing, sells Voidplumes (8-hour
+  rotating stock), and trades Lua Thrax Plasm for Zariman parts.
+  The one real weekly is a minor Kuva sink, so it is left off the
+  board with the other slimmed-out rows (Teshin caps, NW creds).
 
 ### 20. Bird 3 — Sanctum Anatomica ("Shiny Treasures")
 - **Weekly ware:** 1 **Archon Shard** for 30,000 Cavia standing;
-  color rotates weekly (Crimson/Amber/Azure), never Tauforged.
+  the color cycles weekly in wiki list order (Azure → Amber →
+  Crimson). Requires Cavia Rank 5 — Illuminate.
 - **Prereqs:** Whispers in the Walls + Cavia Rank 5. **Time:** ~2m.
 - **Observable:** (c).
-- **Stale-check:** this replaced Chipper's weekly shard in Dante
-  Unbound (2024) — older checklists pointing at Chipper for "the
-  weekly shard" are half-right (see #21: Chipper still sells one,
-  but for Stock, at max Garrison rank).
+- **Stale-check:** this is the *only* weekly Archon Shard vendor
+  purchase. It replaced the notion of a Chipper weekly shard, which
+  was never real — Chipper's wares carry no shard at all (see #21).
+  The page's own purge note names a Sunday boundary while the Reset
+  page groups the shard under Monday; treat the day as ~Sun/Mon.
 
 ### 21. Chipper — Drifter's Camp
-- **Weekly ware:** 1 **Archon Shard** for 90 Stock, at Kahl's
-  Garrison Rank 5 (Home). The rest of Chipper's stock is one-time
-  purchases, not weekly.
-- **Observable:** (c).
+- **REMOVED (2026-10-19, brief #14 §5, wiki-verified):** the record
+  claimed a weekly Archon Shard for 90 Stock at Garrison Rank 5.
+  Chipper's wares list (Styanax/Afentis/Aegrit/Slaytra parts, Archon
+  mods, ephemeras, Skaut, Captura) contains **no Archon Shard** at
+  any rank — the weekly shard is Bird 3's (#20). Chipper is not a
+  weekly; not on the board.
 
 ### 22. Helminth Invigoration (Orbiter)
 - **What:** Each week, 3 random Warframes in your arsenal receive
@@ -394,32 +415,41 @@ u/Joewoof infographic family it links. Accurate for its era, but a
 - **Missing entirely:** Temporal Archimedea (2025), Descendia
   (Dec 2025), the 1999 Calendar (Dec 2024), Clan Weekly Initiative
   (2026), Deep Archimedea + Search Pulses (2024).
+- **Newer still (Reset page, Oct 2026):** "Oops! All Eximus!"
+  (Fables & Frontiers) and The Icebind's three Cryobells are weekly
+  content this file never carried — out of the pass-4 tracked
+  subset, noted for completeness.
 - **Moved:** Palladino's reset Thursday → Monday (Update 32.3).
-- **Moved:** the Cavia weekly shard — Bird 3 sells it now (Dante
-  Unbound); Chipper's is a separate Stock purchase at Rank 5.
+- **Wrong:** the Cavia weekly shard is Bird 3's (30k Cavia standing)
+  alone; infographics that also list a *Chipper* shard are inventing
+  it — Chipper's wares carry no shard.
 - **Changed:** Archimedea personal modifiers restructured into
   buckets (Update 44, Sep 2026); Search Pulse pool is shared three
   ways (Netracells + both Archimedeas), not "5 Netracells".
-- **Reset exceptions it flattens:** Acrithis weekly = Sunday,
-  Conclave weekly = Friday, Sortie = daily at 17:00 UTC.
+- **Reset exceptions it flattens:** Conclave weekly = Friday,
+  Sortie = daily at 17:00 UTC.
 
 ## Sources
 
-- Wiki — Reset: https://warframe.fandom.com/wiki/Reset
-- Wiki — Deep Archimedea: https://warframe.fandom.com/wiki/Deep_Archimedea
-- Wiki — Netracells: https://warframe.fandom.com/wiki/Netracells
-- Wiki — The Circuit: https://warframe.fandom.com/wiki/The_Circuit
-- Wiki — Acrithis: https://warframe.fandom.com/wiki/Acrithis
-- Wiki — Palladino: https://warframe.fandom.com/wiki/Palladino
-- Wiki — Break Narmer: https://warframe.fandom.com/wiki/Break_Narmer
-- Wiki — Vendors data module: https://warframe.fandom.com/wiki/Module:Vendors/data
+- Wiki — Reset: https://wiki.warframe.com/w/Reset
+- Wiki — Deep Archimedea: https://wiki.warframe.com/w/Deep_Archimedea
+- Wiki — Netracells: https://wiki.warframe.com/w/Netracells
+- Wiki — The Circuit: https://wiki.warframe.com/w/The_Circuit
+- Wiki — Acrithis: https://wiki.warframe.com/w/Acrithis
+- Wiki — Palladino: https://wiki.warframe.com/w/Palladino
+- Wiki — Chipper: https://wiki.warframe.com/w/Chipper
+- Wiki — Bird 3: https://wiki.warframe.com/w/Bird_3
+- Wiki — Archimedean Yonta: https://wiki.warframe.com/w/Archimedean_Yonta
+- Wiki — Break Narmer: https://wiki.warframe.com/w/Break_Narmer
+- Wiki — Vendors data module: https://wiki.warframe.com/w/Module:Vendors/data
 - Dexerto weekly reset guide: https://www.Dexerto.com/gaming/warframe-weekly-reset-guide-2920630/
 - Sportskeeda weekly resets checklist: https://www.SportsKeeda.com/mmo/warframe-weekly-resets-checklist-everything-new-week
 - Sportskeeda — The Old Peace (Update 41) patch notes: https://www.sportskeeda.com/mmo/warframe-the-old-peace-update-41-patch-notes
 - Sportskeeda — Temporal Archimedea guide: http://sportskeeda.com/mmo/warframe-temporal-archimedea-guide-requirements-mechanics-rewards
 - Forums — Update 44 (Archimedea modifier buckets): https://forums.warframe.com/topic/1523958-nsw-update-44-iceblade-of-narin/
-- WarframeStatus API docs: https://docs.warframestat.us/
-- Live world-state sample: `api.warframestat.us/pc/` fetched 2026-10-15
+- DE world-state feed: https://api.warframe.com/cdn/worldState.php
+- Historical research sample (warframestat mirror, since removed from
+  the app): `api.warframestat.us/pc/` fetched 2026-10-15
   (archonHunt, archimedeas, steelPath, calendar, descendia,
   clanWeeklyInitiative, conclaveChallenges, voidTrader sections).
 - Reddit — The Ultimate Warframe Daily Tasks Checklist (2023,
