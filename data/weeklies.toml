@@ -70,7 +70,7 @@ obs = "manual"
 [[weekly]]
 id = "cal1999"
 name = "1999 Calendar"
-limit = "1 page/wk"
+limit = "1 season/wk"
 time = "passive"
 obs = "manual"
 

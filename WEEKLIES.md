@@ -44,7 +44,7 @@ in world state — gone when he leaves.
 | 9 | Ayatan Treasure Hunt (Maroo) | 1 sculpture/wk | ~5m | (a) alert slot (unconfirmed in API); completion (c) |
 | 10 | Help Clem (Darvo) | 1/wk | ~10m | (c) |
 | 11 | Nightwave weekly + elite acts | 5 weekly + 2 elite/wk | mostly passive | (a) act list; completion (c) |
-| 12 | 1999 Calendar weekly page | 1 page/wk | passive during 1999 play | (a) page contents; completion (c) |
+| 12 | 1999 Calendar | 1 season/wk | passive during 1999 play | (a) season contents; completion (c) |
 | 13 | Clan Weekly Initiative | 4 reward tiers/wk (clan-wide) | passive | (a) region+thresholds; personal claim (c) |
 | 14 | Conclave weekly challenges | 3 challenges + all-clear bonus/wk — **Fri reset** | varies | (a) challenge list; completion (c) |
 | 15 | Teshin — Steel Path Honors rotation | 1 featured item/wk | 2m (purchase) | (a) current item + costs; purchase (c) |

@@ -354,3 +354,19 @@ it refines the brief where they disagree. For the next worker pass.
     the remaining WEEKLIES entries against the wiki — one
     confident fabrication indicts the research pass, not
     just the entry.
+51. **Worldstate freshness is judged by the DATA, not the
+    fetch (Seth, 2026-10-19).** His regen kept showing a
+    stale alert generation while the game had new ones.
+    Verified from Graf's side: warframestat.us's payload
+    timestamp was frozen at 03:29:40Z (75 min old, listing
+    an alert 74 min past expiry) while DE's own feed
+    (api.warframe.com/cdn/worldState.php) was live with the
+    current alerts. The app calls any HTTP-200 worldstate
+    "live" regardless of payload age — that is the defect.
+    Fix, queued: (a) payload-age validation — stale payload
+    marks the plan's worldstate STALE in the stamp, never
+    silently fresh; (b) add DE's cdn worldState.php as a
+    second source and prefer the fresher payload (at least
+    for alerts, where staleness bites). Also corrected same
+    day: 1999 Calendar is 1 season/wk, not 1 page/wk
+    (data + WEEKLIES.md).
