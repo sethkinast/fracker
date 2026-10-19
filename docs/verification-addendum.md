@@ -397,3 +397,12 @@ it refines the brief where they disagree. For the next worker pass.
     Export may not cover (MT_* names, Nightwave challenge
     titles) to come from browse.wf's vended dicts — Seth
     offered to supply those URLs.
+    Decode coverage (Seth, 2026-10-19): ExportRegions
+    carries the MT_* mission-type enum; ExportSortie-
+    Rewards contains the Nightwave decode inside it.
+    Public Export therefore covers every decode the DE
+    migration needs — no community dictionaries required.
+    Bake-time note (Graf): the export payloads 403 to
+    scripted fetches from every egress tried (index .lzma
+    serves fine); pull them via browse.wf's cached copies
+    or a real browser session when baking.
