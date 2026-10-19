@@ -17,9 +17,9 @@ the live world-state API (`api.warframestat.us/pc/`, sampled
 
 ## Tracked subset — pass-4 slimming (2026-10-16)
 
-`data/weeklies.toml` IS the tracked list (16 entries): Archon Hunt,
+`data/weeklies.toml` IS the tracked list (15 entries): Archon Hunt,
 Netracells, Deep + Temporal Archimedea, both Circuit tracks,
-Descendia, Kahl, 1999 Calendar, Palladino, Acrithis, Yonta, Bird 3,
+Descendia, Kahl, 1999 Calendar, Palladino, Acrithis, Bird 3,
 Chipper, Clem + Maroo (last, least important). Everything below in
 this file remains the research record; only the TOML renders.
 
@@ -51,7 +51,7 @@ in world state — gone when he leaves.
 | 16 | Teshin — evergreen caps | Veiled Riven Cipher 1/wk; 10k Kuva & Relic Pack ≤25/wk each | 2m | (a) stock list; purchases (c) |
 | 17 | Palladino (Iron Wake) | each ware 1/wk (35 slivers buys all) | 2m | (c) |
 | 18 | Acrithis weekly wares | 5 rotating wares, 1 each/wk — **Sun reset** | 2m | (c) |
-| 19 | Archimedean Yonta — Forma | 3 Forma/wk | 2m | (c) |
+| 19 | ~~Archimedean Yonta — Forma~~ REMOVED 2026-10-19: fabricated, see §19 | — | — | — |
 | 20 | Bird 3 — Shiny Treasures shard | 1 Archon Shard/wk | 2m | (c) |
 | 21 | Chipper — weekly Archon Shard | 1/wk (Garrison Rank 5) | 2m | (c) |
 | 22 | Helminth Invigoration | 3 frames get options/wk | 2m (orbiter) | (c) |
@@ -300,9 +300,12 @@ in world state — gone when he leaves.
 - **Observable:** (c) — weekly stock is not in the world-state API.
 
 ### 19. Archimedean Yonta — Chrysalith, Zariman
-- **Weekly ware:** Forma, up to **3 per week**, 5 Voidplume Pinions
-  each. **Time:** ~2m. **Prereqs:** Angels of the Zariman.
-- **Observable:** (c).
+- **REMOVED (2026-10-19, Seth's catch, wiki-verified):** this
+  section previously claimed a weekly Forma (3/wk for
+  Voidplume Pinions) — fabricated. Yonta has NO weekly ware:
+  she takes Voidplumes for Holdfasts standing and sells
+  Voidplumes (8-hour rotating stock) and Zariman weapon
+  parts. Not a weekly; not on the board.
 
 ### 20. Bird 3 — Sanctum Anatomica ("Shiny Treasures")
 - **Weekly ware:** 1 **Archon Shard** for 30,000 Cavia standing;

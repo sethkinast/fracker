@@ -343,3 +343,14 @@ it refines the brief where they disagree. For the next worker pass.
     the error — capturing starts at the first real frame,
     and an error supersedes. Queued with #48; build when
     Seth releases the round.
+50. **Sortie placement + weeklies data truth (Seth,
+    2026-10-19).** (a) The Sortie row belongs with the
+    cadence checklist in Routine, not in the Today standing
+    block — queued for the next round. (b) "Yonta Forma
+    3/wk" was fabricated data (WEEKLIES.md SS19 invented it;
+    wiki-verified 2026-10-19: Yonta has no Forma and no
+    weekly ware). Removed from data/weeklies.toml +
+    WEEKLIES.md by Graf same day. Follow-up queued: audit
+    the remaining WEEKLIES entries against the wiki — one
+    confident fabrication indicts the research pass, not
+    just the entry.

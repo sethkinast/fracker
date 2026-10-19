@@ -89,13 +89,6 @@ time = "2m"
 obs = "manual"
 
 [[weekly]]
-id = "yonta"
-name = "Yonta Forma"
-limit = "3/wk"
-time = "2m"
-obs = "manual"
-
-[[weekly]]
 id = "bird3"
 name = "Bird 3 shard"
 limit = "1/wk"
