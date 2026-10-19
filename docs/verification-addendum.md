@@ -287,3 +287,23 @@ it refines the brief where they disagree. For the next worker pass.
     one-line stamp. Density down everywhere: 5px bars, tighter
     spacing, less boilerplate per card. His file is the spec;
     the renderer conforms to it (pass 10).
+43. **Auto-open discipline (Seth, 2026-10-18, v0.4.0 test).**
+    The plan opens ONLY at game-session start (new EE.log
+    with login) — never at app start — and exactly ONCE per
+    session. Warframe startup churns the log file (create /
+    recreate bursts); opens must be debounced/coalesced to
+    the settled session, not fired per file event.
+44. **Standing is daily-reset aware (Seth, 2026-10-18).**
+    Daily pools (DailyAffiliation* + DailyFocus) reset at
+    00:00 UTC. A profile/cache fetched before the most recent
+    reset renders those pools as reset (remaining = cap)
+    until a fresh post-reset fetch lands; a fresh fetch
+    always wins verbatim (item 40c).
+45. **Alert strikes are instance-strict (Seth, 2026-10-18).**
+    Three live Road To Tau alerts rendered struck from
+    YESTERDAY's same-event completions via the tag/reward/
+    type corroboration paths. A completion can only strike
+    the alert instance it belongs to: non-ID matches must
+    also satisfy an activation-time guard (completion
+    observed at/after the alert's activation). Yesterday's
+    runs must never strike today's alerts.
