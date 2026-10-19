@@ -422,13 +422,16 @@ fn capture_worker(
             return send_failed(&tx, "connecting", format!("capture: {e}"));
         }
     };
-    // The stream is connected; from here the lifecycle is Capturing until
-    // the drain ends.
-    let _ = tx.send(CaptureEvent::Stage(CaptureStage::Capturing));
-    log.record("capturing", "draining frames (scroll your inventory)");
+    // Item 49: "capturing" begins at the first real frame, not at connect.
+    // Connecting a targetless stream used to sit idle forever, so labelling
+    // the lifecycle "capturing" at connect lied about a stream that had not
+    // delivered anything yet; hold the stage at "connecting" until the first
+    // frame makes it through, then announce it exactly once.
+    log.record("connecting", "stream connected; awaiting first frame");
     let ctx = data.context();
     let idle = data.classifier.idle_stop_frames;
     let progress_tx = tx.clone();
+    let mut announced = false;
     let result = capture::run_capture(
         &ctx,
         &engine,
@@ -436,6 +439,11 @@ fn capture_worker(
         &stop,
         idle,
         move |s| {
+            if !announced {
+                announced = true;
+                let _ = progress_tx.send(CaptureEvent::Stage(CaptureStage::Capturing));
+                log.record("capturing", "draining frames (scroll your inventory)");
+            }
             let _ = progress_tx.send(CaptureEvent::Progress(s.counts()));
         },
     );
@@ -485,12 +493,18 @@ async fn pump_capture(
         }
     }
 
+    // Item 49: a terminal failure supersedes any in-flight stage labels. A
+    // stage queued before the failure (e.g. the first-frame "capturing")
+    // would otherwise be applied after the error and mask it as progress.
+    let terminal_failure = matches!(finished, Some(CaptureEvent::Failed { .. }));
     let mut changed = false;
-    for stage in stages {
-        if let Ok(mut s) = status.lock() {
-            s.capture.set_stage(stage);
-            log.record("stage", &s.capture.status_line());
-            changed = true;
+    if !terminal_failure {
+        for stage in stages {
+            if let Ok(mut s) = status.lock() {
+                s.capture.set_stage(stage);
+                log.record("stage", &s.capture.status_line());
+                changed = true;
+            }
         }
     }
     if let Some(c) = latest {
