@@ -406,3 +406,15 @@ it refines the brief where they disagree. For the next worker pass.
     scripted fetches from every egress tried (index .lzma
     serves fine); pull them via browse.wf's cached copies
     or a real browser session when baking.
+    CORRECTION (Seth + Graf verification, 2026-10-19):
+    payloads live at http://content.warframe.com/
+    PublicExport/Manifest/<ExportFile>!<hash-from-index>
+    — they fetch cleanly (Regions 49 KB, SortieRewards
+    79 KB, HTTP 200 from Graf's VM). The earlier 403s were
+    Graf's wrong URL (origin host, no /Manifest/), NOT CDN
+    fingerprinting. Verified contents: ExportRegions =
+    269 nodes {uniqueName SolNode*, name, systemName,
+    missionIndex (the MT enum as an index — crosswalk
+    derivable from known nodes), factionIndex, levels};
+    the SortieRewards file bundles ExportNightwave
+    alongside ExportSortieRewards/Railjack/Intrinsics.
