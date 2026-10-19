@@ -59,7 +59,7 @@ name = "Nightwave"
 
 # Pass 4 Do Now §§a–b: separate alert sections (each hides when empty).
 [alert_sections]
-event_header = "Events"
+event_header = "Event alerts"
 lotus_header = "Gift of the Lotus"
 
 [resurgence]
