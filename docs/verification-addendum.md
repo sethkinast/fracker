@@ -324,3 +324,9 @@ it refines the brief where they disagree. For the next worker pass.
     dlsym name in the capture code against the real PipeWire
     public headers, correct the construction sequence, and
     pin the required-symbol list in a test.
+48. **Tray Quit does not quit (Seth, 2026-10-19).** The
+    tray menu's Quit item does not terminate the resident.
+    Diagnose why the activation never reaches the event
+    loop's exit (or exits and is restarted/held by the
+    single-instance machinery). Queued 2026-10-19 at Seth's
+    request — do not build until he releases the round.
