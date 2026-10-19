@@ -314,3 +314,13 @@ it refines the brief where they disagree. For the next worker pass.
     Since the page is served by the app (item 41), persist
     the active tab server-side or via cookie so a refresh
     lands back on the tab he was viewing.
+47. **Capture: libpipewire symbol skew (Seth, 2026-10-18,
+    v0.4.0 test).** The FD fix works live (consent -> FD ->
+    connecting); the consumer then dies at connect:
+    "libpipewire missing symbol pw_thread_loop_get_context"
+    (as rendered). The dlopen FFI resolves symbols by name
+    at runtime, so a wrong/hallucinated symbol name compiles
+    clean and only fails on a real desktop. Fix: audit every
+    dlsym name in the capture code against the real PipeWire
+    public headers, correct the construction sequence, and
+    pin the required-symbol list in a test.
