@@ -209,15 +209,15 @@ pub async fn generate(
         {
             Ok(fetched) => {
                 let snap = fetched.value;
-                let (o, d) = profile_context(&tuning, &cfg.data_dir, &snap);
+                let (o, d) = profile_context(&tuning, &cfg.data_dir, &snap, Some(now), now);
                 (o, snap.mastery_rank, d, fetched.status.label())
             }
             Err(e) => {
                 endpoint_failures.push(format!("profile: {e}"));
-                profile_fallback(&tuning, &cfg.data_dir, &cfg.cache_dir, &cfg.fixtures)?
+                profile_fallback(&tuning, &cfg.data_dir, &cfg.cache_dir, &cfg.fixtures, now)?
             }
         },
-        None => profile_from_fixture(&tuning, &cfg.data_dir, &cfg.fixtures)?,
+        None => profile_from_fixture(&tuning, &cfg.data_dir, &cfg.fixtures, now)?,
     };
 
     // 5. Parent-item icons (addendum #14).
@@ -367,10 +367,20 @@ pub async fn generate(
 /// display name, built from the WFCD items dataset); unresolvable
 /// entries are skipped, never guessed. Caps scale with mastery rank
 /// per the runtime tuning tables (profile values are REMAINING).
+///
+/// Twelfth-pass §3 (reset-aware standing): the daily pools reset at
+/// 00:00 UTC. When the snapshot was fetched before the most recent
+/// reset (`fetched_at < today's 00:00Z`), the pools render as reset —
+/// `remaining = cap` — until a fresh post-reset fetch lands. A fresh
+/// snapshot always wins verbatim. `fetched_at = None` means "no
+/// trustworthy fetch time" (e.g. a recorded fixture without a clock),
+/// which renders verbatim rather than guessing.
 fn profile_context(
     tuning: &Tuning,
     data_dir: &std::path::Path,
     snap: &fetch::ProfileSnapshot,
+    fetched_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
 ) -> (OwnedEquipment, Option<render::DailyRender>) {
     let names: HashMap<String, String> =
         std::fs::read_to_string(data_dir.join("cache/item-names.json"))
@@ -380,19 +390,37 @@ fn profile_context(
     let owned = fetch::owned_names_from_profile(snap, &names);
     let mr = snap.mastery_rank;
     let caps = &tuning.planner.daily_caps;
+    let focus_cap = caps.focus_base + caps.focus_per_mr * mr;
+    let affiliation_cap = caps.standing_base + caps.standing_per_mr * mr;
+    // 00:00 UTC on `now`'s date is the most recent reset boundary.
+    let most_recent_reset = now
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .expect("midnight is a valid time")
+        .and_utc();
+    let reset = fetched_at.map(|t| t < most_recent_reset).unwrap_or(false);
     let daily = render::DailyRender {
-        affiliation_remaining: snap.daily.affiliation_remaining,
-        affiliation_cap: caps.standing_base + caps.standing_per_mr * mr,
-        focus_remaining: snap.daily.focus_remaining,
-        focus_cap: caps.focus_base + caps.focus_per_mr * mr,
+        affiliation_remaining: if reset {
+            affiliation_cap
+        } else {
+            snap.daily.affiliation_remaining
+        },
+        affiliation_cap,
+        focus_remaining: if reset {
+            focus_cap
+        } else {
+            snap.daily.focus_remaining
+        },
+        focus_cap,
         families: {
             // Pass 4 §28: PvP leaves with the Conclave cut — never a bar.
+            // A reset pool reads at cap; a fresh fetch is verbatim.
             let mut f: Vec<(String, u32)> = snap
                 .daily
                 .per_family
                 .iter()
                 .filter(|(k, _)| !k.eq_ignore_ascii_case("pvp"))
-                .map(|(k, v)| (k.clone(), *v))
+                .map(|(k, v)| (k.clone(), if reset { affiliation_cap } else { *v }))
                 .collect();
             f.sort_by(|a, b| a.0.cmp(&b.0));
             f
@@ -402,16 +430,20 @@ fn profile_context(
 }
 
 /// Profile from the recorded fixture (used offline and on fetch failure).
+/// A recorded fixture carries no trustworthy fetch clock, so it renders
+/// verbatim (`fetched_at = None`); the reset rule applies to live and
+/// cache snapshots, whose ages are known.
 fn profile_from_fixture(
     tuning: &Tuning,
     data_dir: &std::path::Path,
     fixtures: &std::path::Path,
+    now: DateTime<Utc>,
 ) -> Result<(OwnedEquipment, u32, Option<render::DailyRender>, String), String> {
     let fixture = fixtures.join(format!("profile-{PROFILE_ACCOUNT_ID}.json"));
     let text =
         std::fs::read_to_string(&fixture).map_err(|e| format!("fixture profile: {e}"))?;
     let snap = fetch::parse_profile(&text)?;
-    let (o, d) = profile_context(tuning, data_dir, &snap);
+    let (o, d) = profile_context(tuning, data_dir, &snap, None, now);
     Ok((o, snap.mastery_rank, d, "fixture".to_owned()))
 }
 
@@ -420,21 +452,28 @@ fn profile_from_fixture(
 /// the profile's own numbers); the recorded fallback fixture is a fixed
 /// older snapshot. Prefer the cache so a transient endpoint failure never
 /// silently swaps in an unrelated (and possibly stale/zeroed) daily state
-/// — then fall back to the fixture. Ninth pass §3.
+/// — then fall back to the fixture. Ninth pass §3. Twelfth pass §3: the
+/// cache's file mtime is its fetch time, so a cache written before the
+/// latest 00:00 UTC reset renders the daily pools as reset.
 fn profile_fallback(
     tuning: &Tuning,
     data_dir: &std::path::Path,
     cache_dir: &std::path::Path,
     fixtures: &std::path::Path,
+    now: DateTime<Utc>,
 ) -> Result<(OwnedEquipment, u32, Option<render::DailyRender>, String), String> {
     let cached = cache_dir.join(format!("profile-{PROFILE_ACCOUNT_ID}.json"));
     if let Ok(text) = std::fs::read_to_string(&cached) {
         if let Ok(snap) = fetch::parse_profile(&text) {
-            let (o, d) = profile_context(tuning, data_dir, &snap);
+            let fetched_at = std::fs::metadata(&cached)
+                .and_then(|m| m.modified())
+                .ok()
+                .map(DateTime::<Utc>::from);
+            let (o, d) = profile_context(tuning, data_dir, &snap, fetched_at, now);
             return Ok((o, snap.mastery_rank, d, "cache".to_owned()));
         }
     }
-    profile_from_fixture(tuning, data_dir, fixtures)
+    profile_from_fixture(tuning, data_dir, fixtures, now)
 }
 
 /// Demo icon embedding: download each goal's parent icon, shrink to a
@@ -583,17 +622,35 @@ mod tests {
         let snap = fetch::parse_profile(&text).unwrap();
         let tuning = Tuning::load(&root.join("data")).unwrap();
         let caps = &tuning.planner.daily_caps;
-        let (_owned, daily) = profile_context(&tuning, &root.join("data"), &snap);
+        let (_owned, daily) = profile_context(
+            &tuning,
+            &root.join("data"),
+            &snap,
+            None,
+            "2026-10-17T12:00:00Z".parse().unwrap(),
+        );
         let daily = daily.expect("daily render from the live profile");
         let html = render::pool_bars_html(&daily, caps);
 
-        // Parse the rendered bar-name lines back into label -> remaining.
+        // Parse the rendered `.cap` blocks back into label -> remaining.
+        // Twelfth pass §1: the visible number is compact (`349.6k`); the
+        // raw values ride `data-left` / `data-cap` for this audit.
         let mut rendered = HashMap::new();
-        for chunk in html.split("class=\"bar-name\">").skip(1) {
-            let text = chunk.split('<').next().unwrap();
-            let (label, rest) = text.split_once(" · ").expect("label · value");
-            let (rem, _cap) = rest.split_once(" / ").expect("value / cap");
-            rendered.insert(label.to_owned(), rem.replace(',', "").parse::<u32>().unwrap());
+        for chunk in html.split("<div class=\"cap\"").skip(1) {
+            let left = chunk
+                .split("data-left=\"")
+                .nth(1)
+                .and_then(|s| s.split('"').next())
+                .expect("data-left")
+                .parse::<u32>()
+                .unwrap();
+            let label = chunk
+                .split("<span>")
+                .nth(1)
+                .and_then(|s| s.split("</span>").next())
+                .expect("cap label")
+                .to_owned();
+            rendered.insert(label, left);
         }
 
         // Focus.
@@ -633,5 +690,70 @@ mod tests {
         }
         assert_eq!(families, 12, "all 12 family pools audited");
         assert_eq!(rendered.len(), families + 2, "Focus + bare pool + families");
+    }
+
+    /// Twelfth pass §3: a snapshot fetched before the latest 00:00 UTC
+    /// reset renders every daily pool as reset (remaining = cap); a
+    /// post-reset snapshot renders verbatim.
+    #[test]
+    fn reset_boundary_is_reset_aware_and_fresh_fetch_wins() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let fixture = root.join(format!(
+            "fixtures/profile-{PROFILE_ACCOUNT_ID}.json"
+        ));
+        let Ok(text) = std::fs::read_to_string(&fixture) else {
+            eprintln!("skip §3 reset audit: need {}", fixture.display());
+            return;
+        };
+        let snap = fetch::parse_profile(&text).unwrap();
+        let tuning = Tuning::load(&root.join("data")).unwrap();
+        let data = root.join("data");
+
+        // Pre-reset fetch (23:50 on Oct 16), rendered after the Oct 17
+        // 00:00Z boundary: every pool reads at cap.
+        let (_owned, daily) = profile_context(
+            &tuning,
+            &data,
+            &snap,
+            Some("2026-10-16T23:50:00Z".parse().unwrap()),
+            "2026-10-17T00:10:00Z".parse().unwrap(),
+        );
+        let daily = daily.unwrap();
+        assert_eq!(
+            daily.focus_remaining, daily.focus_cap,
+            "pre-reset focus renders at cap"
+        );
+        assert_eq!(
+            daily.affiliation_remaining, daily.affiliation_cap,
+            "pre-reset shared pool renders at cap"
+        );
+        for (fam, remaining) in &daily.families {
+            assert_eq!(
+                *remaining, daily.affiliation_cap,
+                "pre-reset family {fam} renders at cap"
+            );
+        }
+
+        // Fresh post-reset fetch: verbatim (pass 9 §3 rule stands).
+        let (_owned, daily) = profile_context(
+            &tuning,
+            &data,
+            &snap,
+            Some("2026-10-17T00:05:00Z".parse().unwrap()),
+            "2026-10-17T00:10:00Z".parse().unwrap(),
+        );
+        let daily = daily.unwrap();
+        assert_eq!(daily.focus_remaining, snap.daily.focus_remaining);
+        assert_eq!(
+            daily.affiliation_remaining,
+            snap.daily.affiliation_remaining
+        );
+        for (fam, remaining) in &daily.families {
+            assert_eq!(
+                *remaining,
+                snap.daily.per_family[fam],
+                "fresh family {fam} renders verbatim"
+            );
+        }
     }
 }
