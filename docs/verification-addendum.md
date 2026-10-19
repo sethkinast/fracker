@@ -370,3 +370,18 @@ it refines the brief where they disagree. For the next worker pass.
     for alerts, where staleness bites). Also corrected same
     day: 1999 Calendar is 1 season/wk, not 1 page/wk
     (data + WEEKLIES.md).
+    Audit (Graf, 2026-10-19, live-fetched all three): DE
+    Time was 69 SECONDS old; oracle.browse.wf alerts were
+    byte-identical to DE (fresh proxy) but its min.json
+    OMITS PrimeVaultTraders (Varzia) and SeasonInfo
+    (Nightwave), so it cannot be the sole source.
+    warframestat was still frozen at 03:29:40Z (~90 min).
+    DE carries every section the app consumes (Alerts,
+    ActiveMissions w/ VoidT tier in Modifier, Events/Goals,
+    PrimeVaultTraders, VoidTraders, Sorties, LiteSorties,
+    SeasonInfo) plus unused extras (Descents,
+    KnownCalendarSeasons, Conquests). Migration cost is a
+    DE-schema parser + static SolNode/MT_ mapping tables;
+    bonus: EE.log and DE both speak SolNode keys, making
+    alert matching exact. Direction for the round: DE
+    primary, warframestat fallback at most.
