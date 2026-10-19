@@ -385,3 +385,15 @@ it refines the brief where they disagree. For the next worker pass.
     bonus: EE.log and DE both speak SolNode keys, making
     alert matching exact. Direction for the round: DE
     primary, warframestat fallback at most.
+    DIRECTION UPDATE (Seth, 2026-10-19): NO fallback chain
+    at all — DE only; a failed fetch shows as a failure,
+    never a silent substitution. Decodes are BAKED IN from
+    official sources at data-refresh time, never fetched
+    by the app at runtime. Official source verified by
+    Graf 2026-10-19: DE Public Export
+    (origin.warframe.com/PublicExport/index_en.txt.lzma;
+    16 exports incl. ExportRegions, ExportRelicArcane,
+    ExportUpgrades, ExportSortieRewards). Gaps Public
+    Export may not cover (MT_* names, Nightwave challenge
+    titles) to come from browse.wf's vended dicts — Seth
+    offered to supply those URLs.
