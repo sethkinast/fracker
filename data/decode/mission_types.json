@@ -1,0 +1,151 @@
+{
+ "MT_ALCHEMY": {
+  "name": "Alchemy",
+  "observed": true
+ },
+ "MT_ARCHWING": {
+  "name": "Archwing",
+  "observed": false
+ },
+ "MT_ARENA": {
+  "name": "Arena",
+  "observed": false
+ },
+ "MT_ARMAGEDDON": {
+  "name": "Armageddon",
+  "observed": false
+ },
+ "MT_ARTIFACT": {
+  "name": "Disruption",
+  "observed": true
+ },
+ "MT_ASSASSINATION": {
+  "name": "Assassination",
+  "observed": false
+ },
+ "MT_BRUTALITY": {
+  "name": "Brutality",
+  "observed": false
+ },
+ "MT_CAPTURE": {
+  "name": "Capture",
+  "observed": false
+ },
+ "MT_CONQUEST": {
+  "name": "Conquest",
+  "observed": false
+ },
+ "MT_DAGATH": {
+  "name": "Dagath",
+  "observed": false
+ },
+ "MT_DEFENSE": {
+  "name": "Defense",
+  "observed": true
+ },
+ "MT_DESCENT": {
+  "name": "Descent",
+  "observed": false
+ },
+ "MT_EMPYREAN": {
+  "name": "Empyrean",
+  "observed": false
+ },
+ "MT_ENDLESS_CAPTURE": {
+  "name": "Endless Capture",
+  "observed": false
+ },
+ "MT_ENDLESS_EXTERMINATION": {
+  "name": "Exterminate",
+  "observed": false
+ },
+ "MT_EVA": {
+  "name": "Free Roam",
+  "observed": false
+ },
+ "MT_EVACUATION": {
+  "name": "Evacuation",
+  "observed": false
+ },
+ "MT_EXCAVATE": {
+  "name": "Excavation",
+  "observed": false
+ },
+ "MT_EXTERMINATION": {
+  "name": "Extermination",
+  "observed": true
+ },
+ "MT_HIVE": {
+  "name": "Hive",
+  "observed": true
+ },
+ "MT_INTEL": {
+  "name": "Spy",
+  "observed": true
+ },
+ "MT_JUNCTION": {
+  "name": "Junction",
+  "observed": false
+ },
+ "MT_MOBILE_DEFENSE": {
+  "name": "Mobile Defense",
+  "observed": true
+ },
+ "MT_OFFERING": {
+  "name": "Offering",
+  "observed": false
+ },
+ "MT_PURGE": {
+  "name": "Purge",
+  "observed": false
+ },
+ "MT_PVP": {
+  "name": "Pvp",
+  "observed": false
+ },
+ "MT_PVPVE": {
+  "name": "Pvpve",
+  "observed": false
+ },
+ "MT_RACE": {
+  "name": "Race",
+  "observed": false
+ },
+ "MT_RAID": {
+  "name": "Raid",
+  "observed": false
+ },
+ "MT_RESCUE": {
+  "name": "Rescue",
+  "observed": true
+ },
+ "MT_RETRIEVAL": {
+  "name": "Retrieval",
+  "observed": false
+ },
+ "MT_SABOTAGE": {
+  "name": "Sabotage",
+  "observed": true
+ },
+ "MT_SALVAGE": {
+  "name": "Salvage",
+  "observed": false
+ },
+ "MT_SURVIVAL": {
+  "name": "Survival",
+  "observed": true
+ },
+ "MT_SURVIVAL_OMNIA": {
+  "name": "Survival Omnia",
+  "observed": false
+ },
+ "MT_TERRITORY": {
+  "name": "Interception",
+  "observed": true
+ },
+ "MT_VOID_CASCADE": {
+  "name": "Void Cascade",
+  "observed": false
+ },
+ "_note": "MT_* -> display names for DE worldstate data. 'observed' = seen in the live DE feed 2026-10-19; others are the canonical closed enum, title-cased. Validate every name against the recorded warframestat fixtures (they carry display names); flag, never guess, mismatches."
+}

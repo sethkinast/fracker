@@ -1,0 +1,1616 @@
+{
+ "ClanNode0": {
+  "factionIndex": 2,
+  "missionIndex": 8,
+  "name": "Romula",
+  "system": "Venus"
+ },
+ "ClanNode1": {
+  "factionIndex": 2,
+  "missionIndex": 2,
+  "name": "Malva",
+  "system": "Venus"
+ },
+ "ClanNode10": {
+  "factionIndex": 2,
+  "missionIndex": 27,
+  "name": "Memphis",
+  "system": "Phobos"
+ },
+ "ClanNode11": {
+  "factionIndex": 2,
+  "missionIndex": 2,
+  "name": "Zeugma",
+  "system": "Phobos"
+ },
+ "ClanNode12": {
+  "factionIndex": 2,
+  "missionIndex": 27,
+  "name": "Caracol",
+  "system": "Saturn"
+ },
+ "ClanNode13": {
+  "factionIndex": 2,
+  "missionIndex": 2,
+  "name": "Piscinas",
+  "system": "Saturn"
+ },
+ "ClanNode14": {
+  "factionIndex": 2,
+  "missionIndex": 2,
+  "name": "Amarna",
+  "system": "Sedna"
+ },
+ "ClanNode15": {
+  "factionIndex": 2,
+  "missionIndex": 8,
+  "name": "Sangeru",
+  "system": "Sedna"
+ },
+ "ClanNode16": {
+  "factionIndex": 2,
+  "missionIndex": 33,
+  "name": "Ur",
+  "system": "Uranus"
+ },
+ "ClanNode17": {
+  "factionIndex": 2,
+  "missionIndex": 2,
+  "name": "Assur",
+  "system": "Uranus"
+ },
+ "ClanNode18": {
+  "factionIndex": 2,
+  "missionIndex": 8,
+  "name": "Akkad",
+  "system": "Eris"
+ },
+ "ClanNode19": {
+  "factionIndex": 2,
+  "missionIndex": 2,
+  "name": "Zabala",
+  "system": "Eris"
+ },
+ "ClanNode2": {
+  "factionIndex": 2,
+  "missionIndex": 8,
+  "name": "Coba",
+  "system": "Earth"
+ },
+ "ClanNode20": {
+  "factionIndex": 2,
+  "missionIndex": 27,
+  "name": "Yursa",
+  "system": "Neptune"
+ },
+ "ClanNode21": {
+  "factionIndex": 2,
+  "missionIndex": 2,
+  "name": "Kelashin",
+  "system": "Neptune"
+ },
+ "ClanNode22": {
+  "factionIndex": 2,
+  "missionIndex": 8,
+  "name": "Seimeni",
+  "system": "Ceres"
+ },
+ "ClanNode23": {
+  "factionIndex": 2,
+  "missionIndex": 2,
+  "name": "Gabii",
+  "system": "Ceres"
+ },
+ "ClanNode24": {
+  "factionIndex": 2,
+  "missionIndex": 8,
+  "name": "Sechura",
+  "system": "Pluto"
+ },
+ "ClanNode25": {
+  "factionIndex": 2,
+  "missionIndex": 17,
+  "name": "Hieracon",
+  "system": "Pluto"
+ },
+ "ClanNode3": {
+  "factionIndex": 2,
+  "missionIndex": 17,
+  "name": "Tikal",
+  "system": "Earth"
+ },
+ "ClanNode4": {
+  "factionIndex": 2,
+  "missionIndex": 8,
+  "name": "Sinai",
+  "system": "Jupiter"
+ },
+ "ClanNode5": {
+  "factionIndex": 2,
+  "missionIndex": 2,
+  "name": "Cameria",
+  "system": "Jupiter"
+ },
+ "ClanNode6": {
+  "factionIndex": 2,
+  "missionIndex": 8,
+  "name": "Larzac",
+  "system": "Europa"
+ },
+ "ClanNode7": {
+  "factionIndex": 2,
+  "missionIndex": 17,
+  "name": "Cholistan",
+  "system": "Europa"
+ },
+ "ClanNode8": {
+  "factionIndex": 2,
+  "missionIndex": 8,
+  "name": "Kadesh",
+  "system": "Mars"
+ },
+ "ClanNode9": {
+  "factionIndex": 2,
+  "missionIndex": 2,
+  "name": "Wahiba",
+  "system": "Mars"
+ },
+ "SettlementNode1": {
+  "factionIndex": 1,
+  "missionIndex": 1,
+  "name": "Roche",
+  "system": "Phobos"
+ },
+ "SettlementNode10": {
+  "factionIndex": 1,
+  "missionIndex": 25,
+  "name": "Kepler",
+  "system": "Phobos"
+ },
+ "SettlementNode11": {
+  "factionIndex": 1,
+  "missionIndex": 8,
+  "name": "Gulliver",
+  "system": "Phobos"
+ },
+ "SettlementNode12": {
+  "factionIndex": 1,
+  "missionIndex": 3,
+  "name": "Monolith",
+  "system": "Phobos"
+ },
+ "SettlementNode14": {
+  "factionIndex": 1,
+  "missionIndex": 7,
+  "name": "Shklovsky",
+  "system": "Phobos"
+ },
+ "SettlementNode15": {
+  "factionIndex": 1,
+  "missionIndex": 9,
+  "name": "Sharpless",
+  "system": "Phobos"
+ },
+ "SettlementNode2": {
+  "factionIndex": 1,
+  "missionIndex": 5,
+  "name": "Skyresh",
+  "system": "Phobos"
+ },
+ "SettlementNode20": {
+  "factionIndex": 1,
+  "missionIndex": 0,
+  "name": "Iliad",
+  "system": "Phobos"
+ },
+ "SettlementNode3": {
+  "factionIndex": 1,
+  "missionIndex": 2,
+  "name": "Stickney",
+  "system": "Phobos"
+ },
+ "SolNode1": {
+  "factionIndex": 1,
+  "missionIndex": 5,
+  "name": "Galatea",
+  "system": "Neptune"
+ },
+ "SolNode10": {
+  "factionIndex": 1,
+  "missionIndex": 4,
+  "name": "Thebe",
+  "system": "Jupiter"
+ },
+ "SolNode100": {
+  "factionIndex": 1,
+  "missionIndex": 2,
+  "name": "Elara",
+  "system": "Jupiter"
+ },
+ "SolNode101": {
+  "factionIndex": 1,
+  "missionIndex": 17,
+  "name": "Kiliken",
+  "system": "Venus"
+ },
+ "SolNode102": {
+  "factionIndex": 1,
+  "missionIndex": 7,
+  "name": "Oceanum",
+  "system": "Pluto"
+ },
+ "SolNode103": {
+  "factionIndex": 2,
+  "missionIndex": 1,
+  "name": "M Prime",
+  "system": "Mercury"
+ },
+ "SolNode104": {
+  "factionIndex": 1,
+  "missionIndex": 0,
+  "name": "Fossa",
+  "system": "Venus"
+ },
+ "SolNode105": {
+  "factionIndex": 0,
+  "missionIndex": 0,
+  "name": "Titania",
+  "system": "Uranus"
+ },
+ "SolNode106": {
+  "factionIndex": 0,
+  "missionIndex": 13,
+  "name": "Alator",
+  "system": "Mars"
+ },
+ "SolNode107": {
+  "factionIndex": 1,
+  "missionIndex": 5,
+  "name": "Venera",
+  "system": "Venus"
+ },
+ "SolNode108": {
+  "factionIndex": 0,
+  "missionIndex": 0,
+  "name": "Tolstoj",
+  "system": "Mercury"
+ },
+ "SolNode109": {
+  "factionIndex": 1,
+  "missionIndex": 3,
+  "name": "Linea",
+  "system": "Venus"
+ },
+ "SolNode11": {
+  "factionIndex": 0,
+  "missionIndex": 9,
+  "name": "Tharsis",
+  "system": "Mars"
+ },
+ "SolNode113": {
+  "factionIndex": 0,
+  "missionIndex": 4,
+  "name": "Ares",
+  "system": "Mars"
+ },
+ "SolNode114": {
+  "factionIndex": 0,
+  "missionIndex": 1,
+  "name": "Puck",
+  "system": "Uranus"
+ },
+ "SolNode118": {
+  "factionIndex": 1,
+  "missionIndex": 33,
+  "name": "Laomedeia",
+  "system": "Neptune"
+ },
+ "SolNode119": {
+  "factionIndex": 0,
+  "missionIndex": 3,
+  "name": "Caloris",
+  "system": "Mercury"
+ },
+ "SolNode12": {
+  "factionIndex": 0,
+  "missionIndex": 5,
+  "name": "Elion",
+  "system": "Mercury"
+ },
+ "SolNode121": {
+  "factionIndex": 1,
+  "missionIndex": 1,
+  "name": "Carpo",
+  "system": "Jupiter"
+ },
+ "SolNode122": {
+  "factionIndex": 0,
+  "missionIndex": 8,
+  "name": "Stephano",
+  "system": "Uranus"
+ },
+ "SolNode123": {
+  "factionIndex": 1,
+  "missionIndex": 2,
+  "name": "V Prime",
+  "system": "Venus"
+ },
+ "SolNode125": {
+  "factionIndex": 1,
+  "missionIndex": 8,
+  "name": "Io",
+  "system": "Jupiter"
+ },
+ "SolNode126": {
+  "factionIndex": 1,
+  "missionIndex": 3,
+  "name": "Metis",
+  "system": "Jupiter"
+ },
+ "SolNode127": {
+  "factionIndex": 1,
+  "missionIndex": 0,
+  "name": "Psamathe",
+  "system": "Neptune"
+ },
+ "SolNode128": {
+  "factionIndex": 1,
+  "missionIndex": 1,
+  "name": "E Gate",
+  "system": "Venus"
+ },
+ "SolNode129": {
+  "factionIndex": 1,
+  "missionIndex": 28,
+  "name": "Orb Vallis",
+  "system": "Venus"
+ },
+ "SolNode130": {
+  "factionIndex": 2,
+  "missionIndex": 8,
+  "name": "Lares",
+  "system": "Mercury"
+ },
+ "SolNode131": {
+  "factionIndex": 0,
+  "missionIndex": 1,
+  "name": "Pallas",
+  "system": "Ceres"
+ },
+ "SolNode132": {
+  "factionIndex": 0,
+  "missionIndex": 7,
+  "name": "Bode",
+  "system": "Ceres"
+ },
+ "SolNode135": {
+  "factionIndex": 0,
+  "missionIndex": 4,
+  "name": "Thon",
+  "system": "Ceres"
+ },
+ "SolNode137": {
+  "factionIndex": 0,
+  "missionIndex": 3,
+  "name": "Nuovo",
+  "system": "Ceres"
+ },
+ "SolNode138": {
+  "factionIndex": 0,
+  "missionIndex": 14,
+  "name": "Ludi",
+  "system": "Ceres"
+ },
+ "SolNode139": {
+  "factionIndex": 0,
+  "missionIndex": 5,
+  "name": "Lex",
+  "system": "Ceres"
+ },
+ "SolNode14": {
+  "factionIndex": 1,
+  "missionIndex": 1,
+  "name": "Ultor",
+  "system": "Mars"
+ },
+ "SolNode140": {
+  "factionIndex": 0,
+  "missionIndex": 9,
+  "name": "Kiste",
+  "system": "Ceres"
+ },
+ "SolNode141": {
+  "factionIndex": 0,
+  "missionIndex": 4,
+  "name": "Ker",
+  "system": "Ceres"
+ },
+ "SolNode144": {
+  "factionIndex": 0,
+  "missionIndex": 0,
+  "name": "Exta",
+  "system": "Ceres"
+ },
+ "SolNode146": {
+  "factionIndex": 0,
+  "missionIndex": 2,
+  "name": "Draco",
+  "system": "Ceres"
+ },
+ "SolNode147": {
+  "factionIndex": 0,
+  "missionIndex": 13,
+  "name": "Cinxia",
+  "system": "Ceres"
+ },
+ "SolNode149": {
+  "factionIndex": 0,
+  "missionIndex": 8,
+  "name": "Casta",
+  "system": "Ceres"
+ },
+ "SolNode15": {
+  "factionIndex": 0,
+  "missionIndex": 3,
+  "name": "Pacific",
+  "system": "Earth"
+ },
+ "SolNode153": {
+  "factionIndex": 2,
+  "missionIndex": 3,
+  "name": "Brugia",
+  "system": "Eris"
+ },
+ "SolNode16": {
+  "factionIndex": 0,
+  "missionIndex": 17,
+  "name": "Augustus",
+  "system": "Mars"
+ },
+ "SolNode162": {
+  "factionIndex": 2,
+  "missionIndex": 5,
+  "name": "Isos",
+  "system": "Eris"
+ },
+ "SolNode164": {
+  "factionIndex": 2,
+  "missionIndex": 8,
+  "name": "Kala-azar",
+  "system": "Eris"
+ },
+ "SolNode166": {
+  "factionIndex": 2,
+  "missionIndex": 2,
+  "name": "Nimus",
+  "system": "Eris"
+ },
+ "SolNode167": {
+  "factionIndex": 2,
+  "missionIndex": 21,
+  "name": "Oestrus",
+  "system": "Eris"
+ },
+ "SolNode17": {
+  "factionIndex": 1,
+  "missionIndex": 8,
+  "name": "Proteus",
+  "system": "Neptune"
+ },
+ "SolNode171": {
+  "factionIndex": 2,
+  "missionIndex": 1,
+  "name": "Saxis",
+  "system": "Eris"
+ },
+ "SolNode172": {
+  "factionIndex": 2,
+  "missionIndex": 13,
+  "name": "Xini",
+  "system": "Eris"
+ },
+ "SolNode173": {
+  "factionIndex": 2,
+  "missionIndex": 9,
+  "name": "Solium",
+  "system": "Eris"
+ },
+ "SolNode175": {
+  "factionIndex": 2,
+  "missionIndex": 15,
+  "name": "Naeglar",
+  "system": "Eris"
+ },
+ "SolNode177": {
+  "factionIndex": 0,
+  "missionIndex": 33,
+  "name": "Kappa",
+  "system": "Sedna"
+ },
+ "SolNode18": {
+  "factionIndex": 0,
+  "missionIndex": 13,
+  "name": "Rhea",
+  "system": "Saturn"
+ },
+ "SolNode181": {
+  "factionIndex": 0,
+  "missionIndex": 1,
+  "name": "Adaro",
+  "system": "Sedna"
+ },
+ "SolNode183": {
+  "factionIndex": 0,
+  "missionIndex": 22,
+  "name": "Vodyanoi",
+  "system": "Sedna"
+ },
+ "SolNode184": {
+  "factionIndex": 0,
+  "missionIndex": 4,
+  "name": "Rusalka",
+  "system": "Sedna"
+ },
+ "SolNode185": {
+  "factionIndex": 0,
+  "missionIndex": 13,
+  "name": "Berehynia",
+  "system": "Sedna"
+ },
+ "SolNode187": {
+  "factionIndex": 0,
+  "missionIndex": 2,
+  "name": "Selkie",
+  "system": "Sedna"
+ },
+ "SolNode188": {
+  "factionIndex": 0,
+  "missionIndex": 7,
+  "name": "Kelpie",
+  "system": "Sedna"
+ },
+ "SolNode189": {
+  "factionIndex": 0,
+  "missionIndex": 3,
+  "name": "Naga",
+  "system": "Sedna"
+ },
+ "SolNode19": {
+  "factionIndex": 0,
+  "missionIndex": 4,
+  "name": "Enceladus",
+  "system": "Saturn"
+ },
+ "SolNode190": {
+  "factionIndex": 0,
+  "missionIndex": 22,
+  "name": "Nakki",
+  "system": "Sedna"
+ },
+ "SolNode191": {
+  "factionIndex": 0,
+  "missionIndex": 14,
+  "name": "Marid",
+  "system": "Sedna"
+ },
+ "SolNode193": {
+  "factionIndex": 0,
+  "missionIndex": 0,
+  "name": "Merrow",
+  "system": "Sedna"
+ },
+ "SolNode195": {
+  "factionIndex": 0,
+  "missionIndex": 8,
+  "name": "Hydron",
+  "system": "Sedna"
+ },
+ "SolNode196": {
+  "factionIndex": 0,
+  "missionIndex": 9,
+  "name": "Charybdis",
+  "system": "Sedna"
+ },
+ "SolNode199": {
+  "factionIndex": 0,
+  "missionIndex": 22,
+  "name": "Yam",
+  "system": "Sedna"
+ },
+ "SolNode2": {
+  "factionIndex": 1,
+  "missionIndex": 9,
+  "name": "Aphrodite",
+  "system": "Venus"
+ },
+ "SolNode20": {
+  "factionIndex": 0,
+  "missionIndex": 1,
+  "name": "Telesto",
+  "system": "Saturn"
+ },
+ "SolNode203": {
+  "factionIndex": 1,
+  "missionIndex": 5,
+  "name": "Abaddon",
+  "system": "Europa"
+ },
+ "SolNode204": {
+  "factionIndex": 2,
+  "missionIndex": 1,
+  "name": "Armaros",
+  "system": "Europa"
+ },
+ "SolNode205": {
+  "factionIndex": 1,
+  "missionIndex": 1,
+  "name": "Baal",
+  "system": "Europa"
+ },
+ "SolNode209": {
+  "factionIndex": 1,
+  "missionIndex": 9,
+  "name": "Morax",
+  "system": "Europa"
+ },
+ "SolNode21": {
+  "factionIndex": 1,
+  "missionIndex": 1,
+  "name": "Narcissus",
+  "system": "Pluto"
+ },
+ "SolNode210": {
+  "factionIndex": 1,
+  "missionIndex": 0,
+  "name": "Naamah",
+  "system": "Europa"
+ },
+ "SolNode211": {
+  "factionIndex": 1,
+  "missionIndex": 13,
+  "name": "Ose",
+  "system": "Europa"
+ },
+ "SolNode212": {
+  "factionIndex": 1,
+  "missionIndex": 8,
+  "name": "Paimon",
+  "system": "Europa"
+ },
+ "SolNode214": {
+  "factionIndex": 1,
+  "missionIndex": 14,
+  "name": "Sorath",
+  "system": "Europa"
+ },
+ "SolNode215": {
+  "factionIndex": 2,
+  "missionIndex": 7,
+  "name": "Valac",
+  "system": "Europa"
+ },
+ "SolNode216": {
+  "factionIndex": 1,
+  "missionIndex": 17,
+  "name": "Valefor",
+  "system": "Europa"
+ },
+ "SolNode217": {
+  "factionIndex": 1,
+  "missionIndex": 3,
+  "name": "Orias",
+  "system": "Europa"
+ },
+ "SolNode22": {
+  "factionIndex": 1,
+  "missionIndex": 8,
+  "name": "Tessera",
+  "system": "Venus"
+ },
+ "SolNode220": {
+  "factionIndex": 1,
+  "missionIndex": 4,
+  "name": "Kokabiel",
+  "system": "Europa"
+ },
+ "SolNode223": {
+  "factionIndex": 2,
+  "missionIndex": 9,
+  "name": "Boethius",
+  "system": "Mercury"
+ },
+ "SolNode224": {
+  "factionIndex": 0,
+  "missionIndex": 13,
+  "name": "Odin",
+  "system": "Mercury"
+ },
+ "SolNode225": {
+  "factionIndex": 0,
+  "missionIndex": 7,
+  "name": "Suisei",
+  "system": "Mercury"
+ },
+ "SolNode226": {
+  "factionIndex": 0,
+  "missionIndex": 1,
+  "name": "Pantheon",
+  "system": "Mercury"
+ },
+ "SolNode228": {
+  "factionIndex": 0,
+  "missionIndex": 28,
+  "name": "Plains of Eidolon",
+  "system": "Earth"
+ },
+ "SolNode229": {
+  "factionIndex": 2,
+  "missionIndex": 28,
+  "name": "Cambion Drift",
+  "system": "Deimos"
+ },
+ "SolNode23": {
+  "factionIndex": 1,
+  "missionIndex": 13,
+  "name": "Cytherean",
+  "system": "Venus"
+ },
+ "SolNode230": {
+  "factionIndex": 0,
+  "missionIndex": 34,
+  "name": "Everview Arc",
+  "system": "Zariman"
+ },
+ "SolNode231": {
+  "factionIndex": 0,
+  "missionIndex": 1,
+  "name": "Halako Perimeter",
+  "system": "Zariman"
+ },
+ "SolNode232": {
+  "factionIndex": 0,
+  "missionIndex": 35,
+  "name": "Tuvul Commons",
+  "system": "Zariman"
+ },
+ "SolNode233": {
+  "factionIndex": 0,
+  "missionIndex": 36,
+  "name": "Oro Works",
+  "system": "Zariman"
+ },
+ "SolNode235": {
+  "factionIndex": 0,
+  "missionIndex": 9,
+  "name": "The Greenway",
+  "system": "Zariman"
+ },
+ "SolNode236": {
+  "factionIndex": 10,
+  "missionIndex": 28,
+  "name": "The Duviri Experience",
+  "system": "Duviri"
+ },
+ "SolNode237": {
+  "factionIndex": 10,
+  "missionIndex": 28,
+  "name": "The Lone Story",
+  "system": "Duviri"
+ },
+ "SolNode238": {
+  "factionIndex": 3,
+  "missionIndex": 31,
+  "name": "The Circuit",
+  "system": "Duviri"
+ },
+ "SolNode239": {
+  "factionIndex": 11,
+  "missionIndex": 45,
+  "name": "Vesper Relay",
+  "system": "Venus"
+ },
+ "SolNode24": {
+  "factionIndex": 0,
+  "missionIndex": 0,
+  "name": "Oro",
+  "system": "Earth"
+ },
+ "SolNode25": {
+  "factionIndex": 1,
+  "missionIndex": 13,
+  "name": "Callisto",
+  "system": "Jupiter"
+ },
+ "SolNode250": {
+  "factionIndex": 3,
+  "missionIndex": 44,
+  "name": "Recall: Hunhullus",
+  "system": "Dark Refractory, Deimos"
+ },
+ "SolNode251": {
+  "factionIndex": 3,
+  "missionIndex": 44,
+  "name": "Recall: Dactolyst",
+  "system": "Dark Refractory, Deimos"
+ },
+ "SolNode252": {
+  "factionIndex": 3,
+  "missionIndex": 44,
+  "name": "Recall: Vanguard",
+  "system": "Dark Refractory, Deimos"
+ },
+ "SolNode253": {
+  "factionIndex": 3,
+  "missionIndex": 43,
+  "name": "Descend",
+  "system": "Dark Refractory, Deimos"
+ },
+ "SolNode254": {
+  "factionIndex": 3,
+  "missionIndex": 43,
+  "name": "Descend from Marie's Sanctuary",
+  "system": "Dark Refractory, Deimos"
+ },
+ "SolNode255": {
+  "factionIndex": 3,
+  "missionIndex": 43,
+  "name": "Descend from Lyon's Sanctuary",
+  "system": "Dark Refractory, Deimos"
+ },
+ "SolNode256": {
+  "factionIndex": 3,
+  "missionIndex": 43,
+  "name": "Roathe's Oblivion",
+  "system": "Dark Refractory, Deimos"
+ },
+ "SolNode257": {
+  "factionIndex": 3,
+  "missionIndex": 44,
+  "name": "The Guilty",
+  "system": "Dark Refractory, Deimos"
+ },
+ "SolNode26": {
+  "factionIndex": 0,
+  "missionIndex": 8,
+  "name": "Lith",
+  "system": "Earth"
+ },
+ "SolNode27": {
+  "factionIndex": 0,
+  "missionIndex": 1,
+  "name": "E Prime",
+  "system": "Earth"
+ },
+ "SolNode28": {
+  "factionIndex": 2,
+  "missionIndex": 4,
+  "name": "Terminus",
+  "system": "Mercury"
+ },
+ "SolNode30": {
+  "factionIndex": 0,
+  "missionIndex": 33,
+  "name": "Olympus",
+  "system": "Mars"
+ },
+ "SolNode300": {
+  "factionIndex": 0,
+  "missionIndex": 1,
+  "name": "Plato",
+  "system": "Lua"
+ },
+ "SolNode301": {
+  "factionIndex": 0,
+  "missionIndex": 9,
+  "name": "Grimaldi",
+  "system": "Lua"
+ },
+ "SolNode302": {
+  "factionIndex": 1,
+  "missionIndex": 2,
+  "name": "Tycho",
+  "system": "Lua"
+ },
+ "SolNode304": {
+  "factionIndex": 1,
+  "missionIndex": 5,
+  "name": "Copernicus",
+  "system": "Lua"
+ },
+ "SolNode305": {
+  "factionIndex": 0,
+  "missionIndex": 8,
+  "name": "St\u00f6fler",
+  "system": "Lua"
+ },
+ "SolNode306": {
+  "factionIndex": 1,
+  "missionIndex": 7,
+  "name": "Pavlov",
+  "system": "Lua"
+ },
+ "SolNode307": {
+  "factionIndex": 1,
+  "missionIndex": 3,
+  "name": "Zeipel",
+  "system": "Lua"
+ },
+ "SolNode308": {
+  "factionIndex": 1,
+  "missionIndex": 33,
+  "name": "Apollo",
+  "system": "Lua"
+ },
+ "SolNode309": {
+  "factionIndex": 3,
+  "missionIndex": 2,
+  "name": "Yuvarium",
+  "system": "Lua"
+ },
+ "SolNode31": {
+  "factionIndex": 0,
+  "missionIndex": 3,
+  "name": "Anthe",
+  "system": "Saturn"
+ },
+ "SolNode310": {
+  "factionIndex": 3,
+  "missionIndex": 2,
+  "name": "Circulus",
+  "system": "Lua"
+ },
+ "SolNode32": {
+  "factionIndex": 0,
+  "missionIndex": 0,
+  "name": "Tethys",
+  "system": "Saturn"
+ },
+ "SolNode33": {
+  "factionIndex": 0,
+  "missionIndex": 5,
+  "name": "Ariel",
+  "system": "Uranus"
+ },
+ "SolNode34": {
+  "factionIndex": 0,
+  "missionIndex": 1,
+  "name": "Sycorax",
+  "system": "Uranus"
+ },
+ "SolNode36": {
+  "factionIndex": 0,
+  "missionIndex": 3,
+  "name": "Martialis",
+  "system": "Mars"
+ },
+ "SolNode38": {
+  "factionIndex": 1,
+  "missionIndex": 9,
+  "name": "Minthe",
+  "system": "Pluto"
+ },
+ "SolNode39": {
+  "factionIndex": 0,
+  "missionIndex": 17,
+  "name": "Everest",
+  "system": "Earth"
+ },
+ "SolNode4": {
+  "factionIndex": 1,
+  "missionIndex": 1,
+  "name": "Acheron",
+  "system": "Pluto"
+ },
+ "SolNode400": {
+  "factionIndex": 3,
+  "missionIndex": 1,
+  "name": "Teshub",
+  "system": "Void"
+ },
+ "SolNode401": {
+  "factionIndex": 3,
+  "missionIndex": 5,
+  "name": "Hepit",
+  "system": "Void"
+ },
+ "SolNode402": {
+  "factionIndex": 3,
+  "missionIndex": 8,
+  "name": "Taranis",
+  "system": "Void"
+ },
+ "SolNode403": {
+  "factionIndex": 3,
+  "missionIndex": 9,
+  "name": "Tiwaz",
+  "system": "Void"
+ },
+ "SolNode404": {
+  "factionIndex": 3,
+  "missionIndex": 4,
+  "name": "Stribog",
+  "system": "Void"
+ },
+ "SolNode405": {
+  "factionIndex": 3,
+  "missionIndex": 2,
+  "name": "Ani",
+  "system": "Void"
+ },
+ "SolNode406": {
+  "factionIndex": 3,
+  "missionIndex": 5,
+  "name": "Ukko",
+  "system": "Void"
+ },
+ "SolNode407": {
+  "factionIndex": 3,
+  "missionIndex": 1,
+  "name": "Oxomoco",
+  "system": "Void"
+ },
+ "SolNode408": {
+  "factionIndex": 3,
+  "missionIndex": 8,
+  "name": "Belenus",
+  "system": "Void"
+ },
+ "SolNode409": {
+  "factionIndex": 3,
+  "missionIndex": 2,
+  "name": "Mot",
+  "system": "Void"
+ },
+ "SolNode41": {
+  "factionIndex": 0,
+  "missionIndex": 7,
+  "name": "Arval",
+  "system": "Mars"
+ },
+ "SolNode410": {
+  "factionIndex": 3,
+  "missionIndex": 9,
+  "name": "Aten",
+  "system": "Void"
+ },
+ "SolNode411": {
+  "factionIndex": 3,
+  "missionIndex": 4,
+  "name": "Marduk",
+  "system": "Void"
+ },
+ "SolNode412": {
+  "factionIndex": 3,
+  "missionIndex": 13,
+  "name": "Mithra",
+  "system": "Void"
+ },
+ "SolNode42": {
+  "factionIndex": 0,
+  "missionIndex": 8,
+  "name": "Helene",
+  "system": "Saturn"
+ },
+ "SolNode43": {
+  "factionIndex": 1,
+  "missionIndex": 13,
+  "name": "Cerberus",
+  "system": "Pluto"
+ },
+ "SolNode45": {
+  "factionIndex": 0,
+  "missionIndex": 5,
+  "name": "Ara",
+  "system": "Mars"
+ },
+ "SolNode450": {
+  "factionIndex": 1,
+  "missionIndex": 8,
+  "name": "Tyana Pass",
+  "system": "Mars"
+ },
+ "SolNode451": {
+  "factionIndex": 2,
+  "missionIndex": 41,
+  "name": "Saya's Visions",
+  "system": "Earth"
+ },
+ "SolNode46": {
+  "factionIndex": 0,
+  "missionIndex": 8,
+  "name": "Spear",
+  "system": "Mars"
+ },
+ "SolNode48": {
+  "factionIndex": 1,
+  "missionIndex": 3,
+  "name": "Regna",
+  "system": "Pluto"
+ },
+ "SolNode49": {
+  "factionIndex": 1,
+  "missionIndex": 9,
+  "name": "Larissa",
+  "system": "Neptune"
+ },
+ "SolNode50": {
+  "factionIndex": 0,
+  "missionIndex": 3,
+  "name": "Numa",
+  "system": "Saturn"
+ },
+ "SolNode51": {
+  "factionIndex": 1,
+  "missionIndex": 0,
+  "name": "Hades",
+  "system": "Pluto"
+ },
+ "SolNode53": {
+  "factionIndex": 1,
+  "missionIndex": 0,
+  "name": "Themisto",
+  "system": "Jupiter"
+ },
+ "SolNode56": {
+  "factionIndex": 1,
+  "missionIndex": 4,
+  "name": "Cypress",
+  "system": "Pluto"
+ },
+ "SolNode57": {
+  "factionIndex": 1,
+  "missionIndex": 4,
+  "name": "Sao",
+  "system": "Neptune"
+ },
+ "SolNode58": {
+  "factionIndex": 0,
+  "missionIndex": 1,
+  "name": "Hellas",
+  "system": "Mars"
+ },
+ "SolNode59": {
+  "factionIndex": 0,
+  "missionIndex": 9,
+  "name": "Eurasia",
+  "system": "Earth"
+ },
+ "SolNode6": {
+  "factionIndex": 1,
+  "missionIndex": 17,
+  "name": "Despina",
+  "system": "Neptune"
+ },
+ "SolNode60": {
+  "factionIndex": 0,
+  "missionIndex": 3,
+  "name": "Caliban",
+  "system": "Uranus"
+ },
+ "SolNode61": {
+  "factionIndex": 1,
+  "missionIndex": 4,
+  "name": "Ishtar",
+  "system": "Venus"
+ },
+ "SolNode62": {
+  "factionIndex": 1,
+  "missionIndex": 1,
+  "name": "Neso",
+  "system": "Neptune"
+ },
+ "SolNode63": {
+  "factionIndex": 0,
+  "missionIndex": 5,
+  "name": "Mantle",
+  "system": "Earth"
+ },
+ "SolNode64": {
+  "factionIndex": 0,
+  "missionIndex": 13,
+  "name": "Umbriel",
+  "system": "Uranus"
+ },
+ "SolNode65": {
+  "factionIndex": 1,
+  "missionIndex": 4,
+  "name": "Gradivus",
+  "system": "Mars"
+ },
+ "SolNode66": {
+  "factionIndex": 1,
+  "missionIndex": 7,
+  "name": "Unda",
+  "system": "Venus"
+ },
+ "SolNode67": {
+  "factionIndex": 0,
+  "missionIndex": 7,
+  "name": "Dione",
+  "system": "Saturn"
+ },
+ "SolNode68": {
+  "factionIndex": 0,
+  "missionIndex": 9,
+  "name": "Vallis",
+  "system": "Mars"
+ },
+ "SolNode69": {
+  "factionIndex": 0,
+  "missionIndex": 2,
+  "name": "Ophelia",
+  "system": "Uranus"
+ },
+ "SolNode70": {
+  "factionIndex": 0,
+  "missionIndex": 5,
+  "name": "Cassini",
+  "system": "Saturn"
+ },
+ "SolNode706": {
+  "factionIndex": 2,
+  "missionIndex": 5,
+  "name": "Horend",
+  "system": "Deimos"
+ },
+ "SolNode707": {
+  "factionIndex": 2,
+  "missionIndex": 8,
+  "name": "Hyf",
+  "system": "Deimos"
+ },
+ "SolNode708": {
+  "factionIndex": 2,
+  "missionIndex": 1,
+  "name": "Phlegyas",
+  "system": "Deimos"
+ },
+ "SolNode709": {
+  "factionIndex": 2,
+  "missionIndex": 9,
+  "name": "Dirus",
+  "system": "Deimos"
+ },
+ "SolNode710": {
+  "factionIndex": 2,
+  "missionIndex": 4,
+  "name": "Formido",
+  "system": "Deimos"
+ },
+ "SolNode711": {
+  "factionIndex": 2,
+  "missionIndex": 2,
+  "name": "Terrorem",
+  "system": "Deimos"
+ },
+ "SolNode712": {
+  "factionIndex": 2,
+  "missionIndex": 0,
+  "name": "Magnacidium",
+  "system": "Deimos"
+ },
+ "SolNode713": {
+  "factionIndex": 2,
+  "missionIndex": 0,
+  "name": "Exequias",
+  "system": "Deimos"
+ },
+ "SolNode715": {
+  "factionIndex": 7,
+  "missionIndex": 0,
+  "name": "Effervo",
+  "system": "Deimos"
+ },
+ "SolNode716": {
+  "factionIndex": 7,
+  "missionIndex": 1,
+  "name": "Nex",
+  "system": "Deimos"
+ },
+ "SolNode717": {
+  "factionIndex": 7,
+  "missionIndex": 2,
+  "name": "Persto",
+  "system": "Deimos"
+ },
+ "SolNode718": {
+  "factionIndex": 7,
+  "missionIndex": 38,
+  "name": "Cambire",
+  "system": "Deimos"
+ },
+ "SolNode719": {
+  "factionIndex": 7,
+  "missionIndex": 8,
+  "name": "Munio",
+  "system": "Deimos"
+ },
+ "SolNode72": {
+  "factionIndex": 1,
+  "missionIndex": 8,
+  "name": "Outer Terminus",
+  "system": "Pluto"
+ },
+ "SolNode721": {
+  "factionIndex": 7,
+  "missionIndex": 33,
+  "name": "Armatus",
+  "system": "Deimos"
+ },
+ "SolNode73": {
+  "factionIndex": 1,
+  "missionIndex": 5,
+  "name": "Ananke",
+  "system": "Jupiter"
+ },
+ "SolNode74": {
+  "factionIndex": 1,
+  "missionIndex": 9,
+  "name": "Carme",
+  "system": "Jupiter"
+ },
+ "SolNode740": {
+  "factionIndex": 5,
+  "missionIndex": 0,
+  "name": "The Ropalolyst",
+  "system": "Jupiter"
+ },
+ "SolNode741": {
+  "factionIndex": 0,
+  "missionIndex": 26,
+  "name": "Koro",
+  "system": "Kuva Fortress"
+ },
+ "SolNode742": {
+  "factionIndex": 0,
+  "missionIndex": 8,
+  "name": "Nabuk",
+  "system": "Kuva Fortress"
+ },
+ "SolNode743": {
+  "factionIndex": 0,
+  "missionIndex": 9,
+  "name": "Rotuma",
+  "system": "Kuva Fortress"
+ },
+ "SolNode744": {
+  "factionIndex": 0,
+  "missionIndex": 2,
+  "name": "Taveuni",
+  "system": "Kuva Fortress"
+ },
+ "SolNode745": {
+  "factionIndex": 0,
+  "missionIndex": 33,
+  "name": "Tamu",
+  "system": "Kuva Fortress"
+ },
+ "SolNode746": {
+  "factionIndex": 0,
+  "missionIndex": 1,
+  "name": "Dakata",
+  "system": "Kuva Fortress"
+ },
+ "SolNode747": {
+  "factionIndex": 0,
+  "missionIndex": 7,
+  "name": "Pago",
+  "system": "Kuva Fortress"
+ },
+ "SolNode748": {
+  "factionIndex": 0,
+  "missionIndex": 3,
+  "name": "Garus",
+  "system": "Kuva Fortress"
+ },
+ "SolNode75": {
+  "factionIndex": 0,
+  "missionIndex": 4,
+  "name": "Cervantes",
+  "system": "Earth"
+ },
+ "SolNode76": {
+  "factionIndex": 1,
+  "missionIndex": 5,
+  "name": "Hydra",
+  "system": "Pluto"
+ },
+ "SolNode78": {
+  "factionIndex": 1,
+  "missionIndex": 3,
+  "name": "Triton",
+  "system": "Neptune"
+ },
+ "SolNode79": {
+  "factionIndex": 0,
+  "missionIndex": 7,
+  "name": "Cambria",
+  "system": "Earth"
+ },
+ "SolNode81": {
+  "factionIndex": 1,
+  "missionIndex": 2,
+  "name": "Palus",
+  "system": "Pluto"
+ },
+ "SolNode82": {
+  "factionIndex": 0,
+  "missionIndex": 4,
+  "name": "Calypso",
+  "system": "Saturn"
+ },
+ "SolNode83": {
+  "factionIndex": 0,
+  "missionIndex": 9,
+  "name": "Cressida",
+  "system": "Uranus"
+ },
+ "SolNode84": {
+  "factionIndex": 1,
+  "missionIndex": 7,
+  "name": "Nereid",
+  "system": "Neptune"
+ },
+ "SolNode85": {
+  "factionIndex": 0,
+  "missionIndex": 13,
+  "name": "Gaia",
+  "system": "Earth"
+ },
+ "SolNode850": {
+  "factionIndex": 9,
+  "missionIndex": 40,
+  "name": "Legacyte Harvest",
+  "system": "H\u00f6llvania"
+ },
+ "SolNode851": {
+  "factionIndex": 8,
+  "missionIndex": 2,
+  "name": "Hell-Scrub: Scaldra",
+  "system": "H\u00f6llvania"
+ },
+ "SolNode852": {
+  "factionIndex": 9,
+  "missionIndex": 2,
+  "name": "Hell-Scrub: Techrot",
+  "system": "H\u00f6llvania"
+ },
+ "SolNode853": {
+  "factionIndex": 8,
+  "missionIndex": 1,
+  "name": "Exterminate: Scaldra",
+  "system": "H\u00f6llvania"
+ },
+ "SolNode854": {
+  "factionIndex": 9,
+  "missionIndex": 1,
+  "name": "Exterminate: Techrot",
+  "system": "H\u00f6llvania"
+ },
+ "SolNode855": {
+  "factionIndex": 8,
+  "missionIndex": 42,
+  "name": "Faceoff: Squad VS Squad",
+  "system": "H\u00f6llvania"
+ },
+ "SolNode856": {
+  "factionIndex": 8,
+  "missionIndex": 0,
+  "name": "Assassinate: H-09 Tank",
+  "system": "H\u00f6llvania"
+ },
+ "SolNode857": {
+  "factionIndex": 8,
+  "missionIndex": 42,
+  "name": "Faceoff: Single Squad",
+  "system": "H\u00f6llvania"
+ },
+ "SolNode858": {
+  "factionIndex": 8,
+  "missionIndex": 8,
+  "name": "Solstice Square",
+  "system": "H\u00f6llvania"
+ },
+ "SolNode87": {
+  "factionIndex": 1,
+  "missionIndex": 33,
+  "name": "Ganymede",
+  "system": "Jupiter"
+ },
+ "SolNode88": {
+  "factionIndex": 1,
+  "missionIndex": 4,
+  "name": "Adrastea",
+  "system": "Jupiter"
+ },
+ "SolNode89": {
+  "factionIndex": 0,
+  "missionIndex": 1,
+  "name": "Mariana",
+  "system": "Earth"
+ },
+ "SolNode9": {
+  "factionIndex": 0,
+  "missionIndex": 7,
+  "name": "Rosalind",
+  "system": "Uranus"
+ },
+ "SolNode902": {
+  "factionIndex": 1,
+  "missionIndex": 1,
+  "name": "Montes",
+  "system": "Venus"
+ },
+ "SolNode903": {
+  "factionIndex": 0,
+  "missionIndex": 9,
+  "name": "Erpo",
+  "system": "Earth"
+ },
+ "SolNode904": {
+  "factionIndex": 0,
+  "missionIndex": 1,
+  "name": "Syrtis",
+  "system": "Mars"
+ },
+ "SolNode905": {
+  "factionIndex": 1,
+  "missionIndex": 4,
+  "name": "Galilea",
+  "system": "Jupiter"
+ },
+ "SolNode906": {
+  "factionIndex": 0,
+  "missionIndex": 24,
+  "name": "Pandora",
+  "system": "Saturn"
+ },
+ "SolNode907": {
+  "factionIndex": 0,
+  "missionIndex": 13,
+  "name": "Caelus",
+  "system": "Uranus"
+ },
+ "SolNode908": {
+  "factionIndex": 1,
+  "missionIndex": 9,
+  "name": "Salacia",
+  "system": "Neptune"
+ },
+ "SolNode93": {
+  "factionIndex": 0,
+  "missionIndex": 9,
+  "name": "Keeler",
+  "system": "Saturn"
+ },
+ "SolNode94": {
+  "factionIndex": 2,
+  "missionIndex": 2,
+  "name": "Apollodorus",
+  "system": "Mercury"
+ },
+ "SolNode96": {
+  "factionIndex": 0,
+  "missionIndex": 2,
+  "name": "Titan",
+  "system": "Saturn"
+ },
+ "SolNode97": {
+  "factionIndex": 1,
+  "missionIndex": 7,
+  "name": "Amalthea",
+  "system": "Jupiter"
+ },
+ "SolNode98": {
+  "factionIndex": 0,
+  "missionIndex": 4,
+  "name": "Desdemona",
+  "system": "Uranus"
+ },
+ "SolNode99": {
+  "factionIndex": 0,
+  "missionIndex": 0,
+  "name": "War",
+  "system": "Mars"
+ }
+}

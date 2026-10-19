@@ -1,0 +1,1358 @@
+{
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyAimGlide": {
+  "description": "Kill |COUNT| Enemies while Aim Gliding",
+  "name": "Glider",
+  "required": 15,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyArtist": {
+  "description": "Customize a piece of Equipment's colors.",
+  "name": "Artist",
+  "required": 1,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyBuildersTouch": {
+  "description": "Claim an item from your Foundry.",
+  "name": "Builder\u2019s Touch",
+  "required": 1,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyBulletJump": {
+  "description": "Bullet Jump |COUNT| times.",
+  "name": "Trampoline",
+  "required": 150,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyCodexScan": {
+  "description": "Scan |COUNT| Objects or Enemies.",
+  "name": "Researcher",
+  "required": 15,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyCollectCredits": {
+  "description": "Pick up |COUNT| Credits.",
+  "name": "Saver",
+  "required": 15000,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyCompleteMission": {
+  "description": "Complete a Mission.",
+  "name": "Agent",
+  "required": 1,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyCompleteMissionMelee": {
+  "description": "Complete a Mission with only a Melee Weapon equipped",
+  "name": "Swordsman",
+  "required": 1,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyCompleteMissionPrimary": {
+  "description": "Complete a Mission with only a Primary Weapon equipped",
+  "name": "Hands Full",
+  "required": 1,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyCompleteMissionSecondary": {
+  "description": "Complete a Mission with only a Secondary Weapon equipped",
+  "name": "Sidearm",
+  "required": 1,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyDeployAirSupport": {
+  "description": "Deploy an Air Support Charge in a Mission",
+  "name": "Air It Out",
+  "required": 1,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyDeployGlyph": {
+  "description": "Deploy a Glyph while on a mission.",
+  "name": "Graffiti",
+  "required": 1,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyDeploySpecter": {
+  "description": "Deploy a Specter",
+  "name": "Doppelganger",
+  "required": 1,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyDonateLeverian": {
+  "description": "Donate to the Leverian",
+  "name": "Patron",
+  "required": 1,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyInteractWithPet": {
+  "description": "Interact with your Kubrow or Kavat",
+  "name": "Loyalty",
+  "required": 1,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyKillEnemies": {
+  "description": "Kill |COUNT| Enemies.",
+  "name": "Warning Shot",
+  "required": 200,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyKillEnemiesWhileOnKDrive": {
+  "description": "Kill |COUNT| enemies while riding a K-Drive, Kaithe, Velocipod, or Atomicycle.",
+  "name": "Thrill Rider",
+  "required": 20,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyKillEnemiesWithAbilities": {
+  "description": "Kill |COUNT| Enemies with Abilities.",
+  "name": "Power Trip",
+  "required": 150,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyKillEnemiesWithBlast": {
+  "description": "Kill |COUNT| Enemies with <DT_EXPLOSION>Blast Damage.",
+  "name": "Detonator",
+  "required": 150,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyKillEnemiesWithCorrosive": {
+  "description": "Kill |COUNT| Enemies with <DT_CORROSIVE>Corrosive Damage.",
+  "name": "Meltdown",
+  "required": 150,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyKillEnemiesWithElectricity": {
+  "description": "Kill |COUNT| Enemies with <DT_ELECTRICITY>Electricity Damage.",
+  "name": "Short Circuit",
+  "required": 150,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyKillEnemiesWithFinishers": {
+  "description": "Kill |COUNT| Enemies with Finishers.",
+  "name": "Executioner",
+  "required": 10,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyKillEnemiesWithFire": {
+  "description": "Kill |COUNT| Enemies with <DT_FIRE>Heat Damage.",
+  "name": "Arsonist",
+  "required": 150,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyKillEnemiesWithFreeze": {
+  "description": "Kill |COUNT| Enemies with <DT_FREEZE>Cold Damage.",
+  "name": "Deep Freeze",
+  "required": 150,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyKillEnemiesWithGas": {
+  "description": "Kill |COUNT| Enemies with <DT_GAS>Gas Damage.",
+  "name": "Biohazard",
+  "required": 150,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyKillEnemiesWithHeadshots": {
+  "description": "Kill |COUNT| Enemies with Headshots.",
+  "name": "Marksman",
+  "required": 40,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyKillEnemiesWithMagnetic": {
+  "description": "Kill |COUNT| Enemies with <DT_MAGNETIC>Magnetic Damage.",
+  "name": "Attractive",
+  "required": 150,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyKillEnemiesWithMelee": {
+  "description": "Kill |COUNT| Enemies with a Melee Weapon.",
+  "name": "Sword Dance",
+  "required": 150,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyKillEnemiesWithPoison": {
+  "description": "Kill |COUNT| Enemies with <DT_POISON>Toxin Damage.",
+  "name": "Poisoner",
+  "required": 150,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyKillEnemiesWithPrimary": {
+  "description": "Kill |COUNT| Enemies with a Primary Weapon.",
+  "name": "Mow Them Down",
+  "required": 150,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyKillEnemiesWithRadiation": {
+  "description": "Kill |COUNT| Enemies with <DT_RADIATION>Radiation Damage.",
+  "name": "Reactor",
+  "required": 150,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyKillEnemiesWithSecondary": {
+  "description": "Kill |COUNT| Enemies with a Secondary Weapon.",
+  "name": "Smaller is Bigger",
+  "required": 150,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyKillEnemiesWithViral": {
+  "description": "Kill |COUNT| Enemies with <DT_VIRAL>Viral Damage.",
+  "name": "Go Viral",
+  "required": 150,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyLiquidation": {
+  "description": "Sell any item in your Inventory for Credits.",
+  "name": "Liquidation",
+  "required": 1,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyMercyKill": {
+  "description": "Mercy Kill an Enemy",
+  "name": "No Mercy",
+  "required": 1,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyPickUpEnergy": {
+  "description": "Pick up |COUNT| Energy Orbs.",
+  "name": "Energizing",
+  "required": 20,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyPickUpMods": {
+  "description": "Pick up |COUNT| Mods.",
+  "name": "Shiny",
+  "required": 8,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyPlaceMarker": {
+  "description": "Mark |COUNT| Mods or Resources.",
+  "name": "Communicator",
+  "required": 5,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyPlayEmote": {
+  "description": "Play |COUNT| Emote.",
+  "name": "Expressive",
+  "required": 1,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailySlideKills": {
+  "description": "Kill |COUNT| Enemies while Sliding.",
+  "name": "Accelerator",
+  "required": 10,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailySuspendFiveEnemies": {
+  "description": "Suspend 5 or more enemies in the air at once with a Heavy Slam Melee Attack",
+  "name": "Deep Impact",
+  "required": 1,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailySwatter": {
+  "description": "Kill |COUNT| Drones or Ospreys with your Melee Weapon.",
+  "name": "Swatter",
+  "required": 3,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyThePersonalTouch": {
+  "description": "Place 1 decoration in your Orbiter.",
+  "name": "The Personal Touch",
+  "required": 1,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyToppingOffTheTank": {
+  "description": "Successfully defend an Excavator without allowing it to run out of power.",
+  "name": "Topping Off the Tank",
+  "required": 1,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyTransmuteMods": {
+  "description": "Complete |COUNT| Mod Transmutations",
+  "name": "Everything Old is New Again",
+  "required": 1,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyTwoForOne": {
+  "description": "Pierce and kill 2 or more enemies in a single Bow shot.",
+  "name": "Two for One",
+  "required": 1,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyVisitFeaturedDojo": {
+  "description": "Visit a Featured Dojo",
+  "name": "Just Visiting",
+  "required": 1,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Daily/SeasonDailyWholeArsenal": {
+  "description": "Get a kill with your Primary, Secondary, and Melee weapons within 10 seconds.",
+  "name": "Whole Arsenal",
+  "required": 1,
+  "standing": 1000
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyBeastSlayer": {
+  "description": "Defeat the Orowyrm",
+  "name": "Beast Slayer",
+  "required": 1,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyBloodthirsty": {
+  "description": "Kill 20 enemies in 5 seconds.",
+  "name": "Bloodthirsty",
+  "required": 1,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyBoardingPartyNoDamage": {
+  "description": "Clear a Railjack Boarding Party without your Warframe taking damage",
+  "name": "Flawless",
+  "required": 1,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyBowOffense": {
+  "description": "Kill |COUNT| enemies with a Primary Bow.",
+  "name": "Bow Offense",
+  "required": 150,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyCatchRarePlainsFish": {
+  "description": "Catch |COUNT| Rare Fish in the Plains of Eidolon.",
+  "name": "Earth Fisher",
+  "required": 3,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyCatchRareVenusFish": {
+  "description": "Catch |COUNT| Rare Servofish in the Orb Vallis.",
+  "name": "Venus Fisher",
+  "required": 3,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyCollectHundredResources": {
+  "description": "Collect |COUNT| Resources",
+  "name": "Gatherer",
+  "required": 4000,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyCollector": {
+  "description": "Collect |COUNT| resources from Duviri",
+  "name": "Collector",
+  "required": 100,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyCompleteAssassination": {
+  "description": "Complete |COUNT| Assassination missions.",
+  "name": "Assassin",
+  "required": 3,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyCompleteCapture": {
+  "description": "Complete |COUNT| Capture missions.",
+  "name": "Jailer",
+  "required": 3,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyCompleteClemMission": {
+  "description": "Help Clem with his weekly mission.",
+  "name": "Good Friend",
+  "required": 1,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyCompleteDisruptionConduits": {
+  "description": "Complete |COUNT| Conduits in Disruption",
+  "name": "Don't Blow It",
+  "required": 12,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyCompleteExterminate": {
+  "description": "Complete |COUNT| Exterminate missions.",
+  "name": "Eliminator",
+  "required": 3,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyCompleteInvasionMissions": {
+  "description": "Complete |COUNT| Invasion missions of any type.",
+  "name": "Invader",
+  "required": 6,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyCompleteKuva": {
+  "description": "Complete |COUNT| Kuva Siphon Missions",
+  "name": "Don't Fear The Reaper",
+  "required": 3,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyCompleteMobileDefense": {
+  "description": "Complete |COUNT| Mobile Defense missions.",
+  "name": "Protector",
+  "required": 3,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyCompleteNightmareMissions": {
+  "description": "Complete |COUNT| Nightmare missions of any type.",
+  "name": "Sound Sleeper",
+  "required": 3,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyCompleteRace": {
+  "description": "Play Ollie's Crash Course and complete a race",
+  "name": "Ollie Oop!",
+  "required": 1,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyCompleteRescue": {
+  "description": "Complete |COUNT| Rescue missions.",
+  "name": "Rescuer",
+  "required": 3,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyCompleteSabotage": {
+  "description": "Complete |COUNT| Sabotage missions.",
+  "name": "Saboteur",
+  "required": 3,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyCompleteSortie": {
+  "description": "Complete |COUNT| Sortie.",
+  "name": "Sortie Specialist",
+  "required": 1,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyCompleteSpy": {
+  "description": "Complete |COUNT| Spy missions.",
+  "name": "Operative",
+  "required": 3,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyCompleteSyndicateMissions": {
+  "description": "Complete |COUNT| Syndicate missions.",
+  "name": "Supporter",
+  "required": 5,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyCompleteTreasures": {
+  "description": "Look for Ayatan Treasures for Maroo in Maroo's Bazaar.",
+  "name": "Animator",
+  "required": 1,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyCompleteVenusRace": {
+  "description": "Complete a K-Drive race in Orb Vallis on Venus or in Cambion Drift on Deimos.",
+  "name": "Now Boarding",
+  "required": 1,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyDestroyCrewshipArtillery": {
+  "description": "Destroy a Crewship with Forward Artillery",
+  "name": "Forward Thinking",
+  "required": 1,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyFeedHelminth": {
+  "description": "Feed the Helminth any resource.",
+  "name": "Feed the Beast",
+  "required": 1,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyFinelyTuned": {
+  "description": "Play a Shawzin song activity in Duviri",
+  "name": "Finely Tuned",
+  "required": 1,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyHorsingAround": {
+  "description": "Fly your Kaithe for |COUNT| meters",
+  "name": "Horsing Around",
+  "required": 1500,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyIDecree": {
+  "description": "Collect |COUNT| Decrees in a single Duviri session, or run of The Circuit.",
+  "name": "I Decree",
+  "required": 15,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyIsolationBounties": {
+  "description": "Complete an Isolation Vault Bounty Mission in the Cambion Drift on Deimos.",
+  "name": "Vault Raider",
+  "required": 1,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyKillArchgunEnemies": {
+  "description": "Kill |COUNT| enemies with an Archgun",
+  "name": "Heavy Ordnance",
+  "required": 500,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyKillEnemiesInMech": {
+  "description": "Kill |COUNT| enemies with a Necramech.",
+  "name": "Necralizer",
+  "required": 100,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyKillEnemiesWithHeadshots": {
+  "description": "Kill |COUNT| Enemies with head shots.",
+  "name": "Not a Warning Shot",
+  "required": 100,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyKillThumper": {
+  "description": "Kill a Tusk Thumper in the Plains of Eidolon",
+  "name": "Tusk Thumpin'",
+  "required": 1,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyLoyalty": {
+  "description": "Gain a total of |COUNT| Standing across all Syndicate factions.",
+  "name": "Loyalty",
+  "required": 5000,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyMineRarePlainsResources": {
+  "description": "Mine |COUNT| Rare Gems or Ore in the Plains of Eidolon.",
+  "name": "Earth Miner",
+  "required": 3,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyMineRareVenusResources": {
+  "description": "Mine |COUNT| Rare Gems or Ore in the Orb Vallis.",
+  "name": "Venus Miner",
+  "required": 3,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyNightAndDay": {
+  "description": "Collect |COUNT| Vome or Fass Residue in the Cambion Drift.",
+  "name": "Night and Day",
+  "required": 10,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyOpenLockers": {
+  "description": "Open |COUNT| Lockers.",
+  "name": "Kleptomaniac",
+  "required": 30,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPerfectAnimalCapture": {
+  "description": "Complete |COUNT| different Perfect Animal Captures in Orb Vallis.",
+  "name": "Conservationist",
+  "required": 3,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentCompleteMissions": {
+  "description": "Complete |COUNT| missions",
+  "name": "Mission Complete",
+  "required": 15,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentCompleteMissions10": {
+  "description": "Complete |COUNT| missions",
+  "name": "Mission Complete X",
+  "required": 15,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentCompleteMissions11": {
+  "description": "Complete |COUNT| missions",
+  "name": "Mission Complete XI",
+  "required": 15,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentCompleteMissions12": {
+  "description": "Complete |COUNT| missions",
+  "name": "Mission Complete XII",
+  "required": 15,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentCompleteMissions13": {
+  "description": "Complete |COUNT| missions",
+  "name": "Mission Complete XIII",
+  "required": 15,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentCompleteMissions14": {
+  "description": "Complete |COUNT| missions",
+  "name": "Mission Complete XIV",
+  "required": 15,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentCompleteMissions15": {
+  "description": "Complete |COUNT| missions",
+  "name": "Mission Complete XV",
+  "required": 15,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentCompleteMissions16": {
+  "description": "Complete |COUNT| missions",
+  "name": "Mission Complete XVI",
+  "required": 15,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentCompleteMissions17": {
+  "description": "Complete |COUNT| missions",
+  "name": "Mission Complete XVII",
+  "required": 15,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentCompleteMissions18": {
+  "description": "Complete |COUNT| missions",
+  "name": "Mission Complete XVIII",
+  "required": 15,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentCompleteMissions19": {
+  "description": "Complete |COUNT| missions",
+  "name": "Mission Complete XIX",
+  "required": 15,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentCompleteMissions2": {
+  "description": "Complete |COUNT| missions",
+  "name": "Mission Complete II",
+  "required": 15,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentCompleteMissions20": {
+  "description": "Complete |COUNT| missions",
+  "name": "Mission Complete XX",
+  "required": 15,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentCompleteMissions21": {
+  "description": "Complete |COUNT| missions",
+  "name": "Mission Complete XXI",
+  "required": 15,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentCompleteMissions22": {
+  "description": "Complete |COUNT| missions",
+  "name": "Mission Complete XXII",
+  "required": 15,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentCompleteMissions23": {
+  "description": "Complete |COUNT| missions",
+  "name": "Mission Complete XXIII",
+  "required": 15,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentCompleteMissions24": {
+  "description": "Complete |COUNT| missions",
+  "name": "Mission Complete XXIV",
+  "required": 15,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentCompleteMissions25": {
+  "description": "Complete |COUNT| missions",
+  "name": "Mission Complete XXV",
+  "required": 15,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentCompleteMissions3": {
+  "description": "Complete |COUNT| missions",
+  "name": "Mission Complete III",
+  "required": 15,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentCompleteMissions4": {
+  "description": "Complete |COUNT| missions",
+  "name": "Mission Complete IV",
+  "required": 15,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentCompleteMissions5": {
+  "description": "Complete |COUNT| missions",
+  "name": "Mission Complete V",
+  "required": 15,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentCompleteMissions6": {
+  "description": "Complete |COUNT| missions",
+  "name": "Mission Complete VI",
+  "required": 15,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentCompleteMissions7": {
+  "description": "Complete |COUNT| missions",
+  "name": "Mission Complete VII",
+  "required": 15,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentCompleteMissions8": {
+  "description": "Complete |COUNT| missions",
+  "name": "Mission Complete VIII",
+  "required": 15,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentCompleteMissions9": {
+  "description": "Complete |COUNT| missions",
+  "name": "Mission Complete IX",
+  "required": 15,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEnemies": {
+  "description": "Kill |COUNT| enemies.",
+  "name": "Not A Warning Shot",
+  "required": 500,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEnemies10": {
+  "description": "Kill |COUNT| enemies.",
+  "name": "Not A Warning Shot X",
+  "required": 500,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEnemies11": {
+  "description": "Kill |COUNT| enemies.",
+  "name": "Not A Warning Shot XI",
+  "required": 500,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEnemies12": {
+  "description": "Kill |COUNT| enemies.",
+  "name": "Not A Warning Shot XII",
+  "required": 500,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEnemies13": {
+  "description": "Kill |COUNT| enemies.",
+  "name": "Not A Warning Shot XIII",
+  "required": 500,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEnemies14": {
+  "description": "Kill |COUNT| enemies.",
+  "name": "Not A Warning Shot XIV",
+  "required": 500,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEnemies15": {
+  "description": "Kill |COUNT| enemies.",
+  "name": "Not A Warning Shot XV",
+  "required": 500,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEnemies16": {
+  "description": "Kill |COUNT| enemies.",
+  "name": "Not A Warning Shot XVI",
+  "required": 500,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEnemies17": {
+  "description": "Kill |COUNT| enemies.",
+  "name": "Not A Warning Shot XVII",
+  "required": 500,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEnemies18": {
+  "description": "Kill |COUNT| enemies.",
+  "name": "Not A Warning Shot XVIII",
+  "required": 500,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEnemies19": {
+  "description": "Kill |COUNT| enemies.",
+  "name": "Not A Warning Shot XIX",
+  "required": 500,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEnemies2": {
+  "description": "Kill |COUNT| enemies.",
+  "name": "Not A Warning Shot II",
+  "required": 500,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEnemies20": {
+  "description": "Kill |COUNT| enemies.",
+  "name": "Not A Warning Shot XX",
+  "required": 500,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEnemies21": {
+  "description": "Kill |COUNT| enemies.",
+  "name": "Not A Warning Shot XXI",
+  "required": 500,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEnemies22": {
+  "description": "Kill |COUNT| enemies.",
+  "name": "Not A Warning Shot XXII",
+  "required": 500,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEnemies23": {
+  "description": "Kill |COUNT| enemies.",
+  "name": "Not A Warning Shot XXIII",
+  "required": 500,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEnemies24": {
+  "description": "Kill |COUNT| enemies.",
+  "name": "Not A Warning Shot XXIV",
+  "required": 500,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEnemies25": {
+  "description": "Kill |COUNT| enemies.",
+  "name": "Not A Warning Shot XXV",
+  "required": 500,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEnemies3": {
+  "description": "Kill |COUNT| enemies.",
+  "name": "Not A Warning Shot III",
+  "required": 500,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEnemies4": {
+  "description": "Kill |COUNT| enemies.",
+  "name": "Not A Warning Shot IV",
+  "required": 500,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEnemies5": {
+  "description": "Kill |COUNT| enemies.",
+  "name": "Not A Warning Shot V",
+  "required": 500,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEnemies6": {
+  "description": "Kill |COUNT| enemies.",
+  "name": "Not A Warning Shot VI",
+  "required": 500,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEnemies7": {
+  "description": "Kill |COUNT| enemies.",
+  "name": "Not A Warning Shot VII",
+  "required": 500,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEnemies8": {
+  "description": "Kill |COUNT| enemies.",
+  "name": "Not A Warning Shot VIII",
+  "required": 500,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEnemies9": {
+  "description": "Kill |COUNT| enemies.",
+  "name": "Not A Warning Shot IX",
+  "required": 500,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEximus": {
+  "description": "Kill |COUNT| Eximus.",
+  "name": "Eximus Eliminator",
+  "required": 30,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEximus10": {
+  "description": "Kill |COUNT| Eximus.",
+  "name": "Eximus Eliminator X",
+  "required": 30,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEximus11": {
+  "description": "Kill |COUNT| Eximus.",
+  "name": "Eximus Eliminator XI",
+  "required": 30,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEximus12": {
+  "description": "Kill |COUNT| Eximus.",
+  "name": "Eximus Eliminator XII",
+  "required": 30,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEximus13": {
+  "description": "Kill |COUNT| Eximus.",
+  "name": "Eximus Eliminator XIII",
+  "required": 30,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEximus14": {
+  "description": "Kill |COUNT| Eximus.",
+  "name": "Eximus Eliminator XIV",
+  "required": 30,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEximus15": {
+  "description": "Kill |COUNT| Eximus.",
+  "name": "Eximus Eliminator XV",
+  "required": 30,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEximus16": {
+  "description": "Kill |COUNT| Eximus.",
+  "name": "Eximus Eliminator XVI",
+  "required": 30,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEximus17": {
+  "description": "Kill |COUNT| Eximus.",
+  "name": "Eximus Eliminator XVII",
+  "required": 30,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEximus18": {
+  "description": "Kill |COUNT| Eximus.",
+  "name": "Eximus Eliminator XVIII",
+  "required": 30,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEximus19": {
+  "description": "Kill |COUNT| Eximus.",
+  "name": "Eximus Eliminator XIX",
+  "required": 30,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEximus2": {
+  "description": "Kill |COUNT| Eximus.",
+  "name": "Eximus Eliminator II",
+  "required": 30,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEximus20": {
+  "description": "Kill |COUNT| Eximus.",
+  "name": "Eximus Eliminator XX",
+  "required": 30,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEximus21": {
+  "description": "Kill |COUNT| Eximus.",
+  "name": "Eximus Eliminator XXI",
+  "required": 30,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEximus22": {
+  "description": "Kill |COUNT| Eximus.",
+  "name": "Eximus Eliminator XXII",
+  "required": 30,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEximus23": {
+  "description": "Kill |COUNT| Eximus.",
+  "name": "Eximus Eliminator XXIII",
+  "required": 30,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEximus24": {
+  "description": "Kill |COUNT| Eximus.",
+  "name": "Eximus Eliminator XXIV",
+  "required": 30,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEximus25": {
+  "description": "Kill |COUNT| Eximus.",
+  "name": "Eximus Eliminator XXV",
+  "required": 30,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEximus3": {
+  "description": "Kill |COUNT| Eximus.",
+  "name": "Eximus Eliminator III",
+  "required": 30,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEximus4": {
+  "description": "Kill |COUNT| Eximus.",
+  "name": "Eximus Eliminator IV",
+  "required": 30,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEximus5": {
+  "description": "Kill |COUNT| Eximus.",
+  "name": "Eximus Eliminator V",
+  "required": 30,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEximus6": {
+  "description": "Kill |COUNT| Eximus.",
+  "name": "Eximus Eliminator VI",
+  "required": 30,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEximus7": {
+  "description": "Kill |COUNT| Eximus.",
+  "name": "Eximus Eliminator VII",
+  "required": 30,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEximus8": {
+  "description": "Kill |COUNT| Eximus.",
+  "name": "Eximus Eliminator VIII",
+  "required": 30,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPermanentKillEximus9": {
+  "description": "Kill |COUNT| Eximus.",
+  "name": "Eximus Eliminator IX",
+  "required": 30,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPerplexed": {
+  "description": "Complete a puzzle in Duviri",
+  "name": "Perplexed",
+  "required": 1,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPickUpMedallion": {
+  "description": "Find |COUNT| Syndicate Medallions. You can search by yourself or with a squad.",
+  "name": "The Hunt is On",
+  "required": 10,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyPlainsBounties": {
+  "description": "Complete |COUNT| Bounties in the Plains of Eidolon.",
+  "name": "Earth Bounty Hunter",
+  "required": 3,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyRailjackMissions": {
+  "description": "Complete |COUNT| Railjack Missions",
+  "name": "Explorer",
+  "required": 3,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyRequiemTotem": {
+  "description": "Activate 3 Requiem Obelisks on Deimos.",
+  "name": "Ancient Obelisks",
+  "required": 3,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyRifleOffense": {
+  "description": "Kill |COUNT| enemies with a Primary Rifle.",
+  "name": "Rifle Offense",
+  "required": 150,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklySabotageCaches": {
+  "description": "Find |COUNT| caches across any mission.",
+  "name": "Cache Hunter",
+  "required": 6,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklySanctuaryOnslaught": {
+  "description": "Complete |COUNT| Zones of Sanctuary Onslaught.",
+  "name": "Test Subject",
+  "required": 8,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyShotgunOffense": {
+  "description": "Kill |COUNT| enemies with a Primary Shotgun.",
+  "name": "Shotgun Offense",
+  "required": 150,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklySimarisScan": {
+  "description": "Complete |COUNT| Scans for Cephalon Simaris.",
+  "name": "Sanctuary Researcher",
+  "required": 3,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklySkeletonsInTheCloset": {
+  "description": "Kill |COUNT| Dax enemies in Duviri",
+  "name": "Skeletons in the Closet",
+  "required": 50,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklySniperOffense": {
+  "description": "Kill |COUNT| enemies with a Primary Sniper Rifle.",
+  "name": "Sniper Offense",
+  "required": 150,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklySolveCiphers": {
+  "description": "Hack |COUNT| Consoles.",
+  "name": "Hacker",
+  "required": 10,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyTheOldWays": {
+  "description": "Complete 1 mission with only a single pistol and a glaive equipped.",
+  "name": "The Old Ways",
+  "required": 1,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyToAshes": {
+  "description": "Dissolve an Arcane for Vosfor.",
+  "name": "To Ashes",
+  "required": 1,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyUnlockDragonVaults": {
+  "description": "Unlock |COUNT| Dragon Key vaults on Deimos.",
+  "name": "Vault Looter",
+  "required": 4,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyUnlockRelics": {
+  "description": "Unlock |COUNT| Relics",
+  "name": "Unlock Relics",
+  "required": 3,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyUseForma": {
+  "description": "Polarize a Weapon, Companion, or Warframe (not in Simulacrum).",
+  "name": "Polarized",
+  "required": 1,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyVenusBounties": {
+  "description": "Complete |COUNT| Bounties in the Orb Vallis.",
+  "name": "Venus Bounty Hunter",
+  "required": 3,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/Weekly/SeasonWeeklyVoidNet": {
+  "description": "Collect |COUNT| Void Traces.",
+  "name": "Void Net",
+  "required": 30,
+  "standing": 4500
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardAntiquarian": {
+  "description": "Open one of each era/tier of Relic (Lith, Meso, Neo, Axi) |COUNT|.",
+  "name": "Antiquarian",
+  "required": 4,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardBattleHardened": {
+  "description": "Complete The Perita Rebellion with |COUNT| or more orders completed.",
+  "name": "Battle Hardened",
+  "required": 6,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardCeremonialEvolution": {
+  "description": "Activate the Incarnon Form of any Incarnon weapon in-mission |COUNT| times",
+  "name": "Ceremonial Evolution",
+  "required": 5,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardCollectUniqueResources": {
+  "description": "Collect |COUNT| different types of resources.",
+  "name": "Resource Scavenger",
+  "required": 20,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardCompleteArchonHunt": {
+  "description": "Complete an Archon Hunt.",
+  "name": "Archon Hunter",
+  "required": 1,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardCompleteConquest": {
+  "description": "Complete a run of Deep Archimedea or Temporal Archimedea",
+  "name": "Voluntary Specimen",
+  "required": 1,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardCompleteNightmareMissions": {
+  "description": "Complete |COUNT| Nightmare missions of any type.",
+  "name": "Night Terror",
+  "required": 5,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardCompleteSortie": {
+  "description": "Complete |COUNT| Sorties.",
+  "name": "Sortie Expert",
+  "required": 3,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardCompleteSteelPathMissions": {
+  "description": "Complete |COUNT| different Steel Path Missions.",
+  "name": "The Path Less Travelled",
+  "required": 5,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardElementaryMyDear": {
+  "description": "Complete |COUNT| successful Conversions in the Alchemy game mode.",
+  "name": "Elementary, My Dear",
+  "required": 3,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardEliteBeastSlayer": {
+  "description": "Defeat the Orowyrm in Steel Path",
+  "name": "Elite Beast Slayer",
+  "required": 1,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardEliteSanctuaryOnslaught": {
+  "description": "Complete |COUNT| Zones of Elite Sanctuary Onslaught.",
+  "name": "Elite Test Subject",
+  "required": 8,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardEternalGuardian": {
+  "description": "Complete |COUNT| Void Armageddon rounds.",
+  "name": "Eternal Guardian",
+  "required": 2,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardFallenAngel": {
+  "description": "Defeat |COUNT| Void Angels in the Zariman. ",
+  "name": "Fallen Angel",
+  "required": 3,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardFastCapture": {
+  "description": "Finish a Capture mission in less than 90 seconds",
+  "name": "Speedster",
+  "required": 1,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardFriendsDefense": {
+  "description": "Complete a Defense mission reaching at least Wave 12.",
+  "name": "Defense",
+  "required": 1,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardFriendsMirrorDefense": {
+  "description": "Defend both Mirror Defense objectives 3 times each in a single mission.",
+  "name": "Mirror, Mirror",
+  "required": 1,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardFriendsProfitTaker": {
+  "description": "Kill the Profit-Taker.",
+  "name": "Profit-Taker",
+  "required": 1,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardFriendsSurvival": {
+  "description": "Complete a Survival mission reaching at least 20 minutes.",
+  "name": "Survival",
+  "required": 1,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardGoingDown": {
+  "description": "Defeat Roathe in Descendia.",
+  "name": "Going Down",
+  "required": 1,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardHighGround": {
+  "description": "Close |COUNT| Ruptures in Void Flood",
+  "name": "High Ground",
+  "required": 12,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardHoldTheMushrooms": {
+  "description": "Collect |COUNT| mushrooms from the Deepmines.",
+  "name": "Hold the Mushrooms",
+  "required": 6,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardIndexWinStreak": {
+  "description": "Win 3 wagers in a row in one match of The Index.",
+  "name": "Day Trader",
+  "required": 1,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardKillEnemies": {
+  "description": "Kill |COUNT| Enemies.",
+  "name": "Kill Shot",
+  "required": 1500,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardKillEnemiesSteelPath": {
+  "description": "Kill |COUNT| Enemies on The Steel Path.",
+  "name": "Cold Steel",
+  "required": 1000,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardKillEximus": {
+  "description": "Kill |COUNT| Eximus.",
+  "name": "Eximus Executioner",
+  "required": 100,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardKillExploiterOrb": {
+  "description": "Kill the Exploiter Orb",
+  "name": "Nothing but Profit",
+  "required": 1,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardKillOrCaptureRainalyst": {
+  "description": "Kill or Capture an Eidolon Hydrolyst.",
+  "name": "Hydrolyst Hunter",
+  "required": 1,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardKillTank": {
+  "description": "Defeat an H-09 Efervon Tank",
+  "name": "Tanked",
+  "required": 1,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardKillThumper": {
+  "description": "Kill a Tusk Thumper Doma in the Plains of Eidolon",
+  "name": "Walk Without Rhythm",
+  "required": 1,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardKuvaSurvivalNoCapsules": {
+  "description": "Survive for over 20 minutes in Kuva Survival.",
+  "name": "Hold Your Breath",
+  "required": 1,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardLuaPuzzles": {
+  "description": "Complete |COUNT| Halls of Ascension on Lua.",
+  "name": "Ascendant",
+  "required": 4,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardRailjackMissions": {
+  "description": "Complete |COUNT| Railjack Missions",
+  "name": "Elite Explorer",
+  "required": 6,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardRiseOfTheMachine": {
+  "description": "Kill |COUNT| enemies using a Necramech without getting destroyed.",
+  "name": "Rise of the Machine",
+  "required": 300,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardSpiderHunt": {
+  "description": "Complete an Isleweaver Duviri Mission.",
+  "name": "Spider Hunt",
+  "required": 1,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardTerminated": {
+  "description": "Destroy |COUNT| Necramech vault guardians.",
+  "name": "Terminated",
+  "required": 3,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardTheManyMadeWhole": {
+  "description": "Exchange 10 Riven Slivers for a Riven Mod",
+  "name": "The Many Made Whole",
+  "required": 1,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardThePriceOfFreedom": {
+  "description": "Free one Captured Solaris using a Granum Crown.",
+  "name": "The Price of Freedom",
+  "required": 1,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardTreasureFromThePast": {
+  "description": "Complete a Netracell.",
+  "name": "Treasure From The Past",
+  "required": 1,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardUnlockRelics": {
+  "description": "Unlock |COUNT| Relics",
+  "name": "Unlock Relics",
+  "required": 10,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardVitalArbiter": {
+  "description": "Complete an Arbitration Mission",
+  "name": "Vital Arbiter",
+  "required": 1,
+  "standing": 7000
+ },
+ "/Lotus/Types/Challenges/Seasons/WeeklyHard/SeasonWeeklyHardZarimanBountyHunter": {
+  "description": "Complete |COUNT| Bounties in the Zariman.",
+  "name": "Zariman Bounty Hunter",
+  "required": 4,
+  "standing": 7000
+ }
+}
