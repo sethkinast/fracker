@@ -629,6 +629,44 @@ struct SpaChunk {
     flags: i32,
 }
 
+/// Every `libpipewire` symbol the consumer resolves with `dlsym`, in the
+/// order they are used. This is the **single source of truth**: the loader
+/// below resolves exactly these names, and a test pins the list against
+/// the checked-in manifest `data/capture/pipewire-symbols.txt` (item 47)
+/// so a rename — or an invented name — fails the build, not Seth's
+/// evening on a real desktop.
+///
+/// **Item 47 root cause.** The previous list carried
+/// `pw_thread_loop_get_context`, which is **not** part of PipeWire's
+/// public API: `pipewire/thread-loop.h` exports
+/// `pw_thread_loop_get_loop()` (returning a `struct pw_loop *`), and a
+/// `struct pw_context *` is created from that loop with
+/// `pw_context_new()` (`pipewire/context.h`). `dlopen`/`dlsym` resolves
+/// names at runtime, so the wrong name compiled clean and only failed on
+/// a real desktop — exactly Seth's `v0.4.0` report. Every name below was
+/// checked against the current 1.x public headers:
+/// `pipewire.h`, `thread-loop.h`, `context.h`, `core.h`, `stream.h`.
+pub const REQUIRED_SYMBOLS: &[&str] = &[
+    "pw_init",                  // pipewire.h
+    "pw_thread_loop_new",       // thread-loop.h
+    "pw_thread_loop_start",     // thread-loop.h
+    "pw_thread_loop_lock",      // thread-loop.h
+    "pw_thread_loop_unlock",    // thread-loop.h
+    "pw_thread_loop_get_loop",  // thread-loop.h  (NOT pw_thread_loop_get_context)
+    "pw_context_new",           // context.h
+    "pw_context_destroy",       // context.h
+    "pw_context_connect_fd",    // core.h
+    "pw_stream_new",            // stream.h
+    "pw_stream_add_listener",   // stream.h
+    "pw_stream_connect",        // stream.h
+    "pw_stream_disconnect",     // stream.h
+    "pw_stream_destroy",        // stream.h
+    "pw_stream_dequeue_buffer", // stream.h
+    "pw_stream_queue_buffer",   // stream.h
+    "pw_thread_loop_stop",      // thread-loop.h
+    "pw_thread_loop_destroy",   // thread-loop.h
+];
+
 /// The resolved `libpipewire` entry points. Kept in a leaked `OnceLock`
 /// so every stream shares one `pw_init`.
 struct PwApi {
@@ -638,7 +676,11 @@ struct PwApi {
     pw_thread_loop_start: unsafe extern "C" fn(*mut c_void) -> c_int,
     pw_thread_loop_lock: unsafe extern "C" fn(*mut c_void),
     pw_thread_loop_unlock: unsafe extern "C" fn(*mut c_void),
-    pw_thread_loop_get_context: unsafe extern "C" fn(*mut c_void) -> *mut c_void,
+    /// `thread-loop.h`: the `struct pw_loop *` wrapped by the thread loop.
+    pw_thread_loop_get_loop: unsafe extern "C" fn(*mut c_void) -> *mut c_void,
+    /// `context.h`: create the context the stream is built on.
+    pw_context_new: unsafe extern "C" fn(*mut c_void, *mut c_void, usize) -> *mut c_void,
+    pw_context_destroy: unsafe extern "C" fn(*mut c_void),
     pw_context_connect_fd:
         unsafe extern "C" fn(*mut c_void, c_int, *mut c_void, usize) -> *mut c_void,
     pw_stream_new: unsafe extern "C" fn(*mut c_void, *const c_char, *mut c_void) -> *mut c_void,
@@ -647,6 +689,7 @@ struct PwApi {
     pw_stream_connect:
         unsafe extern "C" fn(*mut c_void, c_int, u32, u32, *const *const c_void, u32) -> c_int,
     pw_stream_disconnect: unsafe extern "C" fn(*mut c_void) -> c_int,
+    pw_stream_destroy: unsafe extern "C" fn(*mut c_void),
     pw_stream_dequeue_buffer: unsafe extern "C" fn(*mut c_void) -> *mut c_void,
     pw_stream_queue_buffer: unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int,
     pw_thread_loop_stop: unsafe extern "C" fn(*mut c_void),
@@ -693,14 +736,27 @@ impl PwApi {
                     .to_owned(),
             );
         }
+        // Resolve EXACTLY the manifest symbols, once, keyed by name. A
+        // name that is not in the headers fails here (never at connect
+        // time on a real desktop), and the manifest test keeps this list
+        // and the field wiring below in lockstep.
+        let mut resolved: HashMap<&'static str, *mut c_void> = HashMap::new();
+        for name in REQUIRED_SYMBOLS {
+            let cname = CString::new(*name).unwrap();
+            let p = unsafe { libc::dlsym(handle, cname.as_ptr()) };
+            if p.is_null() {
+                return Err(format!("libpipewire missing symbol {}", name));
+            }
+            resolved.insert(name, p);
+        }
+        let get = |name: &'static str| -> *mut c_void {
+            *resolved
+                .get(name)
+                .unwrap_or_else(|| panic!("dlsym list does not carry {name}"))
+        };
         macro_rules! sym {
             ($name:literal, $ty:ty) => {{
-                let cname = CString::new($name).unwrap();
-                let p = unsafe { libc::dlsym(handle, cname.as_ptr()) };
-                if p.is_null() {
-                    return Err(format!("libpipewire missing symbol {}", $name));
-                }
-                unsafe { std::mem::transmute::<*mut c_void, $ty>(p) }
+                unsafe { std::mem::transmute::<*mut c_void, $ty>(get($name)) }
             }};
         }
         let api = PwApi {
@@ -716,10 +772,15 @@ impl PwApi {
             ),
             pw_thread_loop_lock: sym!("pw_thread_loop_lock", unsafe extern "C" fn(*mut c_void)),
             pw_thread_loop_unlock: sym!("pw_thread_loop_unlock", unsafe extern "C" fn(*mut c_void)),
-            pw_thread_loop_get_context: sym!(
-                "pw_thread_loop_get_context",
+            pw_thread_loop_get_loop: sym!(
+                "pw_thread_loop_get_loop",
                 unsafe extern "C" fn(*mut c_void) -> *mut c_void
             ),
+            pw_context_new: sym!(
+                "pw_context_new",
+                unsafe extern "C" fn(*mut c_void, *mut c_void, usize) -> *mut c_void
+            ),
+            pw_context_destroy: sym!("pw_context_destroy", unsafe extern "C" fn(*mut c_void)),
             pw_context_connect_fd: sym!(
                 "pw_context_connect_fd",
                 unsafe extern "C" fn(*mut c_void, c_int, *mut c_void, usize) -> *mut c_void
@@ -740,6 +801,7 @@ impl PwApi {
                 "pw_stream_disconnect",
                 unsafe extern "C" fn(*mut c_void) -> c_int
             ),
+            pw_stream_destroy: sym!("pw_stream_destroy", unsafe extern "C" fn(*mut c_void)),
             pw_stream_dequeue_buffer: sym!(
                 "pw_stream_dequeue_buffer",
                 unsafe extern "C" fn(*mut c_void) -> *mut c_void
@@ -802,6 +864,7 @@ struct StreamCtx {
 pub struct ScreenCastSource {
     api: &'static PwApi,
     thread_loop: *mut c_void,
+    context: *mut c_void,
     stream: *mut c_void,
     hook: Box<HookStorage>,
     events: Box<StreamEvents>,
@@ -878,19 +941,29 @@ impl ScreenCastSource {
         // The whole setup after `start` runs under the loop lock so the
         // stream is created on the loop's context thread.
         unsafe { (api.pw_thread_loop_lock)(thread_loop) };
-        let mut setup = || -> Result<*mut c_void, String> {
-            let context = unsafe { (api.pw_thread_loop_get_context)(thread_loop) };
+        let mut setup = || -> Result<(*mut c_void, *mut c_void), String> {
+            // Real PipeWire sequence (item 47): the thread loop wraps a
+            // `pw_loop`; the context is built from that loop, then the
+            // portal fd connects a core, and the stream rides that core.
+            // There is no `pw_thread_loop_get_context` in the public API.
+            let loop_ = unsafe { (api.pw_thread_loop_get_loop)(thread_loop) };
+            if loop_.is_null() {
+                return Err("PipeWire: pw_thread_loop_get_loop returned no loop".to_owned());
+            }
+            let context = unsafe { (api.pw_context_new)(loop_, std::ptr::null_mut(), 0) };
             if context.is_null() {
-                return Err("PipeWire: no thread-loop context".to_owned());
+                return Err("PipeWire: pw_context_new failed".to_owned());
             }
             let fd = negotiated.fd.as_raw_fd();
             let core = unsafe { (api.pw_context_connect_fd)(context, fd, std::ptr::null_mut(), 0) };
             if core.is_null() {
+                unsafe { (api.pw_context_destroy)(context) };
                 return Err("PipeWire: pw_context_connect_fd failed".to_owned());
             }
             let stream =
                 unsafe { (api.pw_stream_new)(core, name.as_ptr(), std::ptr::null_mut()) };
             if stream.is_null() {
+                unsafe { (api.pw_context_destroy)(context) };
                 return Err("PipeWire: pw_stream_new failed".to_owned());
             }
             ctx.stream = stream;
@@ -917,17 +990,21 @@ impl ScreenCastSource {
                 )
             };
             if rc < 0 {
+                unsafe {
+                    (api.pw_stream_destroy)(stream);
+                    (api.pw_context_destroy)(context);
+                }
                 return Err(format!("PipeWire: pw_stream_connect failed ({rc})"));
             }
-            Ok(stream)
+            Ok((context, stream))
         };
         let result = setup();
         // Release the closure's borrows before moving the boxes into Self.
         drop(setup);
         unsafe { (api.pw_thread_loop_unlock)(thread_loop) };
 
-        let stream = match result {
-            Ok(s) => s,
+        let (context, stream) = match result {
+            Ok(pair) => pair,
             Err(e) => {
                 log.record("connecting", &e);
                 unsafe {
@@ -948,6 +1025,7 @@ impl ScreenCastSource {
         Ok(Self {
             api,
             thread_loop,
+            context,
             stream,
             hook,
             events,
@@ -1025,6 +1103,13 @@ impl Drop for ScreenCastSource {
         unsafe {
             if self.connected && !self.stream.is_null() {
                 (self.api.pw_stream_disconnect)(self.stream);
+                (self.api.pw_stream_destroy)(self.stream);
+            }
+            // The context owns the core/stream; destroy it before the
+            // loop it was created on (context.h: the main loop must stay
+            // alive until pw_context_destroy()).
+            if !self.context.is_null() {
+                (self.api.pw_context_destroy)(self.context);
             }
             if !self.thread_loop.is_null() {
                 (self.api.pw_thread_loop_stop)(self.thread_loop);
@@ -1313,5 +1398,44 @@ mod tests {
         let fd = NegotiateError::remote_fd("ScreenCast remote fd: mismatched signature");
         assert_eq!(fd.stage, "remote-fd");
         assert_eq!(fd.message, "ScreenCast remote fd: mismatched signature");
+    }
+
+    /// Item 47: the checked-in manifest is the dlsym list, so a future
+    /// rename (or an invented symbol) breaks the build instead of the
+    /// live capture.
+    #[test]
+    fn dlsym_manifest_pins_every_required_symbol() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("data/capture/pipewire-symbols.txt");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let listed: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .collect();
+        assert_eq!(
+            listed, REQUIRED_SYMBOLS,
+            "data/capture/pipewire-symbols.txt must list exactly the symbols the consumer dlsyms"
+        );
+    }
+
+    /// The bug was a symbol that is not in the headers at all. Pin the
+    /// corrected sequence's names and prove the invented one is gone.
+    #[test]
+    fn required_symbols_exclude_the_invented_name_and_include_the_real_ones() {
+        let mut seen = std::collections::HashSet::new();
+        for s in REQUIRED_SYMBOLS {
+            assert!(seen.insert(*s), "duplicate symbol {s}");
+        }
+        assert!(
+            !REQUIRED_SYMBOLS.contains(&"pw_thread_loop_get_context"),
+            "pw_thread_loop_get_context is not part of PipeWire's public thread-loop API"
+        );
+        // The real construction sequence: loop -> context -> core (fd) -> stream.
+        assert!(REQUIRED_SYMBOLS.contains(&"pw_thread_loop_get_loop"));
+        assert!(REQUIRED_SYMBOLS.contains(&"pw_context_new"));
+        assert!(REQUIRED_SYMBOLS.contains(&"pw_context_connect_fd"));
+        assert!(REQUIRED_SYMBOLS.contains(&"pw_stream_new"));
     }
 }

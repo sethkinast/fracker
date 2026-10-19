@@ -12,13 +12,17 @@
 //!   namespace, so the host browser reaches loopback while nothing is
 //!   exposed off-box);
 //! - `GET /` serves the current report HTML, re-applying the stored ticks
-//!   (so they survive regenerations and are browser-independent);
+//!   (so they survive regenerations and are browser-independent) and
+//!   rendering the remembered active tab `checked` (thirteenth pass §2, so
+//!   the 60s meta-refresh no longer resets to First Crack);
 //! - `POST /tick` records one checkbox change server-side, keyed by item
 //!   id + in-game day;
+//! - `GET /tab/<slug>` records the active plan tab (the tab links carry
+//!   `?tab=<slug>`, which `GET /` also honours);
 //! - `GET /health` is a liveness probe.
 //!
 //! No outbound network is added: the server reads only the report file it
-//! is handed and the tick store in the app data dir.
+//! is handed and the tick/tab stores in the app data dir.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
@@ -28,6 +32,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::render::base64_encode;
+use crate::tabs::TabStore;
 use crate::ticks::TickStore;
 
 /// A running loopback server. Dropping it stops the accept loop.
@@ -65,11 +70,13 @@ impl Drop for PlanServer {
 /// the configured port; when it is already taken (or 0) an ephemeral
 /// port is used so the resident always comes up — the live URL is
 /// returned for the tray's Open action to read. `ticks_path` is where a
-/// checkbox change is persisted (the store of record).
+/// checkbox change is persisted (the store of record); `tabs_path` is
+/// where the active plan tab is persisted (thirteenth pass §2).
 pub fn serve(
     preferred_port: u16,
     report_path: PathBuf,
     ticks_path: PathBuf,
+    tabs_path: PathBuf,
     ticks: Arc<Mutex<TickStore>>,
 ) -> Result<PlanServer, String> {
     let listener = bind(preferred_port)?;
@@ -78,10 +85,19 @@ pub fn serve(
         .map_err(|e| format!("server local_addr: {e}"))?
         .port();
     let url = format!("http://127.0.0.1:{port}/");
+    let tabs = Arc::new(Mutex::new(TabStore::load(&tabs_path)));
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = stop.clone();
     let join = std::thread::spawn(move || {
-        accept_loop(listener, report_path, ticks_path, ticks, stop_thread)
+        accept_loop(
+            listener,
+            report_path,
+            ticks_path,
+            tabs_path,
+            ticks,
+            tabs,
+            stop_thread,
+        )
     });
     Ok(PlanServer {
         port,
@@ -106,7 +122,9 @@ fn accept_loop(
     listener: TcpListener,
     report_path: PathBuf,
     ticks_path: PathBuf,
+    tabs_path: PathBuf,
     ticks: Arc<Mutex<TickStore>>,
+    tabs: Arc<Mutex<TabStore>>,
     stop: Arc<AtomicBool>,
 ) {
     let _ = listener.set_nonblocking(true);
@@ -115,9 +133,11 @@ fn accept_loop(
             Ok((stream, _)) => {
                 let report = report_path.clone();
                 let ticks_file = ticks_path.clone();
+                let tabs_file = tabs_path.clone();
                 let store = ticks.clone();
+                let tab_store = tabs.clone();
                 std::thread::spawn(move || {
-                    let _ = handle(stream, &report, &ticks_file, &store);
+                    let _ = handle(stream, &report, &ticks_file, &tabs_file, &store, &tab_store);
                 });
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -134,7 +154,9 @@ fn handle(
     mut stream: TcpStream,
     report_path: &std::path::Path,
     ticks_path: &std::path::Path,
+    tabs_path: &std::path::Path,
     ticks: &Arc<Mutex<TickStore>>,
+    tabs: &Arc<Mutex<TabStore>>,
 ) -> std::io::Result<()> {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
@@ -173,11 +195,31 @@ fn handle(
     }
     let body = String::from_utf8_lossy(&body).into_owned();
 
-    let path = target.split(['?', '#']).next().unwrap_or("/");
+    let without_frag = target.split('#').next().unwrap_or("/");
+    let (path, query) = match without_frag.split_once('?') {
+        Some((p, q)) => (p, q),
+        None => (without_frag, ""),
+    };
     match (method.as_str(), path) {
         ("GET", "/") | ("GET", "/index.html") | ("GET", "/plan.html") => {
-            let (status, html) = plan_page(report_path, ticks);
+            // A `?tab=<slug>` on the page URL is a real-link selection; a
+            // valid one is recorded before the page renders checked.
+            if let Some(slug) = query_param(query, "tab") {
+                record_tab(tabs, tabs_path, &slug);
+            }
+            let (status, html) = plan_page(report_path, ticks, tabs);
             respond(&mut stream, status, "text/html; charset=utf-8", html.as_bytes())
+        }
+        ("GET", p) if p.starts_with("/tab/") => {
+            // The lightweight endpoint the tab links' JS enhancement uses:
+            // record and return 204 (no page reload), so tab switches are
+            // instant while still living server-side.
+            let slug = &p["/tab/".len()..];
+            if record_tab(tabs, tabs_path, slug) {
+                respond(&mut stream, "204 No Content", "text/plain", b"")
+            } else {
+                respond(&mut stream, "404 Not Found", "text/plain", b"unknown tab")
+            }
         }
         ("POST", "/tick") => respond(
             &mut stream,
@@ -190,11 +232,39 @@ fn handle(
     }
 }
 
+/// Record an active-tab slug (validated against the renderer's tabs) and
+/// persist it best-effort. Returns false for an unknown slug so the caller
+/// can answer 404 rather than quietly remember garbage.
+fn record_tab(tabs: &Arc<Mutex<TabStore>>, tabs_path: &std::path::Path, slug: &str) -> bool {
+    if crate::render::tab_id_for_slug(slug).is_none() {
+        return false;
+    }
+    if let Ok(mut store) = tabs.lock() {
+        store.set(slug);
+        let _ = store.save(tabs_path);
+    }
+    true
+}
+
+/// First `key=value` in an `application/x-www-form-urlencoded` query.
+fn query_param(query: &str, key: &str) -> Option<String> {
+    for pair in query.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            if k == key {
+                return Some(url_decode(v));
+            }
+        }
+    }
+    None
+}
+
 /// Re-read the report file for every request (so a regenerated page is
-/// always current) and splice the live ticks onto the `<body>` tag.
+/// always current), splice the live ticks onto the `<body>` tag, and mark
+/// the remembered tab `checked` (thirteenth pass §2).
 fn plan_page(
     report_path: &std::path::Path,
     ticks: &Arc<Mutex<TickStore>>,
+    tabs: &Arc<Mutex<TabStore>>,
 ) -> (&'static str, String) {
     let html = match std::fs::read_to_string(report_path) {
         Ok(h) => h,
@@ -203,6 +273,14 @@ fn plan_page(
     let day = body_day(&html).unwrap_or_default();
     let store = ticks.lock().map(|s| s.clone()).unwrap_or_default();
     let json = serde_json::to_string(&store).unwrap_or_else(|_| "{}".to_owned());
+    // The remembered slug maps to a radio id; unknown/empty falls back to
+    // the renderer's default (First Crack).
+    let active = tabs
+        .lock()
+        .ok()
+        .and_then(|t| crate::render::tab_id_for_slug(t.active()))
+        .unwrap_or("t1");
+    let html = inject_tab(&html, active);
     ("200 OK", inject_ticks(&html, &base64_encode(json.as_bytes()), &day))
 }
 
@@ -231,6 +309,24 @@ fn inject_ticks(html: &str, ticks_b64: &str, day: &str) -> String {
         }
     }
     html.to_owned()
+}
+
+/// Mark the remembered tab's radio `checked`, clearing the renderer's
+/// default First-Crack selection (thirteenth pass §2). Operates on the tab
+/// radios only (`id="tN"`), so every other element is untouched.
+fn inject_tab(html: &str, active_id: &str) -> String {
+    if !crate::render::TABS.iter().any(|(id, _, _)| *id == active_id) {
+        // Not a rendered tab: leave the page's default selection alone.
+        return html.to_owned();
+    }
+    let mut out = html.to_owned();
+    for (id, _, _) in crate::render::TABS {
+        out = out.replace(&format!("id=\"{id}\" checked"), &format!("id=\"{id}\""));
+    }
+    out.replace(
+        &format!("id=\"{active_id}\""),
+        &format!("id=\"{active_id}\" checked"),
+    )
 }
 
 /// Apply one checkbox change. Accepts JSON (`{"id","day","done"}`) or
@@ -407,8 +503,14 @@ mod tests {
         .unwrap();
         let ticks = Arc::new(Mutex::new(TickStore::default()));
         let ticks_path = TickStore::file(&dir);
-        let server = serve(0, report.clone(), ticks_path.clone(), ticks.clone())
-            .expect("server binds");
+        let server = serve(
+            0,
+            report.clone(),
+            ticks_path.clone(),
+            TabStore::file(&dir),
+            ticks.clone(),
+        )
+        .expect("server binds");
         let get = |path: &str| -> String {
             let mut s = TcpStream::connect(("127.0.0.1", server.port())).unwrap();
             write!(s, "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").unwrap();
@@ -458,6 +560,7 @@ mod tests {
             taken,
             dir.join("plan.html"),
             TickStore::file(&dir),
+            TabStore::file(&dir),
             Arc::new(Mutex::new(TickStore::default())),
         )
         .expect("falls back");
@@ -467,6 +570,100 @@ mod tests {
             "live port recorded when the preferred one is taken"
         );
         assert!(server.url().starts_with("http://127.0.0.1:"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- §2 tab persistence ----
+
+    fn http_get(port: u16, path: &str) -> String {
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write!(s, "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn inject_tab_moves_the_checked_radio() {
+        let html = "<input type=\"radio\" name=\"tab\" id=\"t1\" checked>\n\
+                    <input type=\"radio\" name=\"tab\" id=\"t2\">\n";
+        let out = inject_tab(html, "t2");
+        assert!(out.contains("id=\"t2\" checked"), "{out}");
+        assert!(!out.contains("id=\"t1\" checked"), "{out}");
+        assert_eq!(out.matches(" checked").count(), 1, "exactly one tab checked");
+        // An id that is not a rendered tab leaves the default untouched.
+        assert!(inject_tab(html, "tx").contains("id=\"t1\" checked"));
+    }
+
+    #[test]
+    fn query_param_decodes_and_ignores_unknown() {
+        assert_eq!(query_param("tab=hunt", "tab").as_deref(), Some("hunt"));
+        assert_eq!(
+            query_param("a=1&tab=first-crack&b=2", "tab").as_deref(),
+            Some("first-crack")
+        );
+        assert_eq!(query_param("other=x", "tab"), None);
+        assert_eq!(query_param("tab=a%20b", "tab").as_deref(), Some("a b"));
+    }
+
+    #[test]
+    fn active_tab_is_recorded_and_survives_a_restart() {
+        let dir = std::env::temp_dir().join(format!("fracker-tab-srv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let report = dir.join("plan.html");
+        std::fs::write(
+            &report,
+            "<!DOCTYPE html><html><body data-day=\"2026-10-18\">\
+             <input type=\"radio\" name=\"tab\" id=\"t1\" checked>\
+             <input type=\"radio\" name=\"tab\" id=\"t2\">\
+             <input type=\"radio\" name=\"tab\" id=\"t3\">\
+             <input type=\"radio\" name=\"tab\" id=\"t4\">\
+             <nav class=\"tabs\"><a class=\"tab\" data-tab=\"t2\" href=\"?tab=hunt\">Hunt</a></nav>\
+             <input type=\"checkbox\" data-id=\"chunk-1\"></body></html>",
+        )
+        .unwrap();
+        let tabs_path = TabStore::file(&dir);
+        let server = serve(
+            0,
+            report.clone(),
+            TickStore::file(&dir),
+            tabs_path.clone(),
+            Arc::new(Mutex::new(TickStore::default())),
+        )
+        .expect("server binds");
+
+        // Default serve: First Crack checked.
+        assert!(http_get(server.port(), "/").contains("id=\"t1\" checked"));
+
+        // The real tab link's URL is recorded and re-rendered checked.
+        let page = http_get(server.port(), "/?tab=hunt");
+        assert!(page.contains("id=\"t2\" checked"), "{page}");
+        assert!(!page.contains("id=\"t1\" checked"), "default cleared");
+
+        // The JS-enhancement endpoint records and answers 204.
+        assert!(http_get(server.port(), "/tab/backlog").contains("204"));
+        assert!(http_get(server.port(), "/").contains("id=\"t3\" checked"));
+
+        // An unknown slug is refused and never clobbers the remembered tab.
+        assert!(http_get(server.port(), "/tab/bogus").contains("404"));
+        assert!(http_get(server.port(), "/").contains("id=\"t3\" checked"));
+
+        // Persisted on disk ...
+        assert_eq!(TabStore::load(&tabs_path).active(), "backlog");
+        drop(server);
+
+        // ... so an app restart (a fresh server on the same store) still
+        // lands on Backlog.
+        let server2 = serve(
+            0,
+            report,
+            TickStore::file(&dir),
+            tabs_path,
+            Arc::new(Mutex::new(TickStore::default())),
+        )
+        .expect("restart binds");
+        assert!(http_get(server2.port(), "/").contains("id=\"t3\" checked"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

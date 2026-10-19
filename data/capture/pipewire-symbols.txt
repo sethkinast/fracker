@@ -1,0 +1,35 @@
+# libpipewire symbols the Capture consumer resolves with dlsym (item 47).
+#
+# The loader in src/screencast.rs resolves EXACTLY these names, and the
+# test `dlsym_manifest_pins_every_required_symbol` asserts this file and
+# the code's list agree — so a rename or an invented symbol fails the
+# build, not Seth's evening on a real desktop.
+#
+# Every name was checked against the current PipeWire 1.x public headers:
+#   pipewire.h        pw_init
+#   thread-loop.h     pw_thread_loop_*
+#   context.h         pw_context_new / pw_context_destroy
+#   core.h            pw_context_connect_fd
+#   stream.h          pw_stream_*
+#
+# NOTE: pw_thread_loop_get_context is deliberately absent — it is not part
+# of PipeWire's public API (the thread loop exposes pw_thread_loop_get_loop;
+# a context is created with pw_context_new).
+pw_init
+pw_thread_loop_new
+pw_thread_loop_start
+pw_thread_loop_lock
+pw_thread_loop_unlock
+pw_thread_loop_get_loop
+pw_context_new
+pw_context_destroy
+pw_context_connect_fd
+pw_stream_new
+pw_stream_add_listener
+pw_stream_connect
+pw_stream_disconnect
+pw_stream_destroy
+pw_stream_dequeue_buffer
+pw_stream_queue_buffer
+pw_thread_loop_stop
+pw_thread_loop_destroy

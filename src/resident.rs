@@ -47,7 +47,7 @@ use crate::report::{self, ReportConfig};
 use crate::state::AppState;
 use crate::tray::{FrackerTray, TrayCommand, TrayStatus};
 use crate::watch::LogWatcher;
-use crate::{elog, portal, screencast, server, ticks};
+use crate::{elog, portal, screencast, server, tabs, ticks};
 
 /// What asked for a report run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,10 +171,15 @@ pub async fn run(
     // leaves page_url unset and Open falls back to the file path.
     let tick_path = ticks::TickStore::file(&opts.state_dir);
     let tick_store = Arc::new(Mutex::new(ticks::TickStore::load(&tick_path)));
+    // Thirteenth pass §2: the served page remembers the active tab
+    // server-side so the 60s meta-refresh (and a restart) lands back where
+    // Seth was, not on First Crack.
+    let tab_path = tabs::TabStore::file(&opts.state_dir);
     let plan_server = match server::serve(
         opts.serve_port,
         opts.report.out.clone(),
         tick_path.clone(),
+        tab_path,
         tick_store.clone(),
     ) {
         Ok(s) => {
