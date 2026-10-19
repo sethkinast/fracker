@@ -391,8 +391,9 @@ fn header_html(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     ));
     h.push_str("</div>\n");
     h.push_str(&format!(
-        "<div class=\"stamp\">MR{mr} &middot; generated {} &middot; {}</div>\n",
+        "<div class=\"stamp\">MR{mr} &middot; generated {} &middot; {} &middot; {}</div>\n",
         esc(&ctx.generated_label),
+        esc(&ctx.world_status),
         esc(&ctx.targets_status),
     ));
     h.push_str("</header>\n");
@@ -934,7 +935,10 @@ fn routine_html(ctx: &RenderContext<'_>) -> String {
         }
     }
     h.push_str("</div>\n");
-    // Sortie: a single tick row with its reset time (unchanged tick key).
+    // "This week": the cadence checklist. Item 50a: the Sortie row (its
+    // own reset) belongs with the checklist items here, not in the Today
+    // standing block above — it is a cadence item, not a daily cap.
+    h.push_str("<h2>This week</h2>\n<div class=\"wkg\">\n");
     let sortie = &ctx.tuning.planner.sortie;
     let sortie_done = ctx.weekly_done.contains_key(&sortie.ledger_id);
     h.push_str(&format!(
@@ -946,8 +950,6 @@ fn routine_html(ctx: &RenderContext<'_>) -> String {
         reset = esc(&sortie.reset_label),
         proven = if sortie_done { " · log" } else { "" },
     ));
-    // "This week": the weeklies board.
-    h.push_str("<h2>This week</h2>\n<div class=\"wkg\">\n");
     for w in weekly_board(ctx.tuning) {
         let done_label = ctx.weekly_done.get(&w.id).cloned().unwrap_or_default();
         let done = !done_label.is_empty();
@@ -1570,6 +1572,12 @@ mod tests {
         assert!(p4.contains("Focus"), "focus under Routine");
         assert!(p4.contains("Ostron"), "family cap under Routine");
         assert!(p4.contains("sortie-daily"), "sortie tick key under Routine");
+        // Item 50a: the sortie row is a cadence-checklist item, not a daily
+        // cap — it lives inside the "This week" board, never the Today block.
+        let board = &p4[p4.find("class=\"wkg\"").expect("weekly board")..];
+        assert!(board.contains("sortie-daily"), "sortie row inside the cadence checklist");
+        let today = &p4[..p4.find("<h2>This week</h2>").expect("week header")];
+        assert!(!today.contains("sortie-daily"), "sortie row out of the Today standing block");
         assert!(p4.contains("Archon Hunt"), "weeklies under Routine");
         assert!(p4.contains("wk-archon"), "weekly tick key under Routine");
         assert!(!p1.contains(&t.planner.daily_caps.label_for("main")), "no standing on First Crack");
@@ -1651,7 +1659,7 @@ mod tests {
     fn least_important_weeklies_render_last() {
         let t = crate::tuning::Tuning::for_tests();
         let board = weekly_board(&t);
-        assert_eq!(board.len(), 16);
+        assert_eq!(board.len(), 14);
         let tail = &board[board.len() - 2..];
         assert!(tail.iter().all(|w| w.deprioritized));
         assert!(board[..board.len() - 2].iter().all(|w| !w.deprioritized));

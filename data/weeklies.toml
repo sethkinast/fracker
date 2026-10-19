@@ -84,7 +84,7 @@ obs = "manual"
 [[weekly]]
 id = "acrithis"
 name = "Acrithis"
-limit = "5 wares · Sun"
+limit = "5 wares · Mon"
 time = "2m"
 obs = "manual"
 
@@ -92,13 +92,6 @@ obs = "manual"
 id = "bird3"
 name = "Bird 3 shard"
 limit = "1/wk"
-time = "2m"
-obs = "manual"
-
-[[weekly]]
-id = "chipper"
-name = "Chipper shard"
-limit = "1/wk R5"
 time = "2m"
 obs = "manual"
 

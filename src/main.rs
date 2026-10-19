@@ -11,6 +11,7 @@
 //!
 //! `--ocr-ingest` is the one-shot inventory bootstrap (pass 5).
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -93,6 +94,13 @@ async fn main() {
         eprintln!("fracker: {e}");
         std::process::exit(1);
     }
+    // Deterministic resident exit (item 48): after the tray Quit the
+    // cooperative loop is done, but third-party D-Bus/socket tasks can
+    // still hold the tokio runtime open. Flush and exit explicitly so
+    // "Quit" always terminates the process.
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    std::process::exit(0);
 }
 
 /// `--demo`: self-contained review export (embedded ≤128px icons,

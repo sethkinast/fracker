@@ -6,7 +6,9 @@
 //! both the CLI (`--demo`) and the resident loop call [`generate`].
 //!
 //! Fail-soft chain (BRIEF: report endpoint failures, never die on them):
-//! world state falls back to `fixtures/worldstate.json`, the profile to
+//! DE's worldstate feed is the ONLY source (addendum #51) — a failed
+//! fetch renders as unavailable or as an explicitly-labeled stale cache
+//! view, never a silent substitution. The profile falls back to
 //! `fixtures/profile-<id>.json`. `offline` skips the network entirely and
 //! reads the recorded fixtures — that is how the headless smoke test and
 //! the integration test generate a REAL page hermetically.
@@ -35,7 +37,8 @@ pub const PROFILE_ACCOUNT_ID: &str = "5420fba23846322173707618";
 pub struct ReportConfig {
     /// Content tree (`data/`): tuning tables, backlog, seed caches, packs.
     pub data_dir: PathBuf,
-    /// Fallback fixture dir (`fixtures/worldstate.json`, profile).
+    /// Offline/fixture dir (`worldstate.json`, profile). Online mode never
+    /// substitutes a fixture for a failed DE fetch (addendum #51).
     pub fixtures: PathBuf,
     /// HTTP cache dir (world state / profile TTL caches).
     pub cache_dir: PathBuf,
@@ -155,37 +158,45 @@ pub async fn generate(
         }
     };
 
-    // 1. World state: live, else recorded fixture.
-    let (world_text, world_status) = match &client {
+    // 1. World state: DE is the ONLY source (addendum #51). No fallback
+    // chain and no silent substitution: a failed fetch renders as
+    // unavailable; the disk cache may serve only as an explicitly-labeled
+    // stale view. `fetched_live` is true only for a fresh HTTP 200.
+    let decodes = model::Decodes::load(&cfg.data_dir)?;
+    let (world_text, fetched_live) = match &client {
         Some(client) => match fetch::fetch_worldstate(client, &cfg.cache_dir).await {
-            Ok(fetched) => {
-                let text = std::fs::read_to_string(fetch::cache_file(
-                    &cfg.cache_dir,
-                    "worldstate.json",
-                ))
-                .map_err(|e| format!("reading recorded worldstate: {e}"))?;
-                (text, fetched.status.label())
-            }
+            Ok(fetched) => (fetched.value, fetched.status.is_live()),
             Err(e) => {
                 endpoint_failures.push(format!("worldstate: {e}"));
-                let path = cfg.fixtures.join("worldstate.json");
-                let text = std::fs::read_to_string(&path)
-                    .map_err(|e| format!("fixture worldstate {}: {e}", path.display()))?;
-                (text, "fixture".to_owned())
+                (String::new(), false)
             }
         },
         None => {
             let path = cfg.fixtures.join("worldstate.json");
             let text = std::fs::read_to_string(&path)
                 .map_err(|e| format!("fixture worldstate {}: {e}", path.display()))?;
-            (text, "fixture".to_owned())
+            (text, false)
         }
     };
-    let world = model::WorldState::from_json(&world_text)?;
+    let world = if world_text.trim().is_empty() {
+        model::WorldState::default()
+    } else {
+        model::WorldState::from_de_json(&world_text, &decodes)?
+    };
+    if !world.decode_gaps.is_empty() {
+        eprintln!(
+            "worldstate: {} undecoded key(s): {}",
+            world.decode_gaps.len(),
+            world.decode_gaps.join(", ")
+        );
+    }
     let now = world
         .timestamp
         .parse::<DateTime<Utc>>()
         .unwrap_or_else(|_| Utc::now());
+    // Freshness is judged by the payload's own Time against the render
+    // clock, not by the fetch time.
+    let world_status = model::worldstate_status_label(&world, Utc::now(), fetched_live);
 
     // 2. Reconciled backlog (profile-derived primes), exclusions applied.
     let backlog_path = data_file("backlog.json");
@@ -586,6 +597,13 @@ mod tests {
         assert_eq!(outcome.endpoints_label(), "offline (fixtures)");
         // Product page keeps CDN hotlinks (embedded_icons None).
         assert!(html.contains("cdn.warframestat.us"), "product page hotlinks icons");
+        // Addendum #51: the worldstate stamp is rendered and an offline
+        // fixture view is explicitly labeled STALE, never silently live.
+        assert!(
+            html.contains("worldstate STALE ("),
+            "worldstate freshness stamp is rendered"
+        );
+        assert!(!html.contains("worldstate live ("));
         // No leftover temp file after the atomic publish.
         assert!(!out.with_extension("html.tmp").exists());
         let _ = std::fs::remove_dir_all(&dir);

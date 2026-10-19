@@ -14,6 +14,10 @@ Refresh procedure:
    - `nightwave.json` ← the ExportNightwave slice inside
      ExportSortieRewards_en.json (226 challenges by uniqueName).
    - `mission_types.json` ← hand-seeded MT_* display table (see its _note).
+   - `hubs.json` ← evidenced hub locations only (TradeHUB1 = Varzia's
+     Maroo's Bazaar). EarthHUB (Baro) is intentionally absent: the relay
+     varies per visit and DE carries only the hub key, so it is displayed
+     raw and reported as a decode gap — never guessed.
 
 Note: a node's missionIndex is its default type; alerts/fissures carry
 their own MissionType per instance and override it.

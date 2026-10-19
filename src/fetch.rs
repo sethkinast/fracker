@@ -1,16 +1,21 @@
 //! HTTP fetchers for the §6 sources, each with on-disk cache + TTL.
 //! All fetches fail-soft to cache. HTTP via `reqwest` (rustls).
 //!
-//! TTLs (BRIEF §6): world state 5 min (during session), public profile
-//! 30 min, Xuerian `/api/load` 1 h, relic/drop data 7 days, WFCD items
-//! dataset 7 days.
+//! TTLs (BRIEF §6): public profile 30 min, Xuerian `/api/load` 1 h,
+//! relic/drop data 7 days, WFCD items dataset 7 days.
+//!
+//! Worldstate has NO TTL short-circuit (addendum #51): DE's feed is the
+//! only source, and freshness is judged by the payload's own `Time` at
+//! render, never by how recently we fetched. A failed fetch may serve the
+//! disk cache, but the report labels that view STALE.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use crate::model::{OwnedEquipment, RelicTables, Roster, Targets, WorldState};
+use crate::model::{OwnedEquipment, RelicTables, Roster, Targets};
 
-pub const WORLD_STATE_URL: &str = "https://api.warframestat.us/pc/";
+/// DE's own worldstate feed (same host family as the profile endpoint).
+pub const WORLD_STATE_URL: &str = "https://api.warframe.com/cdn/worldState.php";
 pub const PROFILE_URL: &str =
     "https://api.warframe.com/cdn/getProfileViewingData.php";
 pub const XUERIAN_LOAD_URL: &str = "https://wf.xuerian.net/api/load";
@@ -19,7 +24,6 @@ pub const XUERIAN_WISHLIST_URL: &str = "https://wf.xuerian.net/json/wishlist.jso
 /// WFCD items dataset (uniqueName -> display name, imageName, ...).
 pub const WFCD_ITEMS_URL: &str = "https://api.warframestat.us/items";
 
-pub const TTL_WORLD_STATE: Duration = Duration::from_secs(5 * 60);
 pub const TTL_PROFILE: Duration = Duration::from_secs(30 * 60);
 pub const TTL_XUERIAN: Duration = Duration::from_secs(60 * 60);
 pub const TTL_STATIC_DATA: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -106,39 +110,40 @@ pub fn client() -> Result<reqwest::Client, String> {
 // World state
 // ---------------------------------------------------------------------------
 
+/// Fetch DE's raw worldstate payload. Returns the body (the caller parses
+/// it with the baked decodes) and its fetch status. There is no TTL
+/// short-circuit: every report asks DE, and payload freshness is judged
+/// later from the body's `Time`. A network failure may fall back to the
+/// on-disk cache, which the caller must label STALE.
 pub async fn fetch_worldstate(
     client: &reqwest::Client,
     cache_dir: &Path,
-) -> Result<Fetched<WorldState>, String> {
-    let path = cache_file(cache_dir, "worldstate.json");
-    let fresh_enough = cache_age(&path).map(|a| a < TTL_WORLD_STATE).unwrap_or(false);
-    if fresh_enough {
-        if let Some(text) = read_cache(&path) {
-            if let Ok(ws) = WorldState::from_json(&text) {
-                return Ok(Fetched {
-                    value: ws,
-                    status: FetchStatus::Fresh,
-                });
-            }
-        }
-    }
+) -> Result<Fetched<String>, String> {
     match client.get(WORLD_STATE_URL).send().await {
         Ok(resp) => {
-            let resp = resp.error_for_status().map_err(|e| format!("worldstate: {e}"))?;
+            let resp = resp
+                .error_for_status()
+                .map_err(|e| format!("worldstate: {e}"))?;
             let text = resp.text().await.map_err(|e| format!("worldstate: {e}"))?;
-            let ws = WorldState::from_json(&text)?;
+            // Only cache a real DE payload (its `Time` is the freshness
+            // stamp). A proxy/error page must not masquerade as data.
+            let v: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|e| format!("worldstate (DE payload): {e}"))?;
+            if v.get("Time").is_none() {
+                return Err("worldstate (DE payload): missing Time".to_owned());
+            }
             write_cache(cache_dir, "worldstate.json", &text);
             Ok(Fetched {
-                value: ws,
+                value: text,
                 status: FetchStatus::Fresh,
             })
         }
         Err(e) => {
+            let path = cache_file(cache_dir, "worldstate.json");
             let cached = read_cache(&path)
                 .ok_or_else(|| format!("worldstate unreachable, no cache: {e}"))?;
-            let ws = WorldState::from_json(&cached)?;
             Ok(Fetched {
-                value: ws,
+                value: cached,
                 status: FetchStatus::CacheFallback {
                     reason: e.to_string(),
                 },
@@ -597,13 +602,13 @@ mod tests {
     #[test]
     fn freshness_math() {
         let now = SystemTime::now();
-        assert!(is_fresh(now, TTL_WORLD_STATE, now));
+        assert!(is_fresh(now, TTL_PROFILE, now));
         assert!(!is_fresh(
-            now - TTL_WORLD_STATE - Duration::from_secs(1),
-            TTL_WORLD_STATE,
+            now - TTL_PROFILE - Duration::from_secs(1),
+            TTL_PROFILE,
             now
         ));
-        assert!(!is_fresh(now + Duration::from_secs(60), TTL_WORLD_STATE, now));
+        assert!(!is_fresh(now + Duration::from_secs(60), TTL_PROFILE, now));
     }
 
     #[test]

@@ -133,11 +133,13 @@ const CURSOR_HIDDEN: u32 = 1;
 /// `persist_mode`: persist the restore token indefinitely (2).
 const PERSIST_INDEFINITELY: u32 = 2;
 
-/// A completed negotiation: the PipeWire remote fd plus the stream's
-/// advertised size and the (optionally refreshed) restore token.
+/// A completed negotiation: the PipeWire remote fd, the ScreenCast node
+/// the portal selected (the stream must connect to THIS node — a targetless
+/// connect errors "target not found"), and the (optionally refreshed)
+/// restore token.
 pub struct Negotiated {
     pub fd: OwnedFd,
-    pub size: (u32, u32),
+    pub node_id: u32,
     pub restore_token: Option<String>,
 }
 
@@ -217,7 +219,7 @@ pub async fn negotiate(restore_token: Option<String>) -> Result<Negotiated, Nego
         &(session.clone(), String::new(), opts),
     )
     .await?;
-    let size = parse_streams(results.get("streams").and_then(|v| v.try_clone().ok()))?;
+    let node_id = parse_streams(results.get("streams").and_then(|v| v.try_clone().ok()))?;
 
     // 4. OpenPipeWireRemote — returns the fd directly (no Response).
     //
@@ -259,7 +261,7 @@ pub async fn negotiate(restore_token: Option<String>) -> Result<Negotiated, Nego
 
     Ok(Negotiated {
         fd,
-        size,
+        node_id,
         restore_token,
     })
 }
@@ -323,12 +325,12 @@ where
     Ok(results)
 }
 
-/// Validate the `Start` response's `streams` (`a(ua{sv})`). A capture with
-/// zero streams is a failure (nothing to read), not a silent empty run.
-///
-/// The advertised `size` is only a hint; the authoritative dimensions come
-/// off each PipeWire buffer (see [`StreamCtx`]), so we do not parse it here.
-fn parse_streams(streams: Option<OwnedValue>) -> Result<(u32, u32), NegotiateError> {
+/// Extract the selected ScreenCast node id from the `Start` response's
+/// `streams` (`a(ua{sv})`). A capture with zero streams is a failure
+/// (nothing to read), not a silent empty run; a stream with no node id is
+/// also a failure — `pw_stream_connect` must target the node the portal
+/// selected or the remote errors "target not found" (item 49).
+fn parse_streams(streams: Option<OwnedValue>) -> Result<u32, NegotiateError> {
     let streams = streams
         .ok_or_else(|| NegotiateError::consent("ScreenCast Start returned no streams"))?;
     let arr = zbus::zvariant::Array::<'static>::try_from(streams)
@@ -338,7 +340,27 @@ fn parse_streams(streams: Option<OwnedValue>) -> Result<(u32, u32), NegotiateErr
             "ScreenCast Start selected no streams",
         ));
     }
-    Ok((0, 0))
+    // Each element is `(node_id, properties)`; take the first stream's id.
+    let first = arr
+        .inner()
+        .first()
+        .ok_or_else(|| NegotiateError::consent("ScreenCast streams: empty tuple"))?;
+    let structure = zbus::zvariant::Structure::try_from(first).map_err(|e| {
+        NegotiateError::consent(format!("ScreenCast stream tuple: {e}"))
+    })?;
+    let node = structure
+        .fields()
+        .first()
+        .ok_or_else(|| NegotiateError::consent("ScreenCast stream tuple has no node id"))?;
+    let node_id = u32::try_from(node).map_err(|e| {
+        NegotiateError::consent(format!("ScreenCast stream node id: {e}"))
+    })?;
+    if node_id == PW_ID_ANY {
+        return Err(NegotiateError::consent(
+            "ScreenCast Start returned a targetless stream",
+        ));
+    }
+    Ok(node_id)
 }
 
 /// Persist/read the ScreenCast restore token in app data.
@@ -829,21 +851,23 @@ const PW_ID_ANY: u32 = 0xffff_ffff;
 ///
 /// **AUTOCONNECT is required for a portal screencast** (ninth pass §1 root
 /// cause): `OpenPipeWireRemote` hands back a private PipeWire core whose
-/// single node is the screen being cast. With `target_id = PW_ID_ANY` and
-/// no AUTOCONNECT the input stream is created on the core but never linked
-/// to that node, so `pw_stream_connect` returns 0 while the stream sits
-/// idle forever: `process` never fires, no error state is entered, and the
-/// UI would block with no signal. The canonical portal consumer flags are
-/// `AUTOCONNECT | MAP_BUFFERS | (RT_PROCESS?)`, so the missing bit was the
-/// whole post-consent failure.
+/// single node is the screen being cast. Without AUTOCONNECT the input
+/// stream is created on the core but never linked to that node, so
+/// `pw_stream_connect` returns 0 while the stream sits idle forever:
+/// `process` never fires, no error state is entered, and the UI would
+/// block with no signal.
+///
+/// The connect target is the node id the portal selected in the `Start`
+/// reply's `streams` (item 49): a targetless connect errors "target not
+/// found". AUTOCONNECT still applies once the target is known.
 const PW_STREAM_FLAGS: u32 = (1 << 0) | (1 << 2) | (1 << 7);
 /// `PW_STREAM_STATE_ERROR`.
 const PW_STREAM_STATE_ERROR: i32 = -1;
 /// How long to wait for the first frame before declaring the stream
 /// unlinked. Consent is already granted by the time we connect, so a
 /// healthy stream delivers within a beat; this only exists so a stream
-/// that never links (e.g. the AUTOCONNECT bug above) surfaces in the tray
-/// instead of hanging the capture forever.
+/// that never links surfaces in the tray instead of hanging the capture
+/// forever.
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// State shared with the PipeWire callbacks. The pointers into `api` and
@@ -872,7 +896,6 @@ pub struct ScreenCastSource {
     rx: Receiver<GrayImage>,
     stop: Arc<AtomicBool>,
     err: Arc<Mutex<Option<String>>>,
-    size: (u32, u32),
     connected: bool,
     /// Deadline for the first frame; a stream that never links fails here
     /// instead of stalling the capture forever.
@@ -913,7 +936,7 @@ impl ScreenCastSource {
 
         let (tx, rx) = channel::<GrayImage>();
         let err = Arc::new(Mutex::new(None));
-        let size = negotiated.size;
+        let node_id = negotiated.node_id;
         let ctx = Box::new(StreamCtx {
             api,
             stream: std::ptr::null_mut(),
@@ -983,7 +1006,7 @@ impl ScreenCastSource {
                 (api.pw_stream_connect)(
                     stream,
                     PW_DIRECTION_INPUT,
-                    PW_ID_ANY,
+                    node_id,
                     PW_STREAM_FLAGS,
                     params.as_ptr(),
                     1,
@@ -1016,7 +1039,7 @@ impl ScreenCastSource {
         };
         log.record(
             "connecting",
-            "PipeWire stream connected (AUTOCONNECT); awaiting first frame",
+            &format!("PipeWire stream connected to node {node_id}; awaiting first frame"),
         );
         // The negotiated fd is now owned by PipeWire; leak the OwnedFd so
         // it is not double-closed (pw_context_connect_fd dup'd it).
@@ -1033,17 +1056,11 @@ impl ScreenCastSource {
             rx,
             stop,
             err,
-            size,
             connected: true,
             first_frame_deadline: Instant::now() + FIRST_FRAME_TIMEOUT,
             got_first: false,
             log,
         })
-    }
-
-    /// The server-advertised stream size (0,0 when the portal did not say).
-    pub fn advertised_size(&self) -> (u32, u32) {
-        self.size
     }
 }
 
@@ -1366,6 +1383,27 @@ mod tests {
         let arr = zbus::zvariant::Array::new(&sig);
         let empty = OwnedValue::try_from(Value::from(arr)).unwrap();
         assert!(parse_streams(Some(empty)).is_err());
+    }
+
+    /// Item 49: the node id in the `Start` reply's `streams` is the target
+    /// `pw_stream_connect` must use. Build the real `a(ua{sv})` shape and
+    /// prove we read the id (and reject a targetless `PW_ID_ANY` stream).
+    #[test]
+    fn parse_streams_reads_the_selected_node_id() {
+        fn streams(nodes: &[u32]) -> OwnedValue {
+            let sig = zbus::zvariant::Signature::try_from("(ua{sv})").unwrap();
+            let mut arr = zbus::zvariant::Array::new(&sig);
+            for &n in nodes {
+                let props = std::collections::HashMap::<String, Value>::new();
+                arr.append(Value::from((n, props))).unwrap();
+            }
+            OwnedValue::try_from(Value::from(arr)).unwrap()
+        }
+        assert_eq!(parse_streams(Some(streams(&[7]))).unwrap(), 7);
+        // A real portal reply can carry several streams; the first is ours.
+        assert_eq!(parse_streams(Some(streams(&[3, 9]))).unwrap(), 3);
+        // A targetless stream is a failure, not a silent no-op connect.
+        assert!(parse_streams(Some(streams(&[PW_ID_ANY]))).is_err());
     }
 
     #[test]

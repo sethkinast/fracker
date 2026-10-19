@@ -1,11 +1,13 @@
-//! Golden tests: recorded live world state (`fixtures/worldstate.json`,
-//! captured 2026-10-16T02:51:24Z from https://api.warframestat.us/pc/)
-//! + the reconciled backlog (`data/backlog.json`: 64 unmastered primes,
-//! profile-derived, NOT raw Xuerian wants) + the live profile fixture
-//! (`fixtures/profile-5420fba23846322173707618.json`) + UNKNOWN stock.
+//! Golden tests: DE's recorded world state (`fixtures/worldstate.json`,
+//! captured 2026-10-19T05:16:44Z from
+//! https://api.warframe.com/cdn/worldState.php) parsed with the baked
+//! decode tables + the reconciled backlog (`data/backlog.json`: 63
+//! unmastered primes, profile-derived, NOT raw Xuerian wants) + the live
+//! profile fixture (`fixtures/profile-5420fba23846322173707618.json`) +
+//! UNKNOWN stock.
 //!
-//! Set FRACKER_REFRESH_FIXTURES=1 to re-record the world-state fixture
-//! from the live API before asserting (network-optional; default runs
+//! Set FRACKER_REFRESH_FIXTURES=1 to re-record the DE world-state fixture
+//! from the live feed before asserting (network-optional; default runs
 //! offline).
 
 use std::collections::{HashMap, HashSet};
@@ -13,7 +15,7 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use fracker::model::{
-    Backlog, OwnedEquipment, RelicStock, RelicTables, Roster, WorldState,
+    Backlog, Decodes, OwnedEquipment, RelicStock, RelicTables, Roster, WorldState,
 };
 use fracker::plan::{self, ActionKind, PlanInput};
 
@@ -21,10 +23,18 @@ fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// Planner "now" just after the fixture capture: alerts/fissures
-/// expiring imminently exercise the expiry cascade deterministically.
+fn world_from_fixture() -> WorldState {
+    let world_text =
+        std::fs::read_to_string(root().join("fixtures/worldstate.json")).unwrap();
+    let decodes = Decodes::load(&root().join("data")).unwrap();
+    WorldState::from_de_json(&world_text, &decodes).unwrap()
+}
+
+/// Planner "now" just after the DE payload's `Time` (2026-10-19T05:16:44Z):
+/// alerts/fissures expiring imminently exercise the expiry cascade
+/// deterministically.
 fn golden_now() -> DateTime<Utc> {
-    "2026-10-16T02:55:00Z".parse().unwrap()
+    "2026-10-19T05:17:00Z".parse().unwrap()
 }
 
 struct Golden {
@@ -33,9 +43,7 @@ struct Golden {
 }
 
 fn golden_plan_recompute() -> Golden {
-    let world_text =
-        std::fs::read_to_string(root().join("fixtures/worldstate.json")).unwrap();
-    let world = WorldState::from_json(&world_text).unwrap();
+    let world = world_from_fixture();
     let backlog_text =
         std::fs::read_to_string(root().join("data/backlog.json")).unwrap();
     let backlog = Backlog::from_json(&backlog_text).unwrap();
@@ -88,20 +96,19 @@ fn golden_plan_recompute() -> Golden {
 
 #[test]
 fn golden_fixture_parses_with_live_content() {
-    let text =
-        std::fs::read_to_string(root().join("fixtures/worldstate.json")).unwrap();
-    let world = WorldState::from_json(&text).unwrap();
+    let world = world_from_fixture();
     assert!(!world.fissures.is_empty(), "recorded fissures");
     assert!(!world.alerts.is_empty(), "recorded alerts");
     assert!(world.vault_trader.is_some(), "recorded Varzia rotation");
     assert!(world.nightwave.is_some(), "recorded nightwave");
     assert!(world.sortie.is_some(), "recorded sortie");
+    assert!(world.archon.is_some(), "recorded Archon Hunt");
     // Taubound tier-1 needs the nested reward counted items + events.
     assert!(
         world.alerts.iter().any(|a| !a.mission.counted_items().is_empty()),
         "alert payouts parse from reward.countedItems"
     );
-    assert!(!world.events.is_empty(), "recorded events (Contegorus gate)");
+    assert!(!world.events.is_empty(), "recorded goals (Contegorus gate)");
 }
 
 #[test]
@@ -263,9 +270,7 @@ fn golden_donow_views_match_live_feed() {
 fn golden_page_shows_pass4_sections_and_pool_bars() {
     use fracker::render::{DailyRender, RenderContext};
     let root = root();
-    let world_text =
-        std::fs::read_to_string(root.join("fixtures/worldstate.json")).unwrap();
-    let world = WorldState::from_json(&world_text).unwrap();
+    let world = world_from_fixture();
     let profile_text = std::fs::read_to_string(
         root.join("fixtures/profile-5420fba23846322173707618.json"),
     )
@@ -312,12 +317,12 @@ fn golden_page_shows_pass4_sections_and_pool_bars() {
     let html = fracker::render::render_plan(&g.plan, &ctx);
     // Event section live with countdowns; gift section hidden.
     assert!(html.contains(&tuning.planner.alert_sections.event_header));
-    assert!(html.contains("<b>Nimus</b>"));
+    assert!(html.contains("<b>Naeglar</b>"));
     assert!(html.contains("Eris"));
     assert!(!html.contains(&tuning.planner.alert_sections.lotus_header));
     // Rotation element + act descriptions + trader hidden.
     assert!(html.contains("Ivara Prime"));
-    assert!(html.contains("Kill 10 Enemies while Sliding"));
+    assert!(html.contains("Kill 3 Drones or Ospreys with your Melee Weapon."));
     assert!(!html.contains("card vendor\">"));
     // Per-pool caps: Focus + the bare shared pool + 12 families, no
     // PvP; the visible number is compact, the raw value rides data-left
@@ -365,6 +370,12 @@ fn golden_page_shows_pass4_sections_and_pool_bars() {
     assert!(routine.contains("Archon Hunt"), "weeklies render under Routine");
     assert!(routine.contains("wk-archon"), "weekly tick key lives under Routine");
     assert!(routine.contains("sortie-daily"), "sortie tick key lives under Routine");
+    // Item 50a: the sortie row sits in the cadence checklist ("This week"
+    // board), not the Today standing block.
+    let board = &routine[routine.find("class=\"wkg\"").expect("weekly board")..];
+    assert!(board.contains("sortie-daily"), "sortie row inside the cadence checklist");
+    let today = &routine[..routine.find("<h2>This week</h2>").expect("week header")];
+    assert!(!today.contains("sortie-daily"), "sortie row out of the Today standing block");
     assert!(!first_crack.contains("Focus"), "no standing/focus on First Crack");
     assert!(!first_crack.contains("Syndicates"), "no standing on First Crack");
     assert!(!first_crack.contains("Archon Hunt"), "no weeklies on First Crack");
@@ -435,7 +446,7 @@ fn golden_unknown_stock_labels_if_you_have_it() {
     );
 }
 
-/// Re-record the world-state fixture from the live API. No-op unless
+/// Re-record the world-state fixture from DE's live feed. No-op unless
 /// FRACKER_REFRESH_FIXTURES=1 (keeps the suite green offline).
 #[tokio::test]
 async fn refresh_worldstate_fixture() {
@@ -444,7 +455,7 @@ async fn refresh_worldstate_fixture() {
     }
     let client = reqwest::Client::new();
     let text = client
-        .get("https://api.warframestat.us/pc/")
+        .get(fracker::fetch::WORLD_STATE_URL)
         .send()
         .await
         .unwrap()
@@ -454,6 +465,7 @@ async fn refresh_worldstate_fixture() {
         .await
         .unwrap();
     let v: serde_json::Value = serde_json::from_str(&text).unwrap();
-    assert!(!v["fissures"].as_array().unwrap().is_empty());
+    assert!(v.get("Time").is_some(), "DE payload carries Time");
+    assert!(!v["Alerts"].as_array().unwrap().is_empty());
     std::fs::write(root().join("fixtures/worldstate.json"), &text).unwrap();
 }

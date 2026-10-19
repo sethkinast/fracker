@@ -199,8 +199,9 @@ pub struct MissionInfo {
     /// Raw faction (`FC_INFESTATION`, …).
     #[serde(default)]
     pub faction: String,
-    /// Internal node (`SolNode175`); NOT comparable to a worldstate
-    /// display node (`Nimus (Eris)`), so it is not used for matching.
+    /// Internal node (`SolNode175`). EE.log and DE both speak these keys,
+    /// so alert matching compares them exactly where both sides carry one
+    /// (addendum #51 bonus); display nodes are never compared.
     #[serde(default)]
     pub location: String,
     /// `missionReward.countedItems[].ItemType` uniqueNames.
@@ -273,16 +274,17 @@ const ACTIVATION_EPSILON_SECS: i64 = 120;
 impl MissionCompletion {
     /// A positive identity match against a worldstate alert — never
     /// inferred. Matches when the alert ids are equal, or when the event
-    /// tag agrees AND the mission types normalize equal, or when the tag
-    /// agrees AND a payout resource uniqueName is shared. Node is
-    /// deliberately NOT compared (the log's node is internal).
+    /// tag agrees AND (the internal SolNode location is equal, or the
+    /// mission types normalize equal, or a payout resource uniqueName is
+    /// shared). Display nodes are never compared.
     ///
-    /// Twelfth-pass §4 (instance-strict): the weaker corroboration paths
-    /// (tag+type, tag+reward) additionally require the completion's
-    /// observed time to fall at/after the alert's activation (minus a
-    /// small clock-skew epsilon). A same-tag completion from a *previous*
-    /// alert instance can therefore never strike today's alert. The exact
-    /// `alertId` path is instance identity already and stays as-is.
+    /// Twelfth-pass §4 (instance-strict): every corroboration path
+    /// (tag+node, tag+type, tag+reward) additionally requires the
+    /// completion's observed time to fall at/after the alert's activation
+    /// (minus a small clock-skew epsilon). A same-tag completion from a
+    /// *previous* alert instance can therefore never strike today's alert.
+    /// The exact `alertId` path is instance identity already and stays
+    /// as-is.
     pub fn matches_alert(&self, alert: &crate::model::Alert) -> bool {
         let info = &self.info;
         if !info.alert_id.is_empty() && !alert.id.is_empty() && info.alert_id == alert.id {
@@ -295,6 +297,14 @@ impl MissionCompletion {
             !info.alert_tag.is_empty() && info.alert_tag.eq_ignore_ascii_case(&alert.tag);
         if !tag_eq {
             return false;
+        }
+        // Addendum #51 bonus: EE.log and DE both carry SolNode keys, so an
+        // exact internal-node match is positive instance evidence.
+        if !info.location.is_empty()
+            && !alert.mission.sol_node.is_empty()
+            && info.location.eq_ignore_ascii_case(&alert.mission.sol_node)
+        {
+            return true;
         }
         let mine = mission_type_key(&info.mission_type);
         let theirs = mission_type_key(&alert.mission.mission_type);
@@ -938,6 +948,41 @@ mod tests {
         assert!(c2.matches_alert(&alert("", "RoadToTauEvent", "Mobile Defense")));
         // A different tag with no id or type match never strikes.
         assert!(!completion.matches_alert(&alert("", "SomeOtherEvent", "Survival")));
+    }
+
+    #[test]
+    fn sol_node_is_exact_positive_evidence_for_alert_completion() {
+        // Addendum #51 bonus: EE.log and DE both speak SolNode keys, so an
+        // exact internal-node match corroborates the alert instance (the
+        // activation guard still applies); a different SolNode does not.
+        use crate::model::{Alert, AlertMission};
+        let completion = MissionCompletion {
+            info: MissionInfo {
+                alert_tag: "RoadToTauEvent".to_owned(),
+                location: "SolNode175".to_owned(),
+                mission_type: "MT_SOMETHING".to_owned(),
+                ..Default::default()
+            },
+            day: "2026-10-17".to_owned(),
+            observed_at: "2026-10-17T12:00:00Z".to_owned(),
+        };
+        let alert = |sol_node: &str| Alert {
+            tag: "RoadToTauEvent".to_owned(),
+            activation: "2026-10-17T11:00:00Z".to_owned(),
+            mission: AlertMission {
+                node: "Naeglar (Eris)".to_owned(),
+                sol_node: sol_node.to_owned(),
+                mission_type: "MT_HIVE".to_owned(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(completion.matches_alert(&alert("SolNode175")));
+        assert!(!completion.matches_alert(&alert("SolNode999")));
+        // The activation guard still gates the node path.
+        let mut early = alert("SolNode175");
+        early.activation = "2026-10-18T00:00:00Z".to_owned();
+        assert!(!completion.matches_alert(&early));
     }
 
     /// Twelfth-pass §4 (instance-strict): a corroboration-only match must

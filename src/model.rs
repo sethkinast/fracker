@@ -540,8 +540,254 @@ impl Targets {
 }
 
 // ---------------------------------------------------------------------------
-// World state subset (api.warframestat.us)
+// World state (DE's own feed: api.warframe.com/cdn/worldState.php)
+//
+// Addendum #51: DE is the ONLY source. The app parses DE's raw schema into
+// this model using decode tables baked under `data/decode/` (fetched at
+// data-refresh time, never at runtime). No second source, no silent
+// substitution: a failed fetch renders as unavailable/stale in the report
+// stamp. The legacy warframestat endpoint is gone.
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct NodeDecode {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub system: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct NightwaveDecode {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub required: u32,
+    #[serde(default)]
+    pub standing: u32,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MissionTypeDecode {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub observed: bool,
+}
+
+/// Baked decode dictionaries (addendum #51). Loaded once per report run
+/// from `data/decode/`; the app never fetches these at runtime.
+#[derive(Debug, Clone, Default)]
+pub struct Decodes {
+    /// `SolNode*` -> display name + system.
+    pub nodes: HashMap<String, NodeDecode>,
+    /// Nightwave challenge uniqueName -> name/description/required/standing.
+    pub nightwave: HashMap<String, NightwaveDecode>,
+    /// `MT_*` -> display name.
+    pub mission_types: HashMap<String, MissionTypeDecode>,
+    /// Hub node key -> display location (evidenced entries only).
+    pub hubs: HashMap<String, String>,
+}
+
+impl Decodes {
+    pub fn load(data_dir: &std::path::Path) -> Result<Self, String> {
+        let read = |name: &str| -> Result<String, String> {
+            let path = data_dir.join("decode").join(name);
+            std::fs::read_to_string(&path)
+                .map_err(|e| format!("decode {}: {e}", path.display()))
+        };
+        // mission_types.json carries a `_note` string alongside the MT
+        // entries; skip any non-object/underscore key rather than failing.
+        let mission_types: HashMap<String, MissionTypeDecode> =
+            serde_json::from_str::<HashMap<String, serde_json::Value>>(&read(
+                "mission_types.json",
+            )?)
+            .map_err(|e| format!("decode mission_types: {e}"))?
+            .into_iter()
+            .filter(|(k, _)| !k.starts_with('_'))
+            .filter_map(|(k, v)| {
+                serde_json::from_value(v)
+                    .ok()
+                    .map(|d| (k, d))
+            })
+            .collect();
+        Ok(Self {
+            nodes: serde_json::from_str(&read("nodes.json")?)
+                .map_err(|e| format!("decode nodes: {e}"))?,
+            nightwave: serde_json::from_str(&read("nightwave.json")?)
+                .map_err(|e| format!("decode nightwave: {e}"))?,
+            mission_types,
+            hubs: serde_json::from_str(&read("hubs.json")?)
+                .map_err(|e| format!("decode hubs: {e}"))?,
+        })
+    }
+
+    pub fn node(&self, key: &str) -> Option<&NodeDecode> {
+        self.nodes.get(key)
+    }
+
+    pub fn mission_type(&self, key: &str) -> Option<&str> {
+        self.mission_types.get(key).map(|d| d.name.as_str())
+    }
+
+    pub fn hub(&self, key: &str) -> Option<&str> {
+        self.hubs.get(key).map(String::as_str)
+    }
+}
+
+/// Camel-split the tail of a DE language/<uniqueName> key into the display
+/// vocabulary the recorded warframestat fixtures used:
+/// `/Lotus/.../RoadToTauEventResource` -> "Road To Tau Event Resource",
+/// `EventAlertTitle` -> "Event Alert Title", `MPVProteaPrimeSinglePack` ->
+/// "M P V Protea Prime Single Pack". This is presentation of the feed's own
+/// key, never a guessed game name.
+pub fn humanize_language_key(key: &str) -> String {
+    let tail = key.rsplit('/').next().unwrap_or(key);
+    let mut words: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for ch in tail.chars() {
+        if ch.is_ascii_uppercase() && !cur.is_empty() {
+            words.push(std::mem::take(&mut cur));
+        }
+        cur.push(ch);
+    }
+    if !cur.is_empty() {
+        words.push(cur);
+    }
+    words.join(" ")
+}
+
+fn push_gap(gaps: &mut Vec<String>, key: &str) {
+    if !key.is_empty() && !gaps.iter().any(|g| g == key) {
+        gaps.push(key.to_owned());
+    }
+}
+
+/// One DE date field: `{"$date":{"$numberLong":"<unix ms>"}}` -> RFC 3339.
+fn de_date(v: Option<&serde_json::Value>) -> String {
+    let ms = v
+        .and_then(|v| v.get("$date"))
+        .and_then(|d| d.get("$numberLong"))
+        .and_then(|s| s.as_str())
+        .and_then(|s| s.parse::<i64>().ok());
+    match ms.and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis) {
+        Some(dt) => dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        None => String::new(),
+    }
+}
+
+/// One DE Mongo id field: `{"$oid":"..."}`.
+fn de_oid(v: Option<&serde_json::Value>) -> String {
+    v.and_then(|v| v.get("$oid"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_owned()
+}
+
+fn as_array<'a>(v: Option<&'a serde_json::Value>) -> &'a [serde_json::Value] {
+    v.and_then(|v| v.as_array()).map(Vec::as_slice).unwrap_or(&[])
+}
+
+fn de_str<'a>(v: Option<&'a serde_json::Value>, key: &str) -> &'a str {
+    v.and_then(|v| v.get(key))
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+}
+
+/// Node display = `name (system)` as today; an unmapped key stays raw and
+/// is recorded as a decode gap (never a guessed name).
+fn decode_node_display(
+    key: &str,
+    decodes: &Decodes,
+    gaps: &mut Vec<String>,
+) -> String {
+    if key.is_empty() {
+        return String::new();
+    }
+    match decodes.node(key) {
+        Some(n) => format!("{} ({})", n.name, n.system),
+        None => {
+            push_gap(gaps, key);
+            key.to_owned()
+        }
+    }
+}
+
+fn decode_mission_type(
+    key: &str,
+    decodes: &Decodes,
+    gaps: &mut Vec<String>,
+) -> String {
+    if key.is_empty() {
+        return String::new();
+    }
+    match decodes.mission_type(key) {
+        Some(name) => name.to_owned(),
+        None => {
+            push_gap(gaps, key);
+            key.to_owned()
+        }
+    }
+}
+
+fn decode_hub(key: &str, decodes: &Decodes, gaps: &mut Vec<String>) -> String {
+    if key.is_empty() {
+        return String::new();
+    }
+    match decodes.hub(key) {
+        Some(name) => name.to_owned(),
+        None => {
+            push_gap(gaps, key);
+            key.to_owned()
+        }
+    }
+}
+
+/// DE fissure tier (`Modifier`/`ActiveMissionTier` `VoidT1..VoidT6`).
+/// Crosswalk verified against warframestat `tierNum` 1..6 in the recorded
+/// fixture (Lith/Meso/Neo/Axi/Requiem/Omnia).
+fn decode_tier(key: &str, gaps: &mut Vec<String>) -> String {
+    let tier = match key {
+        "VoidT1" => "Lith",
+        "VoidT2" => "Meso",
+        "VoidT3" => "Neo",
+        "VoidT4" => "Axi",
+        "VoidT5" => "Requiem",
+        "VoidT6" => "Omnia",
+        _ => {
+            if !key.is_empty() {
+                push_gap(gaps, key);
+            }
+            key
+        }
+    };
+    tier.to_owned()
+}
+
+/// Payload age beyond which the stamp must say STALE (~10 minutes).
+pub const WORLDSTATE_STALE_AFTER_MINUTES: i64 = 10;
+
+/// The worldstate stamp label. `fetched_live` is true only when this run
+/// got a fresh HTTP 200 from DE; a disk-cache/fixture view is always
+/// labeled STALE even when its payload is recent (addendum #51).
+pub fn worldstate_status_label(
+    world: &WorldState,
+    now: chrono::DateTime<chrono::Utc>,
+    fetched_live: bool,
+) -> String {
+    let Ok(stamp) = world.timestamp.parse::<chrono::DateTime<chrono::Utc>>() else {
+        return "worldstate unavailable".to_owned();
+    };
+    let age = now.signed_duration_since(stamp);
+    let secs = age.num_seconds().max(0);
+    if fetched_live && age <= chrono::Duration::minutes(WORLDSTATE_STALE_AFTER_MINUTES) {
+        format!("worldstate live ({secs}s)")
+    } else {
+        format!("worldstate STALE ({}m)", age.num_minutes().max(0))
+    }
+}
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -609,6 +855,11 @@ pub struct AlertMission {
     pub description: String,
     #[serde(default)]
     pub node: String,
+    /// Internal node key (`SolNode175`). EE.log and DE both speak these,
+    /// so alert completion matching keys on them exactly where the data
+    /// allows (addendum #51 bonus).
+    #[serde(default)]
+    pub sol_node: String,
     #[serde(default, rename = "type")]
     pub mission_type: String,
     #[serde(default)]
@@ -868,17 +1119,246 @@ pub struct WorldState {
     pub nightwave: Option<NightWave>,
     #[serde(default)]
     pub sortie: Option<Sortie>,
+    /// The Archon weekly (`LiteSorties`). Parsed now; not consumed by
+    /// the planner yet (the weekly board tracks it as a manual item).
+    #[serde(default)]
+    pub archon: Option<Sortie>,
     #[serde(default, rename = "voidTrader")]
     pub baro: Option<VoidTrader>,
     /// Full trader rotation (the feed carries both the singular and
     /// the list; either shape proves Baro is around).
     #[serde(default, rename = "voidTraders")]
     pub void_traders: Vec<VoidTrader>,
+    /// DE keys this run could not decode (nodes/hubs/mission types).
+    /// Surfaces in tests/stderr; never a guessed display name.
+    #[serde(skip)]
+    pub decode_gaps: Vec<String>,
 }
 
 impl WorldState {
-    pub fn from_json(text: &str) -> Result<Self, String> {
-        serde_json::from_str(text).map_err(|e| format!("worldstate: {e}"))
+    /// Parse DE's raw worldState.php payload into the app model using the
+    /// baked decode tables. Sections the app does not consume (Discord
+    /// `Events`, Descents, etc.) are ignored; every consumed section is
+    /// mapped here. Unmapped keys are recorded in `decode_gaps`.
+    pub fn from_de_json(text: &str, decodes: &Decodes) -> Result<Self, String> {
+        let root: serde_json::Value =
+            serde_json::from_str(text).map_err(|e| format!("worldstate (DE): {e}"))?;
+        if !root.is_object() {
+            return Err("worldstate (DE): payload is not an object".to_owned());
+        }
+        let mut world = WorldState::default();
+        let mut gaps: Vec<String> = Vec::new();
+
+        // DE's payload carries `Time` in unix seconds; the render clock is
+        // judged against this stamp, never against the fetch time.
+        if let Some(secs) = root.get("Time").and_then(|v| v.as_i64()) {
+            if let Some(dt) = chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0) {
+                world.timestamp = dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            }
+        }
+
+        // Alerts.
+        for a in as_array(root.get("Alerts")) {
+            let mission = a.get("MissionInfo");
+            let location = de_str(mission, "location");
+            let counted_items = as_array(
+                mission
+                    .and_then(|m| m.get("missionReward"))
+                    .and_then(|r| r.get("countedItems")),
+            )
+            .iter()
+            .filter_map(|c| {
+                let unique_name = de_str(Some(c), "ItemType");
+                if unique_name.is_empty() {
+                    return None;
+                }
+                Some(CountedItem {
+                    unique_name: unique_name.to_owned(),
+                    kind: humanize_language_key(unique_name),
+                    count: c.get("ItemCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                })
+            })
+            .collect();
+            world.alerts.push(Alert {
+                id: de_oid(a.get("_id")),
+                tag: de_str(Some(a), "Tag").to_owned(),
+                activation: de_date(a.get("Activation")),
+                expiry: de_date(a.get("Expiry")),
+                mission: AlertMission {
+                    description: humanize_language_key(de_str(mission, "descText")),
+                    node: decode_node_display(location, decodes, &mut gaps),
+                    sol_node: location.to_owned(),
+                    mission_type: decode_mission_type(
+                        de_str(mission, "missionType"),
+                        decodes,
+                        &mut gaps,
+                    ),
+                    faction: de_str(mission, "faction").to_owned(),
+                    reward: AlertReward { counted_items },
+                    counted_items_flat: Vec::new(),
+                },
+            });
+        }
+
+        // ActiveMissions -> fissures. `Hard` is the entry's own Steel Path
+        // flag; `Modifier` carries the era tier.
+        for m in as_array(root.get("ActiveMissions")) {
+            let nod = de_str(Some(m), "Node");
+            world.fissures.push(Fissure {
+                id: de_oid(m.get("_id")),
+                node: decode_node_display(nod, decodes, &mut gaps),
+                mission_type: decode_mission_type(
+                    de_str(Some(m), "MissionType"),
+                    decodes,
+                    &mut gaps,
+                ),
+                tier: decode_tier(de_str(Some(m), "Modifier"), &mut gaps),
+                expiry: de_date(m.get("Expiry")),
+                is_storm: false,
+                is_hard: m.get("Hard").and_then(|v| v.as_bool()).unwrap_or(false),
+            });
+        }
+
+        // VoidStorms -> fissures with `is_storm`. The storm payload carries
+        // only Node/Tier/Activation/Expiry (no mission type), so the type
+        // stays empty rather than being inferred.
+        for s in as_array(root.get("VoidStorms")) {
+            let nod = de_str(Some(s), "Node");
+            world.fissures.push(Fissure {
+                id: de_oid(s.get("_id")),
+                node: decode_node_display(nod, decodes, &mut gaps),
+                mission_type: String::new(),
+                tier: decode_tier(de_str(Some(s), "ActiveMissionTier"), &mut gaps),
+                expiry: de_date(s.get("Expiry")),
+                is_storm: true,
+                is_hard: false,
+            });
+        }
+
+        // Goals -> events (community/event progress incl. Road To Tau).
+        // DE's top-level `Events` array is Discord/community messaging, not
+        // game events, and is deliberately ignored.
+        for g in as_array(root.get("Goals")) {
+            world.events.push(WorldEvent {
+                description: humanize_language_key(de_str(Some(g), "Desc")),
+                health: g.get("HealthPct").and_then(|v| v.as_f64()),
+                is_community: g
+                    .get("Community")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                expiry: de_date(g.get("Expiry")),
+                activation: de_date(g.get("Activation")),
+            });
+        }
+
+        // PrimeVaultTraders (Varzia).
+        if let Some(vt) = as_array(root.get("PrimeVaultTraders")).first() {
+            let inventory = as_array(vt.get("Manifest"))
+                .iter()
+                .filter_map(|item| {
+                    let unique_name = de_str(Some(item), "ItemType");
+                    if unique_name.is_empty() {
+                        return None;
+                    }
+                    Some(VaultTraderItem {
+                        item: humanize_language_key(unique_name),
+                        unique_name: unique_name.to_owned(),
+                    })
+                })
+                .collect();
+            world.vault_trader = Some(VaultTrader {
+                id: de_oid(vt.get("_id")),
+                activation: de_date(vt.get("Activation")),
+                expiry: de_date(vt.get("Expiry")),
+                character: String::new(),
+                location: decode_hub(de_str(Some(vt), "Node"), decodes, &mut gaps),
+                inventory,
+            });
+        }
+
+        // VoidTraders (Baro). `active` is derived from the window at render
+        // time by `is_live`, so the DE entry leaves it false.
+        for t in as_array(root.get("VoidTraders")) {
+            world.void_traders.push(VoidTrader {
+                activation: de_date(t.get("Activation")),
+                expiry: de_date(t.get("Expiry")),
+                location: decode_hub(de_str(Some(t), "Node"), decodes, &mut gaps),
+                active: false,
+            });
+        }
+        world.baro = world.void_traders.first().cloned();
+
+        // Sorties.
+        if let Some(s) = as_array(root.get("Sorties")).first() {
+            world.sortie = Some(Sortie {
+                expiry: de_date(s.get("Expiry")),
+                variants: as_array(s.get("Variants"))
+                    .iter()
+                    .map(|v| SortieVariant {
+                        node: decode_node_display(de_str(Some(v), "node"), decodes, &mut gaps),
+                        mission_type: decode_mission_type(
+                            de_str(Some(v), "missionType"),
+                            decodes,
+                            &mut gaps,
+                        ),
+                    })
+                    .collect(),
+            });
+        }
+
+        // LiteSorties -> the Archon weekly (parsed; planner later).
+        if let Some(s) = as_array(root.get("LiteSorties")).first() {
+            world.archon = Some(Sortie {
+                expiry: de_date(s.get("Expiry")),
+                variants: as_array(s.get("Missions"))
+                    .iter()
+                    .map(|v| SortieVariant {
+                        node: decode_node_display(de_str(Some(v), "node"), decodes, &mut gaps),
+                        mission_type: decode_mission_type(
+                            de_str(Some(v), "missionType"),
+                            decodes,
+                            &mut gaps,
+                        ),
+                    })
+                    .collect(),
+            });
+        }
+
+        // SeasonInfo -> Nightwave. Titles/descriptions/standing come from
+        // the baked Nightwave decode; `|COUNT|` is substituted with the
+        // challenge's required count. `WeeklyHard` marks elites.
+        if let Some(si) = root.get("SeasonInfo") {
+            let mut active_challenges = Vec::new();
+            for c in as_array(si.get("ActiveChallenges")) {
+                let key = de_str(Some(c), "Challenge");
+                let (title, desc, standing) = match decodes.nightwave.get(key) {
+                    Some(d) => (
+                        d.name.clone(),
+                        d.description.replace("|COUNT|", &d.required.to_string()),
+                        d.standing,
+                    ),
+                    None => {
+                        push_gap(&mut gaps, key);
+                        (humanize_language_key(key), String::new(), 0)
+                    }
+                };
+                active_challenges.push(NightWaveChallenge {
+                    id: de_oid(c.get("_id")),
+                    title,
+                    desc,
+                    standing,
+                    is_daily: c.get("Daily").and_then(|v| v.as_bool()).unwrap_or(false),
+                    is_elite: key.contains("WeeklyHard"),
+                });
+            }
+            world.nightwave = Some(NightWave {
+                season: si.get("Season").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                active_challenges,
+            });
+        }
+
+        world.decode_gaps = gaps;
+        Ok(world)
     }
 
     /// The live void trader, if any (pass 4 Baro section): the
@@ -1289,13 +1769,229 @@ mod tests {
         assert!(!Alert::default().is_lotus());
     }
 
-    #[test]
-    fn live_fixture_alerts_parse_tags_and_payouts() {
+    fn de_fixture() -> WorldState {
         let text = std::fs::read_to_string(
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/worldstate.json"),
         )
         .unwrap();
-        let world = WorldState::from_json(&text).unwrap();
+        let decodes = Decodes::load(
+            &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data"),
+        )
+        .unwrap();
+        WorldState::from_de_json(&text, &decodes).unwrap()
+    }
+
+    #[test]
+    fn de_fixture_parses_every_consumed_section() {
+        let world = de_fixture();
+        // `Time` (unix seconds) is the freshness stamp.
+        assert_eq!(world.timestamp, "2026-10-19T05:16:44Z");
+        // 22 ActiveMissions + 12 VoidStorms.
+        assert_eq!(world.fissures.len(), 34);
+        assert_eq!(world.fissures.iter().filter(|f| f.is_storm).count(), 12);
+        assert!(world.fissures.iter().any(|f| f.is_hard), "Hard = Steel Path");
+        // Tier crosswalk from `Modifier`.
+        let tiers: HashSet<&str> =
+            world.fissures.iter().map(|f| f.tier.as_str()).collect();
+        for tier in ["Lith", "Meso", "Neo", "Axi", "Requiem", "Omnia"] {
+            assert!(tiers.contains(tier), "missing tier {tier}: {tiers:?}");
+        }
+        // Node display = `name (system)`.
+        assert!(world
+            .fissures
+            .iter()
+            .any(|f| f.node == "Dakata (Kuva Fortress)"));
+
+        // Alerts: DE MissionInfo -> model, SolNode retained for matching.
+        assert_eq!(world.alerts.len(), 3);
+        assert!(world.alerts.iter().all(|a| a.is_event()));
+        assert!(!world.alerts.iter().any(|a| a.is_lotus()));
+        let alert = world
+            .alerts
+            .iter()
+            .find(|a| a.mission.sol_node == "SolNode175")
+            .expect("Decoded SolNode175 alert");
+        assert_eq!(alert.mission.node, "Naeglar (Eris)");
+        assert_eq!(alert.mission.mission_type, "Mobile Defense");
+        assert_eq!(alert.mission.description, "Event Alert Title");
+        assert_eq!(alert.mission.counted_items()[0].count, 50);
+        assert!(alert.expiry > alert.activation);
+
+        // Goals -> events (Road To Tau community progress).
+        assert_eq!(world.events.len(), 4);
+        let tau = world
+            .events
+            .iter()
+            .find(|e| e.description.contains("Road To Tau"))
+            .expect("Road To Tau goal");
+        assert!(tau.is_community);
+        assert!(tau.health.is_some());
+
+        // Varzia (PrimeVaultTraders) + Baro (VoidTraders).
+        let vt = world.vault_trader.as_ref().expect("Varzia rotation");
+        assert_eq!(vt.location, "Maroo's Bazaar (Mars)");
+        assert_eq!(vt.inventory.len(), 22);
+        assert!(vt.gear_tokens().contains("ivara prime"));
+        assert_eq!(world.void_traders.len(), 1);
+        assert_eq!(world.baro.as_ref().unwrap().expiry, "2026-10-25T13:00:00.000Z");
+
+        // Sortie + Archon Hunt (LiteSorties).
+        let sortie = world.sortie.as_ref().expect("sortie");
+        assert_eq!(sortie.variants.len(), 3);
+        assert_eq!(sortie.variants[0].node, "Venera (Venus)");
+        assert_eq!(sortie.variants[0].mission_type, "Interception");
+        let archon = world.archon.as_ref().expect("archon hunt");
+        assert_eq!(archon.variants.len(), 3);
+        assert_eq!(archon.variants[0].node, "Tharsis (Mars)");
+
+        // SeasonInfo -> Nightwave with baked name/description/standing.
+        let nw = world.nightwave.as_ref().expect("nightwave season");
+        assert_eq!(nw.season, 18);
+        assert_eq!(nw.active_challenges.len(), 10);
+        assert_eq!(
+            nw.active_challenges.iter().filter(|c| c.is_daily).count(),
+            3
+        );
+        assert_eq!(
+            nw.active_challenges.iter().filter(|c| c.is_elite).count(),
+            2
+        );
+        let swatter = nw
+            .active_challenges
+            .iter()
+            .find(|c| c.title == "Swatter")
+            .expect("baked challenge");
+        assert_eq!(
+            swatter.desc,
+            "Kill 3 Drones or Ospreys with your Melee Weapon."
+        );
+        assert_eq!(swatter.standing, 1000);
+    }
+
+    #[test]
+    fn de_fixture_decode_gaps_are_recorded_not_guessed() {
+        // Unmapped keys keep their raw DE key for display and land in
+        // decode_gaps; the app never invents a name. EarthHUB is
+        // deliberately unbaked (the Baro relay varies per visit) and the
+        // Empyrean storm nodes are absent from ExportRegions.
+        let world = de_fixture();
+        assert!(world.decode_gaps.iter().any(|g| g == "EarthHUB"));
+        for g in &world.decode_gaps {
+            if g.starts_with("CrewBattleNode") {
+                assert!(
+                    world.fissures.iter().any(|f| f.node == *g),
+                    "raw storm node displayed: {g}"
+                );
+            }
+        }
+        assert!(
+            !world.decode_gaps.iter().any(|g| g.starts_with("SolNode")),
+            "every consumed SolNode decoded: {:?}",
+            world.decode_gaps
+        );
+        assert_eq!(
+            world.decode_gaps.iter().filter(|g| g.starts_with("CrewBattleNode")).count(),
+            12
+        );
+        assert_eq!(world.decode_gaps.len(), 13);
+    }
+
+    #[test]
+    fn mission_type_decodes_match_the_recorded_warframestat_vocabulary() {
+        // Addendum #51: validated against the recorded warframestat
+        // fixture (it carries display names). Names the Public Export
+        // enum does not cover are flagged, never guessed.
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let decodes = Decodes::load(&dir.join("data")).unwrap();
+        let raw: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("fixtures/warframestat-worldstate.json")).unwrap(),
+        )
+        .unwrap();
+        let mut observed: HashSet<String> = HashSet::new();
+        for f in as_array(raw.get("fissures")) {
+            let t = de_str(Some(f), "missionType");
+            if !t.is_empty() {
+                observed.insert(t.to_owned());
+            }
+        }
+        for a in as_array(raw.get("alerts")) {
+            let t = de_str(a.get("mission"), "type");
+            if !t.is_empty() {
+                observed.insert(t.to_owned());
+            }
+        }
+        for s in as_array(raw.get("sortie")) {
+            for v in as_array(s.get("variants")) {
+                let t = de_str(Some(v), "missionType");
+                if !t.is_empty() {
+                    observed.insert(t.to_owned());
+                }
+            }
+        }
+        for h in as_array(raw.get("archonHunt")) {
+            for m in as_array(h.get("missions")) {
+                let t = de_str(Some(m), "type");
+                if !t.is_empty() {
+                    observed.insert(t.to_owned());
+                }
+            }
+        }
+        // Display names with no MT enum entry in the baked table. These
+        // are real DE display names but the Public Export enum has no
+        // matching MT_* key; flagged rather than fabricated.
+        let allowlisted_unmapped: HashSet<&str> = ["Assault", "Skirmish", "Volatile"]
+            .into_iter()
+            .collect();
+        let decoded: HashSet<&str> = decodes
+            .mission_types
+            .values()
+            .map(|d| d.name.as_str())
+            .collect();
+        let mut unmapped: Vec<&str> = observed
+            .iter()
+            .map(String::as_str)
+            .filter(|name| !decoded.contains(name))
+            .collect();
+        unmapped.sort_unstable();
+        let mut expected: Vec<&str> = allowlisted_unmapped.iter().copied().collect();
+        expected.sort_unstable();
+        assert_eq!(
+            unmapped, expected,
+            "recorded display names must map or be explicitly flagged"
+        );
+        // And every allowlisted gap really has no MT_* entry.
+        for gap in allowlisted_unmapped {
+            assert!(
+                !decoded.contains(gap),
+                "{gap} is in the MT decode table now — drop the allowlist"
+            );
+        }
+    }
+
+    #[test]
+    fn freshness_stamp_marks_live_stale_and_unavailable() {
+        let mut world = WorldState {
+            timestamp: "2026-10-19T05:16:44Z".to_owned(),
+            ..Default::default()
+        };
+        let now: chrono::DateTime<chrono::Utc> = "2026-10-19T05:17:00Z".parse().unwrap();
+        assert_eq!(worldstate_status_label(&world, now, true), "worldstate live (16s)");
+        // Same payload, nine minutes later: still live.
+        let nine: chrono::DateTime<chrono::Utc> = "2026-10-19T05:25:44Z".parse().unwrap();
+        assert_eq!(worldstate_status_label(&world, nine, true), "worldstate live (540s)");
+        // Past ~10 minutes: STALE with the data's age.
+        let stale: chrono::DateTime<chrono::Utc> = "2026-10-19T05:30:44Z".parse().unwrap();
+        assert_eq!(worldstate_status_label(&world, stale, true), "worldstate STALE (14m)");
+        // A cache/fixture view is never called live, even when fresh.
+        assert_eq!(worldstate_status_label(&world, now, false), "worldstate STALE (0m)");
+        // No payload at all.
+        world.timestamp.clear();
+        assert_eq!(worldstate_status_label(&world, now, true), "worldstate unavailable");
+    }
+
+    #[test]
+    fn live_fixture_alerts_parse_tags_and_payouts() {
+        let world = de_fixture();
         assert!(!world.alerts.is_empty());
         assert!(
             world.alerts.iter().all(|a| a.is_event()),
@@ -1310,17 +2006,13 @@ mod tests {
     #[test]
     fn live_fixture_nightwave_carries_descriptions() {
         // Pass 4 §e: name + description everywhere acts render.
-        let text = std::fs::read_to_string(
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/worldstate.json"),
-        )
-        .unwrap();
-        let world = WorldState::from_json(&text).unwrap();
+        let world = de_fixture();
         let nw = world.nightwave.expect("recorded nightwave");
         assert!(!nw.active_challenges.is_empty());
         for act in &nw.active_challenges {
             assert!(!act.title.is_empty());
             assert!(!act.desc.is_empty(), "missing description: {}", act.id);
-            assert!(act.standing > 0, "reputation parses: {}", act.id);
+            assert!(act.standing > 0, "standing from the baked decode: {}", act.id);
         }
     }
 
@@ -1328,26 +2020,22 @@ mod tests {
     fn trader_section_follows_the_live_window() {
         // Pass 4 Baro section: live only while a trader window covers
         // now (singular or list shape); gone when he leaves.
-        let text = std::fs::read_to_string(
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/worldstate.json"),
-        )
-        .unwrap();
-        let world = WorldState::from_json(&text).unwrap();
+        let world = de_fixture();
         assert_eq!(world.void_traders.len(), 1, "rotation list parses");
         let before: chrono::DateTime<chrono::Utc> =
-            "2026-10-16T02:55:00Z".parse().unwrap();
+            "2026-10-22T13:00:00Z".parse().unwrap();
         assert!(
             world.active_trader(&before).is_none(),
-            "window opens 13:00 — section hides at 02:55"
+            "window opens Oct 23 13:00 — section hides before"
         );
         let during: chrono::DateTime<chrono::Utc> =
-            "2026-10-17T12:00:00Z".parse().unwrap();
+            "2026-10-24T12:00:00Z".parse().unwrap();
         assert!(
             world.active_trader(&during).is_some(),
             "section renders mid-window"
         );
         let after: chrono::DateTime<chrono::Utc> =
-            "2026-10-19T00:00:00Z".parse().unwrap();
+            "2026-10-25T13:00:00Z".parse().unwrap();
         assert!(
             world.active_trader(&after).is_none(),
             "gone when he leaves"
