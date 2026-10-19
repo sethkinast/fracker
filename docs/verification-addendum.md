@@ -330,3 +330,16 @@ it refines the brief where they disagree. For the next worker pass.
     loop's exit (or exits and is restarted/held by the
     single-instance machinery). Queued 2026-10-19 at Seth's
     request — do not build until he releases the round.
+49. **Capture stream connects targetless (Seth, 2026-10-19,
+    v0.4.2 test).** Full chain now works — consent, FD,
+    symbols, connect — then the stream errors "target not
+    found" ~30ms in: pw_stream_connect was never given the
+    node_id the ScreenCast Start reply carries in its
+    streams array, so AUTOCONNECT had no valid target on the
+    portal remote. Fix: parse the node_id from Start's
+    streams and connect the stream to it. Log also shows the
+    state machine declaring "capturing" before any frame
+    landed and flipping through a stale capturing stage on
+    the error — capturing starts at the first real frame,
+    and an error supersedes. Queued with #48; build when
+    Seth releases the round.
