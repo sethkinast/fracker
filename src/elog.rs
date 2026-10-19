@@ -256,7 +256,19 @@ pub struct MissionCompletion {
     /// UTC date (`YYYY-MM-DD`) the completion was observed.
     #[serde(default)]
     pub day: String,
+    /// UTC wall-clock instant the completion was observed (`RFC 3339`).
+    /// Twelfth-pass §4: the activation guard needs a trustworthy time, so
+    /// a completion can only strike an alert instance that was already
+    /// live when the mission ended. Empty on legacy/unknown records —
+    /// those can still strike on an exact `alertId` match, never by
+    /// corroboration.
+    #[serde(default)]
+    pub observed_at: String,
 }
+
+/// Clock-skew tolerance (seconds) for the §4 activation guard: a
+/// completion observed a hair before the feed's activation still counts.
+const ACTIVATION_EPSILON_SECS: i64 = 120;
 
 impl MissionCompletion {
     /// A positive identity match against a worldstate alert — never
@@ -264,10 +276,20 @@ impl MissionCompletion {
     /// tag agrees AND the mission types normalize equal, or when the tag
     /// agrees AND a payout resource uniqueName is shared. Node is
     /// deliberately NOT compared (the log's node is internal).
+    ///
+    /// Twelfth-pass §4 (instance-strict): the weaker corroboration paths
+    /// (tag+type, tag+reward) additionally require the completion's
+    /// observed time to fall at/after the alert's activation (minus a
+    /// small clock-skew epsilon). A same-tag completion from a *previous*
+    /// alert instance can therefore never strike today's alert. The exact
+    /// `alertId` path is instance identity already and stays as-is.
     pub fn matches_alert(&self, alert: &crate::model::Alert) -> bool {
         let info = &self.info;
         if !info.alert_id.is_empty() && !alert.id.is_empty() && info.alert_id == alert.id {
             return true;
+        }
+        if !self.corroborates_activation(alert) {
+            return false;
         }
         let tag_eq =
             !info.alert_tag.is_empty() && info.alert_tag.eq_ignore_ascii_case(&alert.tag);
@@ -286,6 +308,23 @@ impl MissionCompletion {
                     .iter()
                     .any(|r| r.eq_ignore_ascii_case(&c.unique_name))
         })
+    }
+
+    /// The §4 activation guard for corroboration paths. An alert with no
+    /// recorded activation cannot be guarded, so the corroboration is
+    /// allowed (legacy feeds). A completion with no trustworthy
+    /// observed-at cannot corroborate an *activated* alert — it may only
+    /// strike on exact id.
+    fn corroborates_activation(&self, alert: &crate::model::Alert) -> bool {
+        let activation = match alert.activation.parse::<chrono::DateTime<chrono::Utc>>() {
+            Ok(t) => t,
+            Err(_) => return true,
+        };
+        let observed = match self.observed_at.parse::<chrono::DateTime<chrono::Utc>>() {
+            Ok(t) => t,
+            Err(_) => return false,
+        };
+        observed + chrono::Duration::seconds(ACTIVATION_EPSILON_SECS) >= activation
     }
 }
 
@@ -325,9 +364,12 @@ impl MissionLog {
     }
 
     /// Feed one raw EE.log line. `day` is the UTC date to stamp onto a
-    /// completion. Returns the completion when an end-of-match success
-    /// marker confirms the armed mission.
-    pub fn feed(&mut self, raw: &str, day: &str) -> Option<MissionCompletion> {
+    /// completion and `observed_at` the UTC instant it was observed (both
+    /// supplied by the watch loop from its own clock — EE.log timestamps
+    /// are seconds-since-process-start, not wall clock). Returns the
+    /// completion when an end-of-match success marker confirms the armed
+    /// mission.
+    pub fn feed(&mut self, raw: &str, day: &str, observed_at: &str) -> Option<MissionCompletion> {
         if let Some(buf) = self.buf.as_mut() {
             if buf.len() > 256 * 1024 {
                 // A `with MissionInfo:` that never resolves into JSON must
@@ -358,6 +400,7 @@ impl MissionLog {
                 return Some(MissionCompletion {
                     info,
                     day: day.to_owned(),
+                    observed_at: observed_at.to_owned(),
                 });
             }
         }
@@ -787,7 +830,7 @@ mod tests {
         let mut log = MissionLog::new();
         let mut completion = None;
         for line in armed_block("SolNode175_Alert", "6ad0d7360dfe89c5d82290a2", "MT_HIVE") {
-            completion = completion.or(log.feed(&line, "2026-10-17"));
+            completion = completion.or(log.feed(&line, "2026-10-17", "2026-10-17T12:00:00Z"));
         }
         // Still armed, no completion until an end-of-match success marker.
         assert!(completion.is_none());
@@ -802,6 +845,7 @@ mod tests {
         completion = log.feed(
             "251.004 Script [Info]: EndOfMatch.lua: Mission Succeeded",
             "2026-10-17",
+            "2026-10-17T12:00:00Z",
         );
         let c = completion.expect("completion after the success marker");
         assert_eq!(c.info.alert_id, "6ad0d7360dfe89c5d82290a2");
@@ -810,7 +854,8 @@ mod tests {
         assert!(log
             .feed(
                 "251.004 Script [Info]: EndOfMatch.lua: EndOfMatch.lua: GiveMissionRewards. success=true",
-                "2026-10-17"
+                "2026-10-17",
+                "2026-10-17T12:00:00Z"
             )
             .is_none());
     }
@@ -819,13 +864,14 @@ mod tests {
     fn mission_log_never_infers_without_a_positive_marker() {
         let mut log = MissionLog::new();
         for line in armed_block("SolNode175_Alert", "abc", "MT_HIVE") {
-            let _ = log.feed(&line, "2026-10-17");
+            let _ = log.feed(&line, "2026-10-17", "2026-10-17T12:00:00Z");
         }
         // A FAILED mission must not complete.
         assert!(log
             .feed(
                 "251.004 Script [Info]: EndOfMatch.lua: Mission Failed",
-                "2026-10-17"
+                "2026-10-17",
+                "2026-10-17T12:00:00Z"
             )
             .is_none());
         // A marker with no armed mission (tail started mid-mission) drops.
@@ -833,7 +879,8 @@ mod tests {
         assert!(empty
             .feed(
                 "251.004 Script [Info]: EndOfMatch.lua: Mission Succeeded",
-                "2026-10-17"
+                "2026-10-17",
+                "2026-10-17T12:00:00Z"
             )
             .is_none());
     }
@@ -855,10 +902,12 @@ mod tests {
         let completion = MissionCompletion {
             info: info.clone(),
             day: "2026-10-17".to_owned(),
+            observed_at: "2026-10-17T12:00:00Z".to_owned(),
         };
         let alert = |id: &str, tag: &str, mtype: &str| Alert {
             id: id.to_owned(),
             tag: tag.to_owned(),
+            activation: String::new(),
             expiry: String::new(),
             mission: AlertMission {
                 node: "Nimus (Eris)".to_owned(),
@@ -881,10 +930,97 @@ mod tests {
         // Tag + shared payout resource when the type strings differ.
         assert!(info.is_alert());
         info.mission_type = "MT_SOMETHING_NEW".to_owned();
-        let c2 = MissionCompletion { info: info.clone(), day: "d".to_owned() };
+        let c2 = MissionCompletion {
+            info: info.clone(),
+            day: "d".to_owned(),
+            observed_at: "2026-10-17T12:00:00Z".to_owned(),
+        };
         assert!(c2.matches_alert(&alert("", "RoadToTauEvent", "Mobile Defense")));
         // A different tag with no id or type match never strikes.
         assert!(!completion.matches_alert(&alert("", "SomeOtherEvent", "Survival")));
+    }
+
+    /// Twelfth-pass §4 (instance-strict): a corroboration-only match must
+    /// fall inside the alert instance's live window. Yesterday's
+    /// same-tag completion can never strike an alert activated today,
+    /// while an exact `alertId` match still strikes regardless of time.
+    #[test]
+    fn corroboration_is_instance_strict_but_id_match_is_not() {
+        use crate::model::{Alert, AlertMission, AlertReward, CountedItem};
+        let info = MissionInfo {
+            alert_id: String::new(),
+            alert_tag: "RoadToTauEvent".to_owned(),
+            mission_type: "MT_HIVE".to_owned(),
+            faction: "FC_INFESTATION".to_owned(),
+            location: "SolNode175".to_owned(),
+            reward_items: vec![
+                "/Lotus/Types/Gameplay/Events/RoadToTauEvent/RoadToTauEventResource".to_owned(),
+            ],
+            ..Default::default()
+        };
+        let alert = |activation: &str| Alert {
+            id: String::new(),
+            tag: "RoadToTauEvent".to_owned(),
+            activation: activation.to_owned(),
+            expiry: String::new(),
+            mission: AlertMission {
+                node: "Nimus (Eris)".to_owned(),
+                mission_type: "Hive".to_owned(),
+                faction: "Infested".to_owned(),
+                reward: AlertReward {
+                    counted_items: vec![CountedItem {
+                        unique_name: "/Lotus/Types/Gameplay/Events/RoadToTauEvent/RoadToTauEventResource".to_owned(),
+                        kind: "Tau Resource".to_owned(),
+                        count: 50,
+                    }],
+                },
+                ..Default::default()
+            },
+        };
+        // (a) yesterday's completion vs today's activated alert: NOT struck.
+        let yesterday = MissionCompletion {
+            info: info.clone(),
+            day: "2026-10-16".to_owned(),
+            observed_at: "2026-10-16T23:00:00Z".to_owned(),
+        };
+        assert!(
+            !yesterday.matches_alert(&alert("2026-10-17T00:00:00Z")),
+            "a pre-activation same-tag completion must not strike"
+        );
+        // (b) a corroborating completion inside the window IS struck.
+        let today = MissionCompletion {
+            info: info.clone(),
+            day: "2026-10-17".to_owned(),
+            observed_at: "2026-10-17T00:05:00Z".to_owned(),
+        };
+        assert!(
+            today.matches_alert(&alert("2026-10-17T00:00:00Z")),
+            "a post-activation corroborating completion must strike"
+        );
+        // A completion with no trustworthy observed-at cannot corroborate.
+        let unknown = MissionCompletion {
+            info: info.clone(),
+            day: "2026-10-17".to_owned(),
+            observed_at: String::new(),
+        };
+        assert!(!unknown.matches_alert(&alert("2026-10-17T00:00:00Z")));
+        // (c) exact alertId stays instance identity: struck even from
+        // before the recorded activation and with no observed-at.
+        let by_id = MissionCompletion {
+            info: MissionInfo {
+                alert_id: "6ad0d7360dfe89c5d82290a2".to_owned(),
+                ..info.clone()
+            },
+            day: "2026-10-16".to_owned(),
+            observed_at: String::new(),
+        };
+        let id_alert = Alert {
+            id: "6ad0d7360dfe89c5d82290a2".to_owned(),
+            tag: "Other".to_owned(),
+            activation: "2026-10-17T00:00:00Z".to_owned(),
+            ..alert("2026-10-17T00:00:00Z")
+        };
+        assert!(by_id.matches_alert(&id_alert));
     }
 
     /// Ninth pass §4 audit: parse Seth's real EE.log (gitignored) and
@@ -902,7 +1038,7 @@ mod tests {
         let mut log = MissionLog::new();
         let mut done = Vec::new();
         for raw in text.lines() {
-            if let Some(c) = log.feed(raw, "2026-10-17") {
+            if let Some(c) = log.feed(raw, "2026-10-17", "2026-10-17T12:00:00Z") {
                 done.push(c);
             }
         }

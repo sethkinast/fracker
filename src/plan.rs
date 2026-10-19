@@ -2114,6 +2114,7 @@ mod tests {
         Alert {
             id: id.to_owned(),
             tag: tag.to_owned(),
+            activation: String::new(),
             expiry: expiry.to_owned(),
             mission: AlertMission {
                 description: desc.to_owned(),
@@ -2240,6 +2241,7 @@ mod tests {
                 ..Default::default()
             },
             day: "2026-10-16".to_owned(),
+            observed_at: "2026-10-16T02:56:00Z".to_owned(),
         };
         let completions = vec![completion];
         let p = plan(&PlanInput {
