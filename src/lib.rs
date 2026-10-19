@@ -17,6 +17,7 @@ pub mod resident;
 pub mod screencast;
 pub mod server;
 pub mod state;
+pub mod tabs;
 pub mod ticks;
 pub mod tray;
 pub mod tuning;

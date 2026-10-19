@@ -339,11 +339,12 @@ fn golden_page_shows_pass4_sections_and_pool_bars() {
         assert!(!html.contains(cut), "cut weekly renders: {cut}");
     }
     assert!(!html.contains("wk-nw-weekly"), "acts own their section now");
-    // Twelfth pass §1: four tabs in order; the standing/weeklies surface
-    // sits under Routine and NOT under the action-only First Crack tab.
+    // Twelfth pass §1: four tabs in order; thirteenth pass §2 made each a
+    // real `?tab=<slug>` link. The standing/weeklies surface sits under
+    // Routine and NOT under the action-only First Crack tab.
     let mut last = 0usize;
     for label in ["First Crack", "Hunt", "Backlog", "Routine"] {
-        let pos = html.find(&format!(">{label}</label>")).expect("tab label");
+        let pos = html.find(&format!(">{label}</a>")).expect("tab link");
         assert!(pos >= last, "tab {label} renders out of order");
         last = pos;
     }

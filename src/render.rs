@@ -59,6 +59,23 @@ pub enum IconMode {
     Embedded,
 }
 
+/// The four plan tabs as `(radio id, stable slug, label)`. The slug is what
+/// the loopback server records and what the real tab links carry, so the
+/// persisted selection survives regenerations and app restarts (thirteenth
+/// pass §2, addendum 46). Slugs are semantic so a future reordering of the
+/// tabs does not change what a remembered selection means.
+pub const TABS: [(&str, &str, &str); 4] = [
+    ("t1", "first-crack", "First Crack"),
+    ("t2", "hunt", "Hunt"),
+    ("t3", "backlog", "Backlog"),
+    ("t4", "routine", "Routine"),
+];
+
+/// The radio id for a persisted tab slug (`None` for an unknown slug).
+pub fn tab_id_for_slug(slug: &str) -> Option<&'static str> {
+    TABS.iter().find(|(_, s, _)| *s == slug).map(|(id, _, _)| *id)
+}
+
 /// Profile-backed daily bars: REMAINING caps from the live profile
 /// (addendum #2) — never estimated. A profile fetched before the most
 /// recent 00:00 UTC reset renders as reset (twelfth pass §3).
@@ -306,18 +323,25 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
 
     // The mock's tab mechanism: radio inputs precede the header so the
     // reference CSS's `#t1:checked~main #p1` rules apply (twelfth pass §1).
-    h.push_str("<input type=\"radio\" name=\"tab\" id=\"t1\" checked>\n");
-    h.push_str("<input type=\"radio\" name=\"tab\" id=\"t2\">\n");
-    h.push_str("<input type=\"radio\" name=\"tab\" id=\"t3\">\n");
-    h.push_str("<input type=\"radio\" name=\"tab\" id=\"t4\">\n");
+    // Each tab is ALSO a real link (`?tab=<slug>`) the loopback server
+    // records and renders checked on the next serve, so the 60s refresh
+    // lands back on the active tab (thirteenth pass §2, item 46). The
+    // default radio stays checked for a `file://` demo export.
+    for (i, (id, _, _)) in TABS.iter().enumerate() {
+        let checked = if i == 0 { " checked" } else { "" };
+        h.push_str(&format!(
+            "<input type=\"radio\" name=\"tab\" id=\"{id}\"{checked}>\n"
+        ));
+    }
 
     h.push_str(&header_html(plan, ctx));
 
     h.push_str("<nav class=\"tabs\">\n");
-    h.push_str("<label class=\"tab\" for=\"t1\">First Crack</label>\n");
-    h.push_str("<label class=\"tab\" for=\"t2\">Hunt</label>\n");
-    h.push_str("<label class=\"tab\" for=\"t3\">Backlog</label>\n");
-    h.push_str("<label class=\"tab\" for=\"t4\">Routine</label>\n");
+    for (id, slug, label) in TABS {
+        h.push_str(&format!(
+            "<a class=\"tab\" data-tab=\"{id}\" href=\"?tab={slug}\">{label}</a>\n"
+        ));
+    }
     h.push_str("</nav>\n<main>\n");
 
     h.push_str(&first_crack_html(plan, ctx));
@@ -1129,10 +1153,10 @@ b,h1,h2,h3,.brand,.tab,.tm{font-family:Rajdhani,-apple-system,"Segoe UI",sans-se
 .mut{color:var(--mut)}.sm{font-size:12px}.cy{color:var(--cy)}
 input[name=tab]{display:none}
 .tabs{display:flex;gap:6px;margin-bottom:16px}
-.tab{padding:7px 22px;cursor:pointer;font-weight:700;font-size:15px;letter-spacing:.14em;text-transform:uppercase;color:var(--mut);background:var(--cell);border:1px solid #1f2735;clip-path:polygon(7px 0,100% 0,100% calc(100% - 7px),calc(100% - 7px) 100%,0 100%,0 7px)}
+.tab{padding:7px 22px;cursor:pointer;font-weight:700;font-size:15px;letter-spacing:.14em;text-transform:uppercase;color:var(--mut);background:var(--cell);border:1px solid #1f2735;text-decoration:none;clip-path:polygon(7px 0,100% 0,100% calc(100% - 7px),calc(100% - 7px) 100%,0 100%,0 7px)}
 .page{display:none}
 #t1:checked~main #p1,#t2:checked~main #p2,#t3:checked~main #p3,#t4:checked~main #p4{display:block}
-#t1:checked~.tabs [for=t1],#t2:checked~.tabs [for=t2],#t3:checked~.tabs [for=t3],#t4:checked~.tabs [for=t4]{color:var(--cy);border-color:var(--cy)}
+#t1:checked~.tabs .tab[data-tab=t1],#t2:checked~.tabs .tab[data-tab=t2],#t3:checked~.tabs .tab[data-tab=t3],#t4:checked~.tabs .tab[data-tab=t4]{color:var(--cy);border-color:var(--cy)}
 h2{display:flex;align-items:baseline;gap:10px;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--mut);margin:0 0 10px;font-weight:600}
 h2 small,h3 small{font-size:11px;letter-spacing:.04em;text-transform:none;font-weight:500;color:#5d6676}
 h3{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--mut);margin:18px 0 8px}
@@ -1236,14 +1260,34 @@ const JS: &str = r#"
       } catch (e) {}
     });
   });
-  // Tabs persist across the 60s refresh (reference behaviour).
+  // Tabs: the loopback server records the active tab and renders the
+  // matching radio checked, so the 60s refresh — and an app restart —
+  // land back where he was (§2, item 46). The tab links are real (they work
+  // without JS: `?tab=<slug>` is recorded on the next GET); when served,
+  // we record via a light fetch and switch instantly instead of reloading.
+  // A file:// demo export falls back to ?tab / sessionStorage.
+  function showTab(id) {
+    var r = document.getElementById(id);
+    if (r) { r.checked = true; }
+    try { sessionStorage.setItem('fracker:tab', id); } catch (e) {}
+  }
   try {
-    var t = sessionStorage.getItem('fracker:tab');
-    if (t) { var r = document.getElementById(t); if (r) { r.checked = true; } }
+    var q = new URLSearchParams(location.search).get('tab');
+    var qa = q && document.querySelector('.tab[href="?tab=' + q + '"]');
+    if (qa) { showTab(qa.getAttribute('data-tab')); }
+    else if (!served) {
+      var t = sessionStorage.getItem('fracker:tab');
+      if (t) { showTab(t); }
+    }
   } catch (e) {}
-  document.querySelectorAll('input[name=tab]').forEach(function (r) {
-    r.addEventListener('change', function () {
-      try { sessionStorage.setItem('fracker:tab', r.id); } catch (e) {}
+  document.querySelectorAll('.tabs .tab').forEach(function (a) {
+    a.addEventListener('click', function (ev) {
+      showTab(a.getAttribute('data-tab'));
+      if (served) {
+        ev.preventDefault();
+        var slug = (a.getAttribute('href') || '').split('tab=')[1] || '';
+        try { fetch('/tab/' + encodeURIComponent(slug)); } catch (e) {}
+      }
     });
   });
   // Hunt's in-page filter controls (reference behaviour, CSS-driven).
@@ -1368,7 +1412,8 @@ mod tests {
         assert!(html.contains("clip-path"), "chamfered cards");
     }
 
-    /// Twelfth pass §1: four tabs in the reference's order.
+    /// Twelfth pass §1: four tabs in the reference's order. Thirteenth
+    /// pass §2: each is a real `?tab=<slug>` link for server persistence.
     #[test]
     fn four_tabs_render_in_order() {
         let t = crate::tuning::Tuning::for_tests();
@@ -1380,11 +1425,11 @@ mod tests {
         let ctx = empty_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
         let html = render_plan(&Plan::default(), &ctx);
         let mut last = 0usize;
-        for label in ["First Crack", "Hunt", "Backlog", "Routine"] {
-            let needle = format!(">{label}</label>");
+        for (id, slug, label) in TABS {
+            let needle = format!("data-tab=\"{id}\" href=\"?tab={slug}\">{label}</a>");
             let pos = html
                 .find(&needle)
-                .unwrap_or_else(|| panic!("missing tab {label}"));
+                .unwrap_or_else(|| panic!("missing tab link for {label}: {needle}"));
             assert!(pos >= last, "tab {label} renders out of order");
             last = pos;
         }
@@ -1392,6 +1437,19 @@ mod tests {
         for id in ["t1", "t2", "t3", "t4"] {
             assert!(html.contains(&format!("id=\"{id}\"")), "radio {id}");
         }
+        // First Crack is the default; the server re-injects the remembered
+        // tab (see server::inject_tab).
+        assert!(html.contains("id=\"t1\" checked"), "First Crack default");
+        assert!(html.contains(".tab[data-tab=t1]"), "active-tab CSS selector");
+        assert!(!html.contains("[for=t1]"), "label-based tab CSS is gone");
+    }
+
+    #[test]
+    fn tab_slug_mapping_round_trips() {
+        for (id, slug, _) in TABS {
+            assert_eq!(tab_id_for_slug(slug), Some(id));
+        }
+        assert_eq!(tab_id_for_slug("nope"), None);
     }
 
     /// Twelfth pass §1: the mock's grids land on the right pages.
