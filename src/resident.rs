@@ -289,8 +289,11 @@ async fn toggle_capture(
             *capture = Some(run);
         }
         Err(e) => {
-            eprintln!("resident: capture start failed: {e}");
-            fail_capture(status, log, "consent pending", &e);
+            eprintln!("resident: capture start failed ({}): {}", e.stage, e.message);
+            // Name the stage that FAILED (eleventh pass §2, item 40a): a
+            // post-consent remote-fd failure must not render as
+            // "consent pending". `NegotiateError` carries the stage.
+            fail_capture(status, log, e.stage, &e.message);
             refresh_tray(tray).await;
         }
     }
@@ -301,7 +304,7 @@ async fn start_capture(
     opts: &ResidentOptions,
     status: &Arc<Mutex<TrayStatus>>,
     log: &CaptureLog,
-) -> Result<CaptureRun, String> {
+) -> Result<CaptureRun, screencast::NegotiateError> {
     let token = screencast::load_restore_token(&opts.state_dir);
     match token.as_ref() {
         Some(_) => log.record("consent pending", "using saved restore token"),
