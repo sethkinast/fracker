@@ -120,54 +120,66 @@ async fn resident_starts_and_stops_cleanly_with_no_log_at_all() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// A worldstate whose alert ids match the fixture log's `alertId`s, plus
-/// one alert the log never mentions (proving the strike is only ever a
-/// positive log match). Expiries sit after the worldstate timestamp so
-/// every alert renders.
+/// DE-shaped worldstate whose alert ids/locations match the fixture log's
+/// `alertId`/`location`s, plus one alert the log never mentions (proving
+/// the strike is only ever a positive log match). Expiries sit after the
+/// payload's `Time` so every alert renders.
 const SYNTH_WORLDSTATE: &str = r#"{
-  "timestamp": "2026-10-17T00:00:00.000Z",
-  "alerts": [
+  "Time": 1792195200,
+  "Alerts": [
     {
-      "id": "6ad0d7360dfe89c5d82290a2",
-      "expiry": "2026-10-19T00:00:00.000Z",
-      "tag": "RoadToTauEvent",
-      "mission": {
-        "node": "Nimus (Eris)", "type": "Hive", "faction": "Infested",
-        "reward": { "countedItems": [
-          { "uniqueName": "/Lotus/Types/Gameplay/Events/RoadToTauEvent/RoadToTauEventResource", "type": "Road To Tau Event Resource", "count": 50 }
+      "_id": { "$oid": "6ad0d7360dfe89c5d82290a2" },
+      "Activation": { "$date": { "$numberLong": "1792108800000" } },
+      "Expiry": { "$date": { "$numberLong": "1792368000000" } },
+      "Tag": "RoadToTauEvent",
+      "MissionInfo": {
+        "missionType": "MT_HIVE", "faction": "FC_INFESTATION",
+        "location": "SolNode175",
+        "descText": "/Lotus/Language/TauPrologue/EventAlertTitle",
+        "missionReward": { "credits": 17000, "countedItems": [
+          { "ItemType": "/Lotus/Types/Gameplay/Events/RoadToTauEvent/RoadToTauEventResource", "ItemCount": 50 }
         ] }
       }
     },
     {
-      "id": "6ad0d7360dfe89c5d82290a4",
-      "expiry": "2026-10-19T00:00:00.000Z",
-      "tag": "RoadToTauEvent",
-      "mission": {
-        "node": "Brugia (Eris)", "type": "Extermination", "faction": "Infested",
-        "reward": { "countedItems": [
-          { "uniqueName": "/Lotus/Types/Gameplay/Events/RoadToTauEvent/RoadToTauEventResource", "type": "Road To Tau Event Resource", "count": 50 }
+      "_id": { "$oid": "6ad0d7360dfe89c5d82290a4" },
+      "Activation": { "$date": { "$numberLong": "1792108800000" } },
+      "Expiry": { "$date": { "$numberLong": "1792368000000" } },
+      "Tag": "RoadToTauEvent",
+      "MissionInfo": {
+        "missionType": "MT_EXTERMINATION", "faction": "FC_INFESTATION",
+        "location": "SolNode172",
+        "descText": "/Lotus/Language/TauPrologue/EventAlertTitle",
+        "missionReward": { "credits": 17000, "countedItems": [
+          { "ItemType": "/Lotus/Types/Gameplay/Events/RoadToTauEvent/RoadToTauEventResource", "ItemCount": 50 }
         ] }
       }
     },
     {
-      "id": "6ad0d7360dfe89c5d82290a6",
-      "expiry": "2026-10-19T00:00:00.000Z",
-      "tag": "RoadToTauEvent",
-      "mission": {
-        "node": "Xini (Eris)", "type": "Survival", "faction": "Infested",
-        "reward": { "countedItems": [
-          { "uniqueName": "/Lotus/Types/Gameplay/Events/RoadToTauEvent/RoadToTauEventResource", "type": "Road To Tau Event Resource", "count": 50 }
+      "_id": { "$oid": "6ad0d7360dfe89c5d82290a6" },
+      "Activation": { "$date": { "$numberLong": "1792108800000" } },
+      "Expiry": { "$date": { "$numberLong": "1792368000000" } },
+      "Tag": "RoadToTauEvent",
+      "MissionInfo": {
+        "missionType": "MT_SURVIVAL", "faction": "FC_INFESTATION",
+        "location": "SolNode153",
+        "descText": "/Lotus/Language/TauPrologue/EventAlertTitle",
+        "missionReward": { "credits": 17000, "countedItems": [
+          { "ItemType": "/Lotus/Types/Gameplay/Events/RoadToTauEvent/RoadToTauEventResource", "ItemCount": 50 }
         ] }
       }
     },
     {
-      "id": "ffffffffffffffffffffffff",
-      "expiry": "2026-10-19T00:00:00.000Z",
-      "tag": "SpaceNinjaEvent",
-      "mission": {
-        "node": "Larunda (Mercury)", "type": "Capture", "faction": "Corpus",
-        "reward": { "countedItems": [
-          { "uniqueName": "/Lotus/Types/Gameplay/Events/SpaceNinjaEvent/SpaceNinjaEventResource", "type": "Space Ninja Resource", "count": 5 }
+      "_id": { "$oid": "ffffffffffffffffffffffff" },
+      "Activation": { "$date": { "$numberLong": "1792108800000" } },
+      "Expiry": { "$date": { "$numberLong": "1792368000000" } },
+      "Tag": "SpaceNinjaEvent",
+      "MissionInfo": {
+        "missionType": "MT_CAPTURE", "faction": "FC_CORPUS",
+        "location": "SolNode166",
+        "descText": "/Lotus/Language/Events/SpaceNinjaEventTitle",
+        "missionReward": { "credits": 5000, "countedItems": [
+          { "ItemType": "/Lotus/Types/Gameplay/Events/SpaceNinjaEvent/SpaceNinjaEventResource", "ItemCount": 5 }
         ] }
       }
     }
@@ -248,7 +260,7 @@ async fn headless_resident_strikes_log_completed_alerts_in_the_report() {
     );
     // ...and the never-mentioned fourth alert still renders unstruck.
     assert!(
-        html.contains("<b>Larunda</b>") && html.contains("Capture"),
+        html.contains("<b>Nimus</b>") && html.contains("Capture"),
         "the unmatched alert still renders"
     );
     assert!(

@@ -1,0 +1,4 @@
+{
+ "_note": "Hub node key -> display location, evidenced only. TradeHUB1 is Varzia's Maroo's Bazaar (warframestat fixture, same id 631f8c4ac36af423770eaa97). EarthHUB (Baro) is deliberately absent: the relay varies per visit and DE carries only the hub key, so it renders raw and is flagged as a decode gap; never guess a relay.",
+ "TradeHUB1": "Maroo's Bazaar (Mars)"
+}

@@ -391,8 +391,9 @@ fn header_html(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     ));
     h.push_str("</div>\n");
     h.push_str(&format!(
-        "<div class=\"stamp\">MR{mr} &middot; generated {} &middot; {}</div>\n",
+        "<div class=\"stamp\">MR{mr} &middot; generated {} &middot; {} &middot; {}</div>\n",
         esc(&ctx.generated_label),
+        esc(&ctx.world_status),
         esc(&ctx.targets_status),
     ));
     h.push_str("</header>\n");
