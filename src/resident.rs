@@ -258,10 +258,20 @@ pub async fn run(
         }
     };
 
-    // Stop any capture and the watch thread, then wait for both.
-    stop_capture(&mut capture);
+    // Cooperative shutdown order: release the watch first (it listens on
+    // the shutdown receiver), then stop/reap any capture, then close the
+    // tray. ksni's `Handle` has no Drop and its zbus service/socket tasks
+    // otherwise keep the tokio runtime alive after the loop returns — the
+    // reason a tray Quit used to leave the process resident (item 48).
     shutdown.trigger();
+    stop_capture(&mut capture);
     let _ = watch_thread.join();
+    if let Some(handle) = &tray {
+        match tokio::time::timeout(Duration::from_secs(3), handle.shutdown()).await {
+            Ok(()) => {}
+            Err(_) => eprintln!("resident: tray shutdown timed out"),
+        }
+    }
     result
 }
 

@@ -120,6 +120,39 @@ async fn resident_starts_and_stops_cleanly_with_no_log_at_all() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// Item 48 (tray Quit): the Quit verb must break the resident loop and
+/// return cleanly. The process-level teardown (explicit `Handle::shutdown`
+/// plus the deterministic `process::exit` in `main`) is reasoned rather
+/// than exercised here — this box has no DBus session bus to spawn a real
+/// tray against — but the loop half of the fix is proven: no restart, no
+/// re-entry, no hold.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tray_quit_command_exits_the_resident_loop() {
+    let base = scrape_dir("quit");
+    let opts = ResidentOptions {
+        report: offline_report_config(&base),
+        log_path: base.join("log/EE.log"),
+        state_dir: base.join("state"),
+        watch_interval_ms: 25,
+        serve_port: 0,
+        pop_on_session_start: false,
+    };
+    let shutdown = Shutdown::new();
+    let status = Arc::new(Mutex::new(TrayStatus::default()));
+    let (cmds_tx, cmds_rx) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(async move {
+        fracker::resident::run(opts, shutdown, None, status, Some(cmds_rx)).await
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    cmds_tx.send(fracker::tray::TrayCommand::Quit).unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .expect("resident loop must exit promptly on Quit")
+        .expect("resident task did not panic");
+    assert!(result.is_ok(), "clean exit: {result:?}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// DE-shaped worldstate whose alert ids/locations match the fixture log's
 /// `alertId`/`location`s, plus one alert the log never mentions (proving
 /// the strike is only ever a positive log match). Expiries sit after the
