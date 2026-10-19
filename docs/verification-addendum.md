@@ -307,3 +307,10 @@ it refines the brief where they disagree. For the next worker pass.
     also satisfy an activation-time guard (completion
     observed at/after the alert's activation). Yesterday's
     runs must never strike today's alerts.
+46. **Refresh must not reset the tab (Seth nit, 2026-10-18;
+    held for the round after pass 12).** The 60s meta-refresh
+    reloads the page and the CSS-radio tab state resets to
+    First Crack, kicking him out of Hunt/Backlog/Routine.
+    Since the page is served by the app (item 41), persist
+    the active tab server-side or via cookie so a refresh
+    lands back on the tab he was viewing.
