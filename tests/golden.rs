@@ -370,6 +370,12 @@ fn golden_page_shows_pass4_sections_and_pool_bars() {
     assert!(routine.contains("Archon Hunt"), "weeklies render under Routine");
     assert!(routine.contains("wk-archon"), "weekly tick key lives under Routine");
     assert!(routine.contains("sortie-daily"), "sortie tick key lives under Routine");
+    // Item 50a: the sortie row sits in the cadence checklist ("This week"
+    // board), not the Today standing block.
+    let board = &routine[routine.find("class=\"wkg\"").expect("weekly board")..];
+    assert!(board.contains("sortie-daily"), "sortie row inside the cadence checklist");
+    let today = &routine[..routine.find("<h2>This week</h2>").expect("week header")];
+    assert!(!today.contains("sortie-daily"), "sortie row out of the Today standing block");
     assert!(!first_crack.contains("Focus"), "no standing/focus on First Crack");
     assert!(!first_crack.contains("Syndicates"), "no standing on First Crack");
     assert!(!first_crack.contains("Archon Hunt"), "no weeklies on First Crack");
