@@ -28,6 +28,10 @@ use crate::tuning::Tuning;
 pub struct RenderContext<'a> {
     pub world: &'a WorldState,
     pub generated_label: String,
+    /// Item 52: a token unique to THIS regeneration. The loopback server
+    /// scopes the remembered tab to it, so the 60s refresh keeps the tab
+    /// while a new report resets to First Crack.
+    pub generation: String,
     /// e.g. "backlog 63 primes · profile live (MR30)".
     pub targets_status: String,
     pub world_status: String,
@@ -319,7 +323,11 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     // The in-game day the tick store is keyed by (ninth pass §2): the plan
     // date, read by the client + the loopback server when applying ticks.
     let day = ctx.generated_label.get(..10).unwrap_or("");
-    h.push_str(&format!("<body data-day=\"{}\">\n<div class=\"wrap\">\n", esc(day)));
+    h.push_str(&format!(
+        "<body data-day=\"{}\" data-generation=\"{}\">\n<div class=\"wrap\">\n",
+        esc(day),
+        esc(&ctx.generation)
+    ));
 
     // The mock's tab mechanism: radio inputs precede the header so the
     // reference CSS's `#t1:checked~main #p1` rules apply (twelfth pass §1).
@@ -1332,6 +1340,7 @@ mod tests {
         RenderContext {
             world,
             generated_label: "2026-10-18 04:03 UTC".to_owned(),
+            generation: "test-generation".to_owned(),
             targets_status: "backlog 63 primes · profile live (MR30)".to_owned(),
             world_status: "fixture".to_owned(),
             weekly_done: weekly,

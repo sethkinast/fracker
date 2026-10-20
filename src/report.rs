@@ -323,6 +323,14 @@ pub async fn generate(
     let ctx = render::RenderContext {
         world: &world,
         generated_label: now.format("%Y-%m-%d %H:%M UTC").to_string(),
+        // Item 52: unique per regeneration (nanosecond stamp). The server
+        // scopes the remembered tab to this value: same generation = the
+        // 60s refreshes keep the tab; a new report = First Crack.
+        generation: format!(
+            "{}",
+            now.timestamp_nanos_opt()
+                .unwrap_or_else(|| now.timestamp_millis() * 1_000_000)
+        ),
         targets_status: format!(
             "backlog {} primes · profile {}",
             backlog.primes.unmastered.len(),

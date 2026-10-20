@@ -5,8 +5,8 @@
 //! resident serves the page itself (item 41), the active tab is recorded
 //! here — the same store-of-record pattern as [`crate::ticks`] — and the
 //! server renders the matching radio `checked` on subsequent serves. The
-//! selection therefore survives the meta-refresh, report regenerations,
-//! and app restarts.
+//! selection therefore survives the meta-refresh and app restarts **within
+//! one plan generation**; a new report resets to First Crack (item 52).
 //!
 //! The value is a stable tab *slug* (see `render::TABS`), not a radio id,
 //! so a future reordering of the tabs does not silently change what a
@@ -16,11 +16,16 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// The active plan tab, as a stable slug (`hunt`, `backlog`, …).
+/// The active plan tab, as a stable slug (`hunt`, `backlog`, …), scoped to
+/// the report generation that was being served when it was chosen.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TabStore {
     #[serde(default)]
     pub active: String,
+    /// Item 52: the `<body data-generation>` token of the report the
+    /// choice belongs to. Empty for a pre-item-52 file (loads as unscoped).
+    #[serde(default)]
+    pub generation: String,
 }
 
 impl TabStore {
@@ -66,6 +71,19 @@ impl TabStore {
     pub fn active(&self) -> &str {
         &self.active
     }
+
+    /// Item 52: bind the remembered choice to one plan generation. A new
+    /// generation (a fresh regeneration, not its 60s refreshes) clears the
+    /// choice so the page starts on First Crack again. Returns true when
+    /// the scope changed (the caller should persist the cleared store).
+    pub fn scope_to(&mut self, generation: &str) -> bool {
+        if self.generation == generation {
+            return false;
+        }
+        self.generation = generation.to_owned();
+        self.active.clear();
+        true
+    }
 }
 
 #[cfg(test)]
@@ -110,6 +128,34 @@ mod tests {
         assert_eq!(TabStore::load(&path), TabStore::default());
         std::fs::write(&path, "{not json").unwrap();
         assert_eq!(TabStore::load(&path), TabStore::default());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Item 52: a tab choice lives for exactly one generation.
+    #[test]
+    fn scope_keeps_the_choice_for_the_same_generation_and_resets_on_a_new_one() {
+        let mut s = TabStore::default();
+        assert!(s.scope_to("gen-1"), "first scope is a change");
+        s.set("hunt");
+        assert!(!s.scope_to("gen-1"), "same generation keeps the choice");
+        assert_eq!(s.active(), "hunt");
+
+        // A NEW regeneration invalidates it: the choice is cleared.
+        assert!(s.scope_to("gen-2"));
+        assert_eq!(s.active(), "", "new generation resets to First Crack");
+        assert_eq!(s.generation, "gen-2");
+    }
+
+    #[test]
+    fn a_pre_item_52_store_loads_as_unscoped() {
+        let dir = tmp("legacy");
+        let path = TabStore::file(&dir);
+        std::fs::write(&path, r#"{"active":"routine"}"#).unwrap();
+        let mut s = TabStore::load(&path);
+        assert_eq!(s.active(), "routine");
+        assert_eq!(s.generation, "");
+        assert!(s.scope_to("gen-1"), "legacy choice cannot span generations");
+        assert_eq!(s.active(), "");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
