@@ -77,7 +77,7 @@ obs = "manual"
 [[weekly]]
 id = "palladino"
 name = "Palladino"
-limit = "1 ea/wk"
+limit = "10 relics + 3 transmuters/wk"
 time = "2m"
 obs = "manual"
 
