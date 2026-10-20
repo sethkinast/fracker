@@ -531,11 +531,12 @@ async fn start_capture(
             "no restore token yet (first run) — full consent required",
         ),
     }
-    let negotiated = screencast::negotiate(token).await?;
+    let negotiated = screencast::negotiate(token, log).await?;
     log.record(
         "consent pending",
         &format!(
-            "consent granted; remote fd ready (restore_token {})",
+            "consent granted; selected ScreenCast node {}; remote fd ready (restore_token {})",
+            negotiated.node_id,
             if negotiated.restore_token.is_some() {
                 "issued"
             } else {
@@ -610,6 +611,7 @@ fn capture_worker(
     let ctx = data.context();
     let idle = data.classifier.idle_stop_frames;
     let progress_tx = tx.clone();
+    let frame_log = log.clone();
     let mut announced = false;
     let result = capture::run_capture(
         &ctx,
@@ -621,7 +623,7 @@ fn capture_worker(
             if !announced {
                 announced = true;
                 let _ = progress_tx.send(CaptureEvent::Stage(CaptureStage::Capturing));
-                log.record("capturing", "draining frames (scroll your inventory)");
+                frame_log.record("capturing", "draining frames (scroll your inventory)");
             }
             let _ = progress_tx.send(CaptureEvent::Progress(s.counts()));
         },
@@ -630,7 +632,14 @@ fn capture_worker(
         Ok(session) => {
             let _ = tx.send(CaptureEvent::Finished(Box::new(session)));
         }
-        Err(e) => send_failed(&tx, "capturing", format!("capture: {e}")),
+        Err(e) => {
+            // Item 54: a failure before the first frame is a connect
+            // failure, not "capturing". The stage comes from what the
+            // pipeline actually achieved.
+            let stage = screencast::failure_stage(announced);
+            log.record(stage, &format!("capture: {e}"));
+            send_failed(&tx, stage, format!("capture: {e}"));
+        }
     }
 }
 
@@ -663,8 +672,20 @@ async fn pump_capture(
             }
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => {
+                // The worker vanished without a terminal event. Label it by
+                // what the lifecycle actually reached (item 54): a worker
+                // that died before the first frame was still connecting.
+                let stage = if status
+                    .lock()
+                    .map(|s| matches!(s.capture.stage(), CaptureStage::Capturing))
+                    .unwrap_or(false)
+                {
+                    "capturing"
+                } else {
+                    "connecting"
+                };
                 finished = Some(CaptureEvent::Failed {
-                    stage: "capturing",
+                    stage,
                     message: "capture worker stopped unexpectedly".to_owned(),
                 });
                 break;
