@@ -442,3 +442,14 @@ it refines the brief where they disagree. For the next worker pass.
     globals and waits for the node before connecting. The
     error line also still mislabels the stage "capturing"
     before any frame arrived.
+55. **Capture source guidance (Seth, 2026-10-19).** The
+    portal dialog offers every source type because the app
+    doesn't constrain them. It should request WINDOW |
+    MONITOR with the cursor hidden, and the flow should
+    steer Seth to pick the Warframe WINDOW: window frames
+    are the pure game surface (no overlapping windows,
+    notifications, or extra monitors) at the 2560x1440
+    geometry the layouts were tuned on — materially better
+    OCR input than a full-screen share. (For the connect
+    itself the choice is neutral; it's an OCR-quality and
+    robustness call.)
