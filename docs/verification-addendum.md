@@ -453,3 +453,10 @@ it refines the brief where they disagree. For the next worker pass.
     OCR input than a full-screen share. (For the connect
     itself the choice is neutral; it's an OCR-quality and
     robustness call.)
+    Key evidence (Seth, 2026-10-19 22:47): Quit DOES stop
+    operations — menu items go dead, EE.log scraping halts —
+    but the process and tray icon remain. So the shutdown
+    sequence starts (watch released, loop ends) and then
+    hangs before process exit; the icon outlives its menu.
+    Instrument each teardown step; the gate stays the
+    D-Bus-level exit assertion.
