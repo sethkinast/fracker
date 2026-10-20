@@ -460,3 +460,18 @@ it refines the brief where they disagree. For the next worker pass.
     hangs before process exit; the icon outlives its menu.
     Instrument each teardown step; the gate stays the
     D-Bus-level exit assertion.
+56. **Review follow-ups (GLM review of passes 14-15,
+    2026-10-20; Seth approved the round same day).**
+    (a) on_param_changed must read the SPA pod's own size,
+    not a fixed 256 bytes (screencast.rs:1497). (b) Visible
+    loss, never silent: unparseable alert timestamps must
+    not fail the activation guard open, unparseable fissure
+    expiries must not silently drop fissures, renamed or
+    missing section fields must surface via the gaps
+    channel (decode_tier is the model). (c) Capture Drop
+    takes the thread-loop lock before disconnecting.
+    (d) Golden guard: goldens assert their "now" matches
+    the committed fixture's Time, so fixture regeneration
+    cannot silently drift them. Recorded, NOT scheduled:
+    the unbounded frame channel and tray_quit.rs's hard
+    dbus-daemon requirement.
