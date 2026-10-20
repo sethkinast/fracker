@@ -1,6 +1,7 @@
 //! Fracker library: config, fetchers, planner, renderer, state, and the
 //! resident watch + tray runtime.
 
+pub mod applog;
 pub mod capture;
 pub mod config;
 pub mod elog;

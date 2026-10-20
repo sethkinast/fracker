@@ -205,9 +205,9 @@ fn handle(
             // A `?tab=<slug>` on the page URL is a real-link selection; a
             // valid one is recorded before the page renders checked.
             if let Some(slug) = query_param(query, "tab") {
-                record_tab(tabs, tabs_path, &slug);
+                record_tab(tabs, tabs_path, report_path, &slug);
             }
-            let (status, html) = plan_page(report_path, ticks, tabs);
+            let (status, html) = plan_page(report_path, tabs_path, ticks, tabs);
             respond(&mut stream, status, "text/html; charset=utf-8", html.as_bytes())
         }
         ("GET", p) if p.starts_with("/tab/") => {
@@ -215,7 +215,7 @@ fn handle(
             // record and return 204 (no page reload), so tab switches are
             // instant while still living server-side.
             let slug = &p["/tab/".len()..];
-            if record_tab(tabs, tabs_path, slug) {
+            if record_tab(tabs, tabs_path, report_path, slug) {
                 respond(&mut stream, "204 No Content", "text/plain", b"")
             } else {
                 respond(&mut stream, "404 Not Found", "text/plain", b"unknown tab")
@@ -233,13 +233,24 @@ fn handle(
 }
 
 /// Record an active-tab slug (validated against the renderer's tabs) and
-/// persist it best-effort. Returns false for an unknown slug so the caller
-/// can answer 404 rather than quietly remember garbage.
-fn record_tab(tabs: &Arc<Mutex<TabStore>>, tabs_path: &std::path::Path, slug: &str) -> bool {
+/// persist it best-effort, scoped to the current report generation (item
+/// 52). A tab clicked on an old page after a regeneration is recorded
+/// against the new generation only if the page it was clicked from is
+/// current; the generation is read from the report file that / serves.
+/// Returns false for an unknown slug so the caller can answer 404 rather
+/// than quietly remember garbage.
+fn record_tab(
+    tabs: &Arc<Mutex<TabStore>>,
+    tabs_path: &std::path::Path,
+    report_path: &std::path::Path,
+    slug: &str,
+) -> bool {
     if crate::render::tab_id_for_slug(slug).is_none() {
         return false;
     }
+    let generation = report_generation(report_path);
     if let Ok(mut store) = tabs.lock() {
+        store.scope_to(&generation);
         store.set(slug);
         let _ = store.save(tabs_path);
     }
@@ -260,9 +271,11 @@ fn query_param(query: &str, key: &str) -> Option<String> {
 
 /// Re-read the report file for every request (so a regenerated page is
 /// always current), splice the live ticks onto the `<body>` tag, and mark
-/// the remembered tab `checked` (thirteenth pass §2).
+/// the remembered tab `checked` when it belongs to THIS generation
+/// (thirteenth pass §2; item 52 scopes it to one generation).
 fn plan_page(
     report_path: &std::path::Path,
+    tabs_path: &std::path::Path,
     ticks: &Arc<Mutex<TickStore>>,
     tabs: &Arc<Mutex<TabStore>>,
 ) -> (&'static str, String) {
@@ -271,17 +284,41 @@ fn plan_page(
         Err(_) => PLACEHOLDER.to_owned(),
     };
     let day = body_day(&html).unwrap_or_default();
+    let generation = body_generation(&html).unwrap_or_default();
     let store = ticks.lock().map(|s| s.clone()).unwrap_or_default();
     let json = serde_json::to_string(&store).unwrap_or_else(|_| "{}".to_owned());
-    // The remembered slug maps to a radio id; unknown/empty falls back to
-    // the renderer's default (First Crack).
+    // The remembered slug only applies while the report is the same
+    // generation. A new regeneration clears the scope, so the page starts
+    // on First Crack again; the 60s meta-refreshes of one report keep the
+    // choice. The scoped-out store is written back best-effort.
     let active = tabs
         .lock()
         .ok()
-        .and_then(|t| crate::render::tab_id_for_slug(t.active()))
+        .map(|mut t| {
+            if t.scope_to(&generation) {
+                let _ = t.save(tabs_path);
+            }
+            crate::render::tab_id_for_slug(t.active()).unwrap_or("t1")
+        })
         .unwrap_or("t1");
     let html = inject_tab(&html, active);
     ("200 OK", inject_ticks(&html, &base64_encode(json.as_bytes()), &day))
+}
+
+/// The plan generation as rendered (`<body ... data-generation="…">`).
+fn body_generation(html: &str) -> Option<String> {
+    let start = html.find("data-generation=\"")? + "data-generation=\"".len();
+    let rest = &html[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_owned())
+}
+
+/// The current generation of the report on disk (`""` when absent).
+fn report_generation(report_path: &std::path::Path) -> String {
+    std::fs::read_to_string(report_path)
+        .ok()
+        .and_then(|html| body_generation(&html))
+        .unwrap_or_default()
 }
 
 /// The plan day as rendered (`<body data-day="YYYY-MM-DD">`).
@@ -614,7 +651,7 @@ mod tests {
         let report = dir.join("plan.html");
         std::fs::write(
             &report,
-            "<!DOCTYPE html><html><body data-day=\"2026-10-18\">\
+            "<!DOCTYPE html><html><body data-day=\"2026-10-18\" data-generation=\"gen-1\">\
              <input type=\"radio\" name=\"tab\" id=\"t1\" checked>\
              <input type=\"radio\" name=\"tab\" id=\"t2\">\
              <input type=\"radio\" name=\"tab\" id=\"t3\">\
@@ -665,5 +702,67 @@ mod tests {
         .expect("restart binds");
         assert!(http_get(server2.port(), "/").contains("id=\"t3\" checked"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Item 52: the choice survives the 60s refreshes of one report but a
+    /// NEW regeneration resets it to First Crack.
+    #[test]
+    fn a_new_generation_resets_the_remembered_tab() {
+        let dir = std::env::temp_dir().join(format!(
+            "fracker-tab-gen-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let report = dir.join("plan.html");
+        let page = |generation: &str| {
+            format!(
+                "<!DOCTYPE html><html><body data-day=\"2026-10-18\" data-generation=\"{generation}\">\
+                 <input type=\"radio\" name=\"tab\" id=\"t1\" checked>\
+                 <input type=\"radio\" name=\"tab\" id=\"t2\">\
+                 <input type=\"radio\" name=\"tab\" id=\"t3\">\
+                 <input type=\"radio\" name=\"tab\" id=\"t4\"></body></html>"
+            )
+        };
+        std::fs::write(&report, page("gen-1")).unwrap();
+        let tabs_path = TabStore::file(&dir);
+        let server = serve(
+            0,
+            report.clone(),
+            TickStore::file(&dir),
+            tabs_path.clone(),
+            Arc::new(Mutex::new(TickStore::default())),
+        )
+        .expect("server binds");
+
+        // Choose Backlog, then refresh the same generation several times.
+        assert!(http_get(server.port(), "/?tab=backlog").contains("id=\"t3\" checked"));
+        for _ in 0..2 {
+            let refreshed = http_get(server.port(), "/");
+            assert!(refreshed.contains("id=\"t3\" checked"), "{refreshed}");
+        }
+
+        // A new report lands (a regeneration): First Crack again.
+        std::fs::write(&report, page("gen-2")).unwrap();
+        let reset = http_get(server.port(), "/");
+        assert!(reset.contains("id=\"t1\" checked"), "{reset}");
+        assert!(!reset.contains("id=\"t3\" checked"), "{reset}");
+
+        // The choice now belongs to gen-2 and survives its own refreshes.
+        assert!(http_get(server.port(), "/?tab=hunt").contains("id=\"t2\" checked"));
+        assert!(http_get(server.port(), "/").contains("id=\"t2\" checked"));
+        let disk = TabStore::load(&tabs_path);
+        assert_eq!(disk.generation, "gen-2");
+        assert_eq!(disk.active(), "hunt");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn body_generation_reads_the_renderer_attribute() {
+        assert_eq!(
+            body_generation("<body data-day=\"x\" data-generation=\"42\">").as_deref(),
+            Some("42")
+        );
+        assert_eq!(body_generation("<body data-day=\"x\">"), None);
     }
 }

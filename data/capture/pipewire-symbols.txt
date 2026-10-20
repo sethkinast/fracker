@@ -9,7 +9,8 @@
 #   pipewire.h        pw_init
 #   thread-loop.h     pw_thread_loop_*
 #   context.h         pw_context_new / pw_context_destroy
-#   core.h            pw_context_connect_fd
+#   core.h            pw_context_connect_fd / pw_core_get_registry
+#   registry.h        pw_registry_add_listener
 #   stream.h          pw_stream_*
 #
 # NOTE: pw_thread_loop_get_context is deliberately absent — it is not part
@@ -24,6 +25,8 @@ pw_thread_loop_get_loop
 pw_context_new
 pw_context_destroy
 pw_context_connect_fd
+pw_core_get_registry
+pw_registry_add_listener
 pw_stream_new
 pw_stream_add_listener
 pw_stream_connect

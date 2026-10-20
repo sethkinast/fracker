@@ -41,6 +41,15 @@ const SESSION_SETTLE: Duration = Duration::from_millis(1500);
 /// (delete/recreate) cannot re-arm the auto-open.
 const SESSION_END_QUIET: Duration = Duration::from_secs(60);
 
+/// Teardown bounds (item 53). A step that exceeds these is logged as
+/// "detached" and left to `process::exit`; no step may keep the tray icon
+/// (and the process) alive forever.
+const WATCH_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
+const CAPTURE_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
+const TRAY_REFRESH_TIMEOUT: Duration = Duration::from_secs(2);
+const TASK_ABORT_TIMEOUT: Duration = Duration::from_secs(2);
+
+use crate::applog::AppLog;
 use crate::capture::{self, CaptureData, CaptureLog, CaptureSession, CaptureStage};
 use crate::ocr::StockState as OcrStock;
 use crate::report::{self, ReportConfig};
@@ -160,6 +169,14 @@ pub async fn run(
 ) -> Result<(), String> {
     let (trigger_tx, mut trigger_rx) = mpsc::unbounded_channel::<Trigger>();
     let capture_log = CaptureLog::open(&opts.state_dir);
+    // Item 53: a Quit that leaves a zombie is invisible in unit tests. Every
+    // activation and every teardown step lands in `resident.log`, so one live
+    // run names the hang point.
+    let app_log = AppLog::open(&opts.state_dir);
+    app_log.record(
+        "resident",
+        &format!("start (pid {} tray {})", std::process::id(), tray.is_some()),
+    );
     // Ninth pass §4: the log-proven mission ledger the watch thread fills
     // and every report reads. Shared so the report path always sees the
     // latest completions, and seeded from persisted state so a restart
@@ -203,6 +220,7 @@ pub async fn run(
         shutdown.receiver(),
         completions.clone(),
     );
+    let plan_url = plan_server.as_ref().map(|s| s.url().to_owned());
 
     let mut sd = shutdown.receiver();
     // The Capture Inventory worker is polled on a light tick: draining the
@@ -210,12 +228,51 @@ pub async fn run(
     // select) keeps the loop borrow-check-clean while live counts still
     // refresh a few times a second.
     let mut capture: Option<CaptureRun> = None;
+    // Item 53 root cause: a report (or a capture consent) used to run INSIDE
+    // the control loop, so a Quit clicked while one was in flight was only
+    // dequeued after it finished — up to a full network timeout later. The
+    // tray icon stayed up and the menu looked dead. Reports now run as their
+    // own task; the loop only reacts to completion, so Quit is always read.
+    let (job_tx, mut job_rx) = mpsc::unbounded_channel::<()>();
+    let mut report_job: Option<tokio::task::JoinHandle<()>> = None;
+    let mut queued: Option<(Trigger, bool)> = None;
+    let (capture_start_tx, mut capture_start_rx) =
+        mpsc::unbounded_channel::<Result<CaptureRun, screencast::NegotiateError>>();
+    let mut capture_start: Option<tokio::task::JoinHandle<()>> = None;
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    macro_rules! schedule_report {
+        ($trigger:expr, $open:expr) => {{
+            let trigger = $trigger;
+            let open = $open;
+            if report_job.is_none() {
+                report_job = Some(spawn_report_job(
+                    opts.clone(),
+                    status.clone(),
+                    tray.clone(),
+                    trigger,
+                    completions.clone(),
+                    open,
+                    plan_url.clone(),
+                    app_log.clone(),
+                    job_tx.clone(),
+                ));
+            } else {
+                // One follow-up is enough: every trigger means "the page is
+                // stale". Preserve an auto-open request from a session start
+                // that arrived while a report was already running.
+                let queued_open = queued.take().map(|(_, o)| o).unwrap_or(false);
+                queued = Some((trigger, queued_open || open));
+            }
+        }};
+    }
+
     let result = loop {
         tokio::select! {
             _ = sd.changed() => {
                 if *sd.borrow() {
+                    app_log.record("quit", "shutdown signal observed");
                     break Ok(());
                 }
             }
@@ -229,49 +286,164 @@ pub async fn run(
                     burst.push(t);
                 }
                 let session_started = burst.contains(&Trigger::SessionStart);
-                do_report(&opts, &status, &tray, burst[0], &completions).await;
-                // Ninth pass §2/item 40b + twelfth pass §2: the settled
-                // login is the only auto-open trigger, at most once per
-                // session. pop_on_session_start is the §9 switch.
-                if session_started && opts.pop_on_session_start {
-                    open_page(&opts, &status, &tray, &completions, &plan_server).await;
-                }
+                schedule_report!(burst[0], session_started && opts.pop_on_session_start);
             }
             cmd = recv_cmd(&mut cmds) => {
                 match cmd {
                     Some(TrayCommand::Regenerate) => {
-                        do_report(&opts, &status, &tray, Trigger::Manual, &completions).await;
+                        schedule_report!(Trigger::Manual, false);
                     }
                     Some(TrayCommand::OpenPage) => {
-                        open_page(&opts, &status, &tray, &completions, &plan_server).await;
+                        spawn_open_job(
+                            opts.clone(),
+                            status.clone(),
+                            tray.clone(),
+                            completions.clone(),
+                            plan_url.clone(),
+                            app_log.clone(),
+                        );
                     }
                     Some(TrayCommand::CaptureInventory) => {
-                        toggle_capture(&opts, &status, &tray, &mut capture, &capture_log).await;
+                        if let Some(run) = capture.as_ref() {
+                            run.stop.store(true, Ordering::Relaxed);
+                            set_capture_stage(&status, &capture_log, CaptureStage::Finalizing);
+                            capture_log.record("finalizing", "stop requested by the tray toggle");
+                            refresh_tray(&tray).await;
+                        } else if capture_start.is_none() {
+                            set_capture_stage(
+                                &status,
+                                &capture_log,
+                                CaptureStage::ConsentPending,
+                            );
+                            capture_log.record(
+                                "consent pending",
+                                "asking the ScreenCast portal for consent; pick the Warframe WINDOW",
+                            );
+                            refresh_tray(&tray).await;
+                            let start_opts = opts.clone();
+                            let start_status = status.clone();
+                            let start_log = capture_log.clone();
+                            let result_tx = capture_start_tx.clone();
+                            capture_start = Some(tokio::spawn(async move {
+                                let started =
+                                    start_capture(&start_opts, &start_status, &start_log).await;
+                                let _ = result_tx.send(started);
+                            }));
+                        }
                     }
-                    Some(TrayCommand::Quit) | None => break Ok(()),
+                    Some(TrayCommand::Quit) | None => {
+                        app_log.record("quit", "activation received");
+                        break Ok(());
+                    }
+                }
+            }
+            _ = job_rx.recv(), if report_job.is_some() => {
+                report_job = None;
+                if let Some((trigger, open)) = queued.take() {
+                    report_job = Some(spawn_report_job(
+                        opts.clone(),
+                        status.clone(),
+                        tray.clone(),
+                        trigger,
+                        completions.clone(),
+                        open,
+                        plan_url.clone(),
+                        app_log.clone(),
+                        job_tx.clone(),
+                    ));
+                }
+            }
+            started = capture_start_rx.recv(), if capture_start.is_some() => {
+                capture_start = None;
+                match started {
+                    Some(Ok(run)) => {
+                        println!("resident: capture started");
+                        capture = Some(run);
+                    }
+                    Some(Err(e)) => {
+                        eprintln!(
+                            "resident: capture start failed ({}): {}",
+                            e.stage, e.message
+                        );
+                        fail_capture(&status, &capture_log, e.stage, &e.message);
+                        refresh_tray(&tray).await;
+                    }
+                    None => {}
                 }
             }
             _ = tick.tick() => {
-                pump_capture(&opts, &status, &tray, &mut capture, &capture_log, &completions)
-                    .await;
+                let rerun = pump_capture(&opts, &status, &tray, &mut capture, &capture_log).await;
+                if rerun {
+                    schedule_report!(Trigger::Manual, false);
+                }
             }
         }
     };
 
-    // Cooperative shutdown order: release the watch first (it listens on
-    // the shutdown receiver), then stop/reap any capture, then close the
-    // tray. ksni's `Handle` has no Drop and its zbus service/socket tasks
-    // otherwise keep the tokio runtime alive after the loop returns — the
-    // reason a tray Quit used to leave the process resident (item 48).
-    shutdown.trigger();
-    stop_capture(&mut capture);
-    let _ = watch_thread.join();
-    if let Some(handle) = &tray {
-        match tokio::time::timeout(Duration::from_secs(3), handle.shutdown()).await {
-            Ok(()) => {}
-            Err(_) => eprintln!("resident: tray shutdown timed out"),
+    // Every step is bounded and logged (item 53): a wedged step must not be
+    // able to hold the process (or the tray icon) hostage again. A thread
+    // that refuses to stop is detached; `process::exit` in `main` reaps it.
+    app_log.record("teardown", "start");
+    if let Some(job) = report_job.take() {
+        app_log.record("teardown", "abort report job: start");
+        job.abort();
+        // A cancelled future is normally dropped at its next await point, but
+        // a report task wedged in a native call would never get there. Bound
+        // the wait so that one step cannot become the next zombie.
+        match tokio::time::timeout(TASK_ABORT_TIMEOUT, job).await {
+            Ok(_) => app_log.record("teardown", "abort report job: done"),
+            Err(_) => {
+                eprintln!("resident: report task did not abort in time (detached)");
+                app_log.record("teardown", "abort report job: timed out (detached)");
+            }
         }
     }
+    if let Some(job) = capture_start.take() {
+        app_log.record("teardown", "abort capture start: start");
+        job.abort();
+        match tokio::time::timeout(TASK_ABORT_TIMEOUT, job).await {
+            Ok(_) => app_log.record("teardown", "abort capture start: done"),
+            Err(_) => {
+                eprintln!("resident: capture start did not abort in time (detached)");
+                app_log.record("teardown", "abort capture start: timed out (detached)");
+            }
+        }
+    }
+    app_log.record("teardown", "shutdown signal: start");
+    shutdown.trigger();
+    app_log.record("teardown", "shutdown signal: done");
+    app_log.record("teardown", "capture stop: start");
+    let capture_reaped = stop_capture(&mut capture);
+    app_log.record(
+        "teardown",
+        &format!(
+            "capture stop: done ({})",
+            if capture_reaped { "reaped" } else { "detached" }
+        ),
+    );
+    app_log.record("teardown", "watch join: start");
+    let watch_stopped = join_thread_bounded(watch_thread, WATCH_JOIN_TIMEOUT);
+    app_log.record(
+        "teardown",
+        &format!(
+            "watch join: done ({})",
+            if watch_stopped { "joined" } else { "detached" }
+        ),
+    );
+    if let Some(handle) = &tray {
+        app_log.record("teardown", "tray shutdown: start");
+        match tokio::time::timeout(Duration::from_secs(3), handle.shutdown()).await {
+            Ok(()) => app_log.record("teardown", "tray shutdown: done"),
+            Err(_) => {
+                eprintln!("resident: tray shutdown timed out");
+                app_log.record("teardown", "tray shutdown: timed out (detached)");
+            }
+        }
+    }
+    app_log.record("teardown", "plan server drop: start");
+    drop(plan_server);
+    app_log.record("teardown", "plan server drop: done");
+    app_log.record("teardown", "complete");
     result
 }
 
@@ -301,41 +473,48 @@ fn fail_capture(
     }
 }
 
-/// Toggle the Capture Inventory flow: start a ScreenCast session when
-/// idle, ask the running one to stop when capturing.
-async fn toggle_capture(
-    opts: &ResidentOptions,
-    status: &Arc<Mutex<TrayStatus>>,
-    tray: &Option<ksni::Handle<FrackerTray>>,
-    capture: &mut Option<CaptureRun>,
-    log: &CaptureLog,
-) {
-    if let Some(run) = capture.as_ref() {
-        run.stop.store(true, Ordering::Relaxed);
-        set_capture_stage(status, log, CaptureStage::Finalizing);
-        log.record("finalizing", "stop requested by the tray toggle");
-        refresh_tray(tray).await;
-        return;
-    }
-
-    set_capture_stage(status, log, CaptureStage::ConsentPending);
-    log.record("consent pending", "asking the ScreenCast portal for consent");
-    refresh_tray(tray).await;
-
-    match start_capture(opts, status, log).await {
-        Ok(run) => {
-            println!("resident: capture started");
-            *capture = Some(run);
+/// Spawn one report (plus the optional session-start auto-open) as its own
+/// task (item 53). The control loop stays free to receive Quit; the task
+/// reports completion on `done`.
+fn spawn_report_job(
+    opts: ResidentOptions,
+    status: Arc<Mutex<TrayStatus>>,
+    tray: Option<ksni::Handle<FrackerTray>>,
+    trigger: Trigger,
+    completions: Arc<Mutex<Vec<elog::MissionCompletion>>>,
+    open_after: bool,
+    plan_url: Option<String>,
+    log: AppLog,
+    done: mpsc::UnboundedSender<()>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        log.record("report", &format!("start ({trigger:?})"));
+        do_report(&opts, &status, &tray, trigger, &completions).await;
+        log.record("report", "done");
+        // Ninth pass §2/item 40b + twelfth pass §2: the settled login is the
+        // only auto-open trigger, at most once per session.
+        if open_after && opts.pop_on_session_start {
+            open_page(&opts, &status, &tray, &completions, plan_url.as_deref()).await;
         }
-        Err(e) => {
-            eprintln!("resident: capture start failed ({}): {}", e.stage, e.message);
-            // Name the stage that FAILED (eleventh pass §2, item 40a): a
-            // post-consent remote-fd failure must not render as
-            // "consent pending". `NegotiateError` carries the stage.
-            fail_capture(status, log, e.stage, &e.message);
-            refresh_tray(tray).await;
-        }
-    }
+        let _ = done.send(());
+    })
+}
+
+/// Open the plan in a task so a portal that takes its time can never block
+/// the Quit path (item 53).
+fn spawn_open_job(
+    opts: ResidentOptions,
+    status: Arc<Mutex<TrayStatus>>,
+    tray: Option<ksni::Handle<FrackerTray>>,
+    completions: Arc<Mutex<Vec<elog::MissionCompletion>>>,
+    plan_url: Option<String>,
+    log: AppLog,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        log.record("open", "start");
+        open_page(&opts, &status, &tray, &completions, plan_url.as_deref()).await;
+        log.record("open", "done");
+    })
 }
 
 /// Open the ScreenCast portal session and spawn the capture worker thread.
@@ -352,11 +531,12 @@ async fn start_capture(
             "no restore token yet (first run) — full consent required",
         ),
     }
-    let negotiated = screencast::negotiate(token).await?;
+    let negotiated = screencast::negotiate(token, log).await?;
     log.record(
         "consent pending",
         &format!(
-            "consent granted; remote fd ready (restore_token {})",
+            "consent granted; selected ScreenCast node {}; remote fd ready (restore_token {})",
+            negotiated.node_id,
             if negotiated.restore_token.is_some() {
                 "issued"
             } else {
@@ -431,6 +611,7 @@ fn capture_worker(
     let ctx = data.context();
     let idle = data.classifier.idle_stop_frames;
     let progress_tx = tx.clone();
+    let frame_log = log.clone();
     let mut announced = false;
     let result = capture::run_capture(
         &ctx,
@@ -442,7 +623,7 @@ fn capture_worker(
             if !announced {
                 announced = true;
                 let _ = progress_tx.send(CaptureEvent::Stage(CaptureStage::Capturing));
-                log.record("capturing", "draining frames (scroll your inventory)");
+                frame_log.record("capturing", "draining frames (scroll your inventory)");
             }
             let _ = progress_tx.send(CaptureEvent::Progress(s.counts()));
         },
@@ -451,7 +632,14 @@ fn capture_worker(
         Ok(session) => {
             let _ = tx.send(CaptureEvent::Finished(Box::new(session)));
         }
-        Err(e) => send_failed(&tx, "capturing", format!("capture: {e}")),
+        Err(e) => {
+            // Item 54: a failure before the first frame is a connect
+            // failure, not "capturing". The stage comes from what the
+            // pipeline actually achieved.
+            let stage = screencast::failure_stage(announced);
+            log.record(stage, &format!("capture: {e}"));
+            send_failed(&tx, stage, format!("capture: {e}"));
+        }
     }
 }
 
@@ -461,16 +649,16 @@ fn send_failed(tx: &std::sync::mpsc::Sender<CaptureEvent>, stage: &'static str, 
 }
 
 /// Drain the capture worker's events: apply lifecycle stages, refresh live
-/// counts, and on completion finalize the stock + regenerate the plan.
+/// counts, and on completion finalize the stock. Returns true when a plan
+/// regeneration is due (the caller schedules it as a task, item 53).
 async fn pump_capture(
     opts: &ResidentOptions,
     status: &Arc<Mutex<TrayStatus>>,
     tray: &Option<ksni::Handle<FrackerTray>>,
     capture: &mut Option<CaptureRun>,
     log: &CaptureLog,
-    completions: &Arc<Mutex<Vec<elog::MissionCompletion>>>,
-) {
-    let Some(run) = capture.as_ref() else { return };
+) -> bool {
+    let Some(run) = capture.as_ref() else { return false };
     let mut stages: Vec<CaptureStage> = Vec::new();
     let mut latest: Option<capture::CaptureCounts> = None;
     let mut finished: Option<CaptureEvent> = None;
@@ -484,8 +672,20 @@ async fn pump_capture(
             }
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => {
+                // The worker vanished without a terminal event. Label it by
+                // what the lifecycle actually reached (item 54): a worker
+                // that died before the first frame was still connecting.
+                let stage = if status
+                    .lock()
+                    .map(|s| matches!(s.capture.stage(), CaptureStage::Capturing))
+                    .unwrap_or(false)
+                {
+                    "capturing"
+                } else {
+                    "connecting"
+                };
                 finished = Some(CaptureEvent::Failed {
-                    stage: "capturing",
+                    stage,
                     message: "capture worker stopped unexpectedly".to_owned(),
                 });
                 break;
@@ -521,36 +721,37 @@ async fn pump_capture(
 
     match finished {
         Some(CaptureEvent::Finished(session)) => {
-            finalize_capture(opts, status, tray, *session, log, completions).await;
+            let rerun = finalize_capture(opts, status, tray, *session, log).await;
             stop_capture(capture);
+            rerun
         }
         Some(CaptureEvent::Failed { stage, message }) => {
             eprintln!("resident: capture failed ({stage}): {message}");
             fail_capture(status, log, stage, &message);
             stop_capture(capture);
             refresh_tray(tray).await;
+            false
         }
-        _ => {}
+        _ => false,
     }
 }
 
 /// Finalize a completed capture: captured buckets REPLACE the matching
-/// buckets in `stock.json` (untouched buckets survive), then the plan is
-/// regenerated and the tray reports what was collected.
+/// buckets in `stock.json` (untouched buckets survive). Returns true when
+/// the plan should be regenerated from the fresh stock.
 async fn finalize_capture(
     opts: &ResidentOptions,
     status: &Arc<Mutex<TrayStatus>>,
     tray: &Option<ksni::Handle<FrackerTray>>,
     session: CaptureSession,
     log: &CaptureLog,
-    completions: &Arc<Mutex<Vec<elog::MissionCompletion>>>,
-) {
+) -> bool {
     set_capture_stage(status, log, CaptureStage::Finalizing);
     if !session.has_any() {
         log.record("finalizing", "nothing collected — stock untouched");
         set_capture_stage(status, log, CaptureStage::Idle);
         refresh_tray(tray).await;
-        return;
+        return false;
     }
 
     let path = &opts.report.stock_path;
@@ -562,7 +763,7 @@ async fn finalize_capture(
                 eprintln!("resident: capture finalize: {e}");
                 fail_capture(status, log, "finalizing", &format!("capture finalize: {e}"));
                 refresh_tray(tray).await;
-                return;
+                return false;
             }
         },
         Err(_) => OcrStock::default(),
@@ -572,24 +773,42 @@ async fn finalize_capture(
         eprintln!("resident: capture finalize: {e}");
         fail_capture(status, log, "finalizing", &format!("capture finalize: {e}"));
         refresh_tray(tray).await;
-        return;
+        return false;
     }
 
     let summary = capture::captured_summary(&session);
     println!("resident: {summary} -> {}", path.display());
     log.record("finalizing", &format!("{summary} -> {}", path.display()));
-    // Regenerate the plan from the fresh stock (and refresh the tray).
-    do_report(opts, status, tray, Trigger::Manual, completions).await;
     set_capture_stage(status, log, CaptureStage::Idle);
+    true
 }
 
-/// Stop the worker (if any) and reap its thread.
-fn stop_capture(capture: &mut Option<CaptureRun>) {
+/// Stop the worker (if any) and reap its thread, bounded (item 53). A
+/// worker stuck in a native call is detached rather than blocking Quit
+/// forever; `process::exit` reaps it.
+fn stop_capture(capture: &mut Option<CaptureRun>) -> bool {
     if let Some(mut run) = capture.take() {
         run.stop.store(true, Ordering::Relaxed);
         if let Some(h) = run.join.take() {
-            let _ = h.join();
+            return join_thread_bounded(h, CAPTURE_JOIN_TIMEOUT);
         }
+    }
+    true
+}
+
+/// Wait up to `timeout` for a thread, returning true when it was joined.
+/// On timeout the handle is dropped (detached): the process is about to
+/// exit and no teardown step may hang on it.
+fn join_thread_bounded(handle: std::thread::JoinHandle<()>, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while !handle.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if handle.is_finished() {
+        let _ = handle.join();
+        true
+    } else {
+        false
     }
 }
 
@@ -645,7 +864,7 @@ async fn open_page(
     status: &Arc<Mutex<TrayStatus>>,
     tray: &Option<ksni::Handle<FrackerTray>>,
     completions: &Arc<Mutex<Vec<elog::MissionCompletion>>>,
-    plan_server: &Option<server::PlanServer>,
+    plan_url: Option<&str>,
 ) {
     let out = &opts.report.out;
     if !out.exists() {
@@ -663,8 +882,8 @@ async fn open_page(
             return;
         }
     }
-    let opened = match plan_server {
-        Some(s) => portal::open_url(s.url()).await.map(|()| s.url().to_owned()),
+    let opened = match plan_url {
+        Some(url) => portal::open_url(url).await.map(|()| url.to_owned()),
         None => portal::open_plan(out).await.map(|()| out.display().to_string()),
     };
     match opened {
@@ -684,10 +903,12 @@ async fn open_page(
     refresh_tray(tray).await;
 }
 
-/// Nudge the tray to re-read its properties after a status change.
+/// Nudge the tray to re-read its properties after a status change. Bounded
+/// (item 53): a wedged D-Bus service must never stall Quit behind a report
+/// or a menu refresh.
 async fn refresh_tray(tray: &Option<ksni::Handle<FrackerTray>>) {
     if let Some(handle) = tray {
-        handle.update(|_| ()).await;
+        let _ = tokio::time::timeout(TRAY_REFRESH_TIMEOUT, handle.update(|_| ())).await;
     }
 }
 

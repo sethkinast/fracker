@@ -302,6 +302,7 @@ fn golden_page_shows_pass4_sections_and_pool_bars() {
     let ctx = RenderContext {
         world: &world,
         generated_label: "golden".to_owned(),
+        generation: "golden-generation".to_owned(),
         targets_status: "t".to_owned(),
         world_status: "w".to_owned(),
         weekly_done: &weekly_done,
