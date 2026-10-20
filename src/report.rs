@@ -19,6 +19,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
 
@@ -130,6 +131,19 @@ impl ReportOutcome {
 /// (ninth pass §4). Every report — auto, manual, or session-start — takes
 /// it so a finished worldstate alert renders struck regardless of any
 /// manual tick; the CLI demo passes an empty slice.
+/// A token unique to one regeneration (item 52). Wall-clock nanos alone
+/// are not enough in tests/tight loops, so a process-local sequence is
+/// appended; across restarts the timestamp keeps it distinct.
+fn next_generation() -> String {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let now = Utc::now();
+    let nanos = now
+        .timestamp_nanos_opt()
+        .unwrap_or_else(|| now.timestamp_millis() * 1_000_000);
+    format!("{nanos}-{seq}")
+}
+
 pub async fn generate(
     cfg: &ReportConfig,
     completed: &[MissionCompletion],
@@ -323,14 +337,11 @@ pub async fn generate(
     let ctx = render::RenderContext {
         world: &world,
         generated_label: now.format("%Y-%m-%d %H:%M UTC").to_string(),
-        // Item 52: unique per regeneration (nanosecond stamp). The server
-        // scopes the remembered tab to this value: same generation = the
-        // 60s refreshes keep the tab; a new report = First Crack.
-        generation: format!(
-            "{}",
-            now.timestamp_nanos_opt()
-                .unwrap_or_else(|| now.timestamp_millis() * 1_000_000)
-        ),
+        // Item 52: unique per REGENERATION (not the worldstate's timestamp,
+        // which can repeat across runs). The server scopes the remembered
+        // tab to this value: same generation = the 60s refreshes keep the
+        // tab; a new report = First Crack.
+        generation: next_generation(),
         targets_status: format!(
             "backlog {} primes · profile {}",
             backlog.primes.unmastered.len(),
@@ -571,6 +582,43 @@ fn thumbnail_png(png_bytes: &[u8], max_px: u32) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Item 52: every regeneration gets a distinct token even when the
+    /// worldstate payload (and therefore `now`) is unchanged.
+    #[test]
+    fn generation_tokens_are_unique_per_run() {
+        let a = next_generation();
+        let b = next_generation();
+        assert_ne!(a, b);
+        assert!(!a.is_empty() && !b.is_empty());
+    }
+
+    /// §3 end to end: two real generations from the SAME fixture payload
+    /// still carry different `data-generation` values, so the second run
+    /// resets the remembered tab. (The worldstate timestamp repeats, so
+    /// deriving the token from `now` would have been a silent bug.)
+    #[tokio::test]
+    async fn consecutive_generations_stamp_different_tokens() {
+        let dir = std::env::temp_dir().join(format!(
+            "fracker-report-gen-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("plan.html");
+        let cfg = test_cfg(out.clone());
+        let attr = |html: &str| {
+            let start = html.find("data-generation=\"").unwrap() + "data-generation=\"".len();
+            let rest = &html[start..];
+            rest[..rest.find('"').unwrap()].to_owned()
+        };
+        generate(&cfg, &[]).await.unwrap();
+        let first = attr(&std::fs::read_to_string(&out).unwrap());
+        generate(&cfg, &[]).await.unwrap();
+        let second = attr(&std::fs::read_to_string(&out).unwrap());
+        assert_ne!(first, second, "a new regeneration must invalidate tabs");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn test_cfg(out: PathBuf) -> ReportConfig {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
