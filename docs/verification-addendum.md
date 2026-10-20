@@ -418,3 +418,27 @@ it refines the brief where they disagree. For the next worker pass.
     derivable from known nodes), factionIndex, levels};
     the SortieRewards file bundles ExportNightwave
     alongside ExportSortieRewards/Railjack/Intrinsics.
+52. **Tab persistence is scoped to ONE generation (Seth,
+    2026-10-19, v0.5.0 test).** The stored tab choice must
+    survive only a plan's own 60s refreshes; a NEW
+    regeneration resets to the starting tab (First Crack).
+    Today the choice survives regens, so the plan can open
+    on a stale tab.
+53. **Tray Quit STILL broken in v0.5.0 (Seth, 2026-10-19)** —
+    pass 14's teardown + explicit exit changed nothing live,
+    so the patched path is likely not the one the running
+    resident takes, or the activation never reaches it. The
+    next attempt instruments FIRST (log on Quit activation
+    receipt) and gates on a D-Bus-level test: resident
+    under dbus-run-session, Quit activated via dbusmenu,
+    process exit asserted. A logic test is not evidence.
+54. **Capture STILL "target not found" in v0.5.0 (Seth's log,
+    2026-10-19 22:14)** — with node 135 now passed (§3
+    landed). States 0->1->2, then 2->-1 ~5ms in. Leading
+    hypothesis: the portal node is not yet registered on
+    the remote when connect is attempted — known-good
+    clients wait for the node global. The next diagnostic
+    pass logs the raw Start streams payload + registry
+    globals and waits for the node before connecting. The
+    error line also still mislabels the stage "capturing"
+    before any frame arrived.
