@@ -9,13 +9,19 @@
 #   pipewire.h        pw_init
 #   thread-loop.h     pw_thread_loop_*
 #   context.h         pw_context_new / pw_context_destroy
-#   core.h            pw_context_connect_fd / pw_core_get_registry
-#   registry.h        pw_registry_add_listener
+#   core.h            pw_context_connect_fd
 #   stream.h          pw_stream_*
 #
 # NOTE: pw_thread_loop_get_context is deliberately absent — it is not part
 # of PipeWire's public API (the thread loop exposes pw_thread_loop_get_loop;
 # a context is created with pw_context_new).
+#
+# NOTE (item 60a): pw_core_get_registry and pw_registry_add_listener are
+# deliberately absent. pw_core_get_registry is header-declared but not
+# exported by Seth's installed libpipewire (v0.5.2 died resolving it), so
+# the consumer drops the registry and retries pw_stream_connect on
+# target-not-found instead. The library's exported symbol table, not the
+# header, is the ground truth for this list.
 pw_init
 pw_thread_loop_new
 pw_thread_loop_start
@@ -25,8 +31,6 @@ pw_thread_loop_get_loop
 pw_context_new
 pw_context_destroy
 pw_context_connect_fd
-pw_core_get_registry
-pw_registry_add_listener
 pw_stream_new
 pw_stream_add_listener
 pw_stream_connect

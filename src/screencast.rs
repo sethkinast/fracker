@@ -666,58 +666,6 @@ struct StreamEvents {
     command: Option<unsafe extern "C" fn(*mut c_void, *const c_void)>,
 }
 
-/// `PW_VERSION_REGISTRY` (pipewire/registry.h).
-const PW_VERSION_REGISTRY: u32 = 3;
-
-/// How long to wait for the portal's node to show up in the remote's
-/// registry before connecting anyway (item 54). The node is normally
-/// announced within milliseconds; the bound exists so a remote that never
-/// publishes it still produces the diagnostic log instead of hanging.
-const NODE_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// `struct pw_registry_events` (pipewire/registry.h). Version 3 has the
-/// two callbacks the diagnostic uses; both null is not useful, so both are
-/// wired.
-#[repr(C)]
-struct RegistryEvents {
-    version: u32,
-    global: Option<
-        unsafe extern "C" fn(
-            *mut c_void,
-            u32,
-            u32,
-            *const c_char,
-            u32,
-            *const c_void,
-        ),
-    >,
-    global_remove: Option<unsafe extern "C" fn(*mut c_void, u32)>,
-}
-
-/// `struct spa_dict` (spa/utils/dict.h): flags, n_items, items.
-#[repr(C)]
-struct SpaDict {
-    flags: u32,
-    n_items: u32,
-    items: *const SpaDictItem,
-}
-
-/// `struct spa_dict_item` (spa/utils/dict.h).
-#[repr(C)]
-struct SpaDictItem {
-    key: *const c_char,
-    value: *const c_char,
-}
-
-/// State shared with the registry callbacks. `found` is an `AtomicBool`
-/// (not a plain field) because the loop thread writes it while `new`
-/// waits on the same value from its own thread.
-struct RegistryCtx {
-    target: u32,
-    found: Arc<AtomicBool>,
-    log: CaptureLog,
-}
-
 /// `struct pw_buffer` prefix.
 #[repr(C)]
 struct PwBuffer {
@@ -771,6 +719,15 @@ struct SpaChunk {
 /// a real desktop — exactly Seth's `v0.4.0` report. Every name below was
 /// checked against the current 1.x public headers:
 /// `pipewire.h`, `thread-loop.h`, `context.h`, `core.h`, `stream.h`.
+///
+/// **Item 60a.** `pw_core_get_registry` is declared by `core.h` but is
+/// *not* exported by Seth's installed `libpipewire`, so v0.5.2 died while
+/// resolving it. This consumer therefore has no registry dependency at
+/// all: it connects the stream straight to the portal's node and retries
+/// `pw_stream_connect` on "target not found" while the private remote is
+/// still publishing that node. `pw_core_get_registry` and
+/// `pw_registry_add_listener` are deliberately absent, and the registry
+/// structs/callbacks are gone with them.
 pub const REQUIRED_SYMBOLS: &[&str] = &[
     "pw_init",                  // pipewire.h
     "pw_thread_loop_new",       // thread-loop.h
@@ -781,8 +738,6 @@ pub const REQUIRED_SYMBOLS: &[&str] = &[
     "pw_context_new",           // context.h
     "pw_context_destroy",       // context.h
     "pw_context_connect_fd",    // core.h
-    "pw_core_get_registry",     // core.h
-    "pw_registry_add_listener", // registry.h
     "pw_stream_new",            // stream.h
     "pw_stream_add_listener",   // stream.h
     "pw_stream_connect",        // stream.h
@@ -810,12 +765,6 @@ struct PwApi {
     pw_context_destroy: unsafe extern "C" fn(*mut c_void),
     pw_context_connect_fd:
         unsafe extern "C" fn(*mut c_void, c_int, *mut c_void, usize) -> *mut c_void,
-    /// `core.h`: the registry that announces every global on the remote,
-    /// including the ScreenCast node the portal just created.
-    pw_core_get_registry: unsafe extern "C" fn(*mut c_void, u32, usize) -> *mut c_void,
-    /// `registry.h`: subscribe to `global` / `global_remove`.
-    pw_registry_add_listener:
-        unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_void, *mut c_void) -> *mut c_void,
     pw_stream_new: unsafe extern "C" fn(*mut c_void, *const c_char, *mut c_void) -> *mut c_void,
     pw_stream_add_listener:
         unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_void, *mut c_void),
@@ -918,15 +867,6 @@ impl PwApi {
                 "pw_context_connect_fd",
                 unsafe extern "C" fn(*mut c_void, c_int, *mut c_void, usize) -> *mut c_void
             ),
-            pw_core_get_registry: sym!(
-                "pw_core_get_registry",
-                unsafe extern "C" fn(*mut c_void, u32, usize) -> *mut c_void
-            ),
-            pw_registry_add_listener: sym!(
-                "pw_registry_add_listener",
-                unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_void, *mut c_void)
-                    -> *mut c_void
-            ),
             pw_stream_new: sym!(
                 "pw_stream_new",
                 unsafe extern "C" fn(*mut c_void, *const c_char, *mut c_void) -> *mut c_void
@@ -962,6 +902,15 @@ impl PwApi {
     }
 }
 
+/// One error naming every missing `libpipewire` symbol (item 60b).
+fn missing_symbols_error(missing: &[&str]) -> String {
+    format!(
+        "libpipewire missing {} required symbol(s): {}",
+        missing.len(),
+        missing.join(", ")
+    )
+}
+
 /// `PW_DIRECTION_INPUT` (we consume frames).
 const PW_DIRECTION_INPUT: c_int = 1;
 /// `PW_ID_ANY`.
@@ -980,15 +929,38 @@ const PW_ID_ANY: u32 = 0xffff_ffff;
 /// The connect target is the node id the portal selected in the `Start`
 /// reply's `streams` (item 49): a targetless connect errors "target not
 /// found". AUTOCONNECT still applies once the target is known.
+///
+/// **Item 60a.** The remote's node is published asynchronously, so the
+/// first connect can race its global even when the portal already named
+/// it. Without the registry (see [`REQUIRED_SYMBOLS`]) the race is closed
+/// by retrying the connect itself for a few seconds while the stream
+/// reports "target not found".
 const PW_STREAM_FLAGS: u32 = (1 << 0) | (1 << 2) | (1 << 7);
 /// `PW_STREAM_STATE_ERROR`.
 const PW_STREAM_STATE_ERROR: i32 = -1;
+/// How long a "target not found" connect may be retried (item 60a). The
+/// private remote normally publishes the node within milliseconds; the
+/// bound keeps a genuinely absent target a visible failure, not a hang.
+const CONNECT_RETRY_WINDOW: Duration = Duration::from_secs(5);
+/// Pause between connect attempts while the target is not there yet.
+const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+/// How long to watch a connected stream for the asynchronous
+/// "target not found" error before declaring the connect good. This is a
+/// settle window, not the first-frame timeout: Seth's v0.5.0 error landed
+/// in ~5 ms.
+const CONNECT_SETTLE: Duration = Duration::from_millis(200);
 /// How long to wait for the first frame before declaring the stream
 /// unlinked. Consent is already granted by the time we connect, so a
 /// healthy stream delivers within a beat; this only exists so a stream
 /// that never links surfaces in the tray instead of hanging the capture
 /// forever.
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Whether a PipeWire stream error is the target-not-found race that a
+/// connect retry can close (item 60a).
+fn is_target_not_found(message: &str) -> bool {
+    message.to_ascii_lowercase().contains("target not found")
+}
 
 /// State shared with the PipeWire callbacks. The pointers into `api` and
 /// `stream` are only ever touched from the PipeWire thread; the channel
@@ -1010,10 +982,6 @@ pub struct ScreenCastSource {
     thread_loop: *mut c_void,
     context: *mut c_void,
     core: *mut c_void,
-    registry: *mut c_void,
-    registry_hook: Box<HookStorage>,
-    registry_events: Box<RegistryEvents>,
-    registry_ctx: Box<RegistryCtx>,
     stream: *mut c_void,
     hook: Box<HookStorage>,
     events: Box<StreamEvents>,
@@ -1084,31 +1052,10 @@ impl ScreenCastSource {
             drained: None,
             command: None,
         });
-        let mut hook = Box::new(HookStorage::zeroed());
-
-        // Item 54: the portal's node is announced as a registry global on
-        // the private remote. Attach a registry listener BEFORE creating
-        // the stream so every global the remote publishes is logged, and
-        // keep the registry subscribed until the context is destroyed.
-        let found = Arc::new(AtomicBool::new(false));
-        let mut registry_ctx = Box::new(RegistryCtx {
-            target: node_id,
-            found: found.clone(),
-            log: log.clone(),
-        });
-        let registry_events = Box::new(RegistryEvents {
-            version: PW_VERSION_REGISTRY,
-            global: Some(on_registry_global),
-            global_remove: Some(on_registry_global_remove),
-        });
-        let mut registry_hook = Box::new(HookStorage::zeroed());
-
         // Setup under the loop lock (the stream must be created on the
-        // loop's context thread), then release it while waiting: holding
-        // the lock would stop the loop from dispatching the very registry
-        // globals we are waiting for.
+        // loop's context thread), then release it while waiting.
         unsafe { (api.pw_thread_loop_lock)(thread_loop) };
-        let mut setup = || -> Result<(*mut c_void, *mut c_void, *mut c_void, *mut c_void), String> {
+        let setup = || -> Result<(*mut c_void, *mut c_void), String> {
             // Real PipeWire sequence (item 47): the thread loop wraps a
             // `pw_loop`; the context is built from that loop, then the
             // portal fd connects a core, and the stream rides that core.
@@ -1127,43 +1074,12 @@ impl ScreenCastSource {
                 unsafe { (api.pw_context_destroy)(context) };
                 return Err("PipeWire: pw_context_connect_fd failed".to_owned());
             }
-            let registry =
-                unsafe { (api.pw_core_get_registry)(core, PW_VERSION_REGISTRY, 0) };
-            if registry.is_null() {
-                unsafe { (api.pw_context_destroy)(context) };
-                return Err("PipeWire: pw_core_get_registry failed".to_owned());
-            }
-            unsafe {
-                (api.pw_registry_add_listener)(
-                    registry,
-                    registry_hook.as_mut() as *mut _ as *mut c_void,
-                    registry_events.as_ref() as *const _ as *const c_void,
-                    registry_ctx.as_mut() as *mut _ as *mut c_void,
-                );
-            }
-            let stream =
-                unsafe { (api.pw_stream_new)(core, name.as_ptr(), std::ptr::null_mut()) };
-            if stream.is_null() {
-                unsafe { (api.pw_context_destroy)(context) };
-                return Err("PipeWire: pw_stream_new failed".to_owned());
-            }
-            ctx.stream = stream;
-            unsafe {
-                (api.pw_stream_add_listener)(
-                    stream,
-                    hook.as_mut() as *mut _ as *mut c_void,
-                    events.as_ref() as *const _ as *const c_void,
-                    ctx.as_mut() as *mut _ as *mut c_void,
-                );
-            }
-            Ok((context, core, registry, stream))
+            Ok((context, core))
         };
         let result = setup();
-        // Release the closure's borrows before moving the boxes into Self.
-        drop(setup);
         unsafe { (api.pw_thread_loop_unlock)(thread_loop) };
 
-        let (context, core, registry, stream) = match result {
+        let (context, core) = match result {
             Ok(parts) => parts,
             Err(e) => {
                 log.record("connecting", &e);
@@ -1175,66 +1091,126 @@ impl ScreenCastSource {
             }
         };
 
-        // Item 54: wait for the node global before connecting. v0.5.0
-        // connected immediately and the remote answered "target not
-        // found" (state 0→1→2→-1 in ~5ms); known-good clients wait for
-        // the global. The wait is bounded so a node that never appears
-        // still produces a full diagnostic instead of a hang.
-        log.record(
-            "connecting",
-            &format!(
-                "waiting up to {}s for ScreenCast node {node_id} to appear in the PipeWire registry",
-                NODE_WAIT_TIMEOUT.as_secs()
-            ),
-        );
-        let appeared = wait_for_node(&found, node_id, &log, NODE_WAIT_TIMEOUT);
-        if appeared {
-            log.record(
-                "connecting",
-                &format!("target node {node_id} is registered; connecting the stream"),
-            );
-        } else {
+        // Tear the stream down under the loop lock; the context/loop stay
+        // alive across retries.
+        let destroy_stream = |stream: *mut c_void| unsafe {
+            if stream.is_null() {
+                return;
+            }
+            (api.pw_thread_loop_lock)(thread_loop);
+            (api.pw_stream_destroy)(stream);
+            (api.pw_thread_loop_unlock)(thread_loop);
+        };
+        let teardown = |context: *mut c_void| unsafe {
+            (api.pw_thread_loop_lock)(thread_loop);
+            if !context.is_null() {
+                (api.pw_context_destroy)(context);
+            }
+            (api.pw_thread_loop_unlock)(thread_loop);
+            (api.pw_thread_loop_stop)(thread_loop);
+            (api.pw_thread_loop_destroy)(thread_loop);
+        };
+
+        // Item 60a: no registry. The remote publishes the portal's node
+        // asynchronously, so the first connect can race it and the stream
+        // reports "target not found" (state 0→1→2→-1 in ~5ms). Retry the
+        // connect itself for a few seconds instead of resolving the
+        // registry symbol Seth's library does not export.
+        let deadline = Instant::now() + CONNECT_RETRY_WINDOW;
+        let mut attempt = 0u32;
+        let (stream, hook) = loop {
+            attempt += 1;
+            unsafe { (api.pw_thread_loop_lock)(thread_loop) };
+            let created = unsafe { (api.pw_stream_new)(core, name.as_ptr(), std::ptr::null_mut()) };
+            if created.is_null() {
+                unsafe { (api.pw_thread_loop_unlock)(thread_loop) };
+                teardown(context);
+                let msg = "PipeWire: pw_stream_new failed".to_owned();
+                log.record("connecting", &msg);
+                return Err(msg);
+            }
+            ctx.stream = created;
+            let mut attempt_hook = Box::new(HookStorage::zeroed());
+            unsafe {
+                (api.pw_stream_add_listener)(
+                    created,
+                    attempt_hook.as_mut() as *mut _ as *mut c_void,
+                    events.as_ref() as *const _ as *const c_void,
+                    ctx.as_mut() as *mut _ as *mut c_void,
+                );
+            }
+            // A previous attempt's error must not taint this one.
+            if let Ok(mut e) = err.lock() {
+                *e = None;
+            }
+            // Keep the format pod 8-byte aligned while PipeWire reads it.
+            let format = pod::enum_format_video();
+            let words = to_aligned_words(&format);
+            let params: [*const c_void; 1] = [words.as_ptr() as *const c_void];
+            let rc = unsafe {
+                (api.pw_stream_connect)(
+                    created,
+                    PW_DIRECTION_INPUT,
+                    node_id,
+                    PW_STREAM_FLAGS,
+                    params.as_ptr(),
+                    1,
+                )
+            };
+            unsafe { (api.pw_thread_loop_unlock)(thread_loop) };
+
+            if rc < 0 {
+                destroy_stream(created);
+                let msg = format!("PipeWire: pw_stream_connect failed ({rc})");
+                // `-ENOENT` is the synchronous spelling of the same
+                // target-not-found race; anything else is not retryable.
+                if rc == -libc::ENOENT && Instant::now() < deadline {
+                    log.record(
+                        "connecting",
+                        &format!(
+                            "pw_stream_connect attempt {attempt} for node {node_id} failed \
+                             ({rc}); target not found yet, retrying"
+                        ),
+                    );
+                    std::thread::sleep(CONNECT_RETRY_INTERVAL);
+                    continue;
+                }
+                teardown(context);
+                log.record("connecting", &msg);
+                return Err(msg);
+            }
+
+            // The connect call returning 0 only means the request was
+            // queued; target-not-found arrives asynchronously as a stream
+            // state error. Watch a short settle window before accepting
+            // the connection so the retry can still fire.
+            if let Some(msg) = wait_for_connect_error(&err, CONNECT_SETTLE) {
+                destroy_stream(created);
+                if is_target_not_found(&msg) && Instant::now() < deadline {
+                    log.record(
+                        "connecting",
+                        &format!(
+                            "pw_stream_connect attempt {attempt} for node {node_id}: {msg}; \
+                             retrying while the target appears"
+                        ),
+                    );
+                    std::thread::sleep(CONNECT_RETRY_INTERVAL);
+                    continue;
+                }
+                teardown(context);
+                log.record("connecting", &msg);
+                return Err(msg);
+            }
+
             log.record(
                 "connecting",
                 &format!(
-                    "target node {node_id} did NOT appear within {}s; connecting anyway \
-                     (the registry lines above list every global the remote published)",
-                    NODE_WAIT_TIMEOUT.as_secs()
+                    "PipeWire stream connected to node {node_id} on attempt {attempt}; \
+                     awaiting first frame"
                 ),
             );
-        }
-
-        unsafe { (api.pw_thread_loop_lock)(thread_loop) };
-        // Keep the format pod 8-byte aligned while PipeWire reads it.
-        let format = pod::enum_format_video();
-        let words = to_aligned_words(&format);
-        let params: [*const c_void; 1] = [words.as_ptr() as *const c_void];
-        let rc = unsafe {
-            (api.pw_stream_connect)(
-                stream,
-                PW_DIRECTION_INPUT,
-                node_id,
-                PW_STREAM_FLAGS,
-                params.as_ptr(),
-                1,
-            )
+            break (created, attempt_hook);
         };
-        unsafe { (api.pw_thread_loop_unlock)(thread_loop) };
-        if rc < 0 {
-            unsafe {
-                (api.pw_stream_destroy)(stream);
-                (api.pw_context_destroy)(context);
-                (api.pw_thread_loop_stop)(thread_loop);
-                (api.pw_thread_loop_destroy)(thread_loop);
-            }
-            let msg = format!("PipeWire: pw_stream_connect failed ({rc})");
-            log.record("connecting", &msg);
-            return Err(msg);
-        }
-        log.record(
-            "connecting",
-            &format!("PipeWire stream connected to node {node_id}; awaiting first frame"),
-        );
         // The negotiated fd is now owned by PipeWire; leak the OwnedFd so
         // it is not double-closed (pw_context_connect_fd dup'd it).
         std::mem::forget(negotiated.fd);
@@ -1244,10 +1220,6 @@ impl ScreenCastSource {
             thread_loop,
             context,
             core,
-            registry,
-            registry_hook,
-            registry_events,
-            registry_ctx,
             stream,
             hook,
             events,
@@ -1366,124 +1338,23 @@ impl Drop for ScreenCastSource {
             }
         }
         // Keep the boxes alive until after the teardown above.
-        let _ = (
-            &self.hook,
-            &self.events,
-            &self.ctx,
-            &self.registry_hook,
-            &self.registry_events,
-            &self.registry_ctx,
-            self.core,
-            self.registry,
-        );
+        let _ = (&self.hook, &self.events, &self.ctx, self.core);
     }
 }
 
-unsafe extern "C" fn on_registry_global(
-    data: *mut c_void,
-    id: u32,
-    permissions: u32,
-    type_name: *const c_char,
-    version: u32,
-    props: *const c_void,
-) {
-    if data.is_null() {
-        return;
-    }
-    let ctx = &mut *(data as *mut RegistryCtx);
-    let ty = if type_name.is_null() {
-        "<unknown>".to_owned()
-    } else {
-        std::ffi::CStr::from_ptr(type_name)
-            .to_string_lossy()
-            .into_owned()
-    };
-    ctx.log.record(
-        "connecting",
-        &format!(
-            "registry global id {id} type {ty} v{version} perms 0x{permissions:x} {}",
-            spa_dict_debug(props)
-        ),
-    );
-    if id == ctx.target {
-        ctx.found.store(true, Ordering::Release);
-        ctx.log.record(
-            "connecting",
-            &format!("registry: target node {id} is present"),
-        );
-    }
-}
-
-unsafe extern "C" fn on_registry_global_remove(data: *mut c_void, id: u32) {
-    if data.is_null() {
-        return;
-    }
-    let ctx = &mut *(data as *mut RegistryCtx);
-    ctx.log.record(
-        "connecting",
-        &format!("registry global removed id {id}"),
-    );
-}
-
-/// Format a `spa_dict` as `key=value …` for the capture log. Best-effort:
-/// malformed/absent dicts degrade to `{}`, never a panic on the PipeWire
-/// thread.
-unsafe fn spa_dict_debug(props: *const c_void) -> String {
-    if props.is_null() {
-        return "{}".to_owned();
-    }
-    let dict = props as *const SpaDict;
-    if (*dict).items.is_null() || (*dict).n_items == 0 {
-        return "{}".to_owned();
-    }
-    let mut parts = Vec::new();
-    for i in 0..(*dict).n_items {
-        let item = &*(*dict).items.add(i as usize);
-        if item.key.is_null() {
-            continue;
-        }
-        let key = std::ffi::CStr::from_ptr(item.key).to_string_lossy();
-        let value = if item.value.is_null() {
-            String::new()
-        } else {
-            std::ffi::CStr::from_ptr(item.value)
-                .to_string_lossy()
-                .into_owned()
-        };
-        parts.push(format!("{key}={value}"));
-    }
-    format!("{{{}}}", parts.join(" "))
-}
-
-/// Wait (bounded) for the target node id to be announced by the registry.
-/// Returns true when it was seen. Used by `ScreenCastSource::new` outside
-/// the thread-loop lock so the loop can dispatch registry events.
-fn wait_for_node(
-    found: &AtomicBool,
-    target: u32,
-    log: &CaptureLog,
-    timeout: Duration,
-) -> bool {
-    let started = Instant::now();
-    let deadline = started + timeout;
-    let mut last_note = Instant::now();
+/// Watch a just-connected stream for an asynchronous "target not found"
+/// error during the settle window (item 60a). Returns the error if one
+/// arrived, leaving a healthy stream's slot empty.
+fn wait_for_connect_error(err: &Mutex<Option<String>>, timeout: Duration) -> Option<String> {
+    let deadline = Instant::now() + timeout;
     loop {
-        if found.load(Ordering::Acquire) {
-            return true;
+        if let Ok(mut e) = err.lock() {
+            if let Some(msg) = e.take() {
+                return Some(msg);
+            }
         }
-        let now = Instant::now();
-        if now >= deadline {
-            return found.load(Ordering::Acquire);
-        }
-        if now.duration_since(last_note) >= Duration::from_secs(1) {
-            log.record(
-                "connecting",
-                &format!(
-                    "still waiting for node {target} in the registry ({:.1}s elapsed)",
-                    started.elapsed().as_secs_f32()
-                ),
-            );
-            last_note = now;
+        if Instant::now() >= deadline {
+            return None;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -1818,68 +1689,54 @@ mod tests {
         dir
     }
 
-    /// The wait is what v0.5.0 was missing: `pw_stream_connect` must not
-    /// fire until the node global has been announced.
+    /// Item 60a: only the target-not-found race is retryable; a real
+    /// stream error must fail immediately.
     #[test]
-    fn wait_for_node_returns_once_the_global_arrives() {
-        let dir = log_dir("wait-node");
-        let log = CaptureLog::open(&dir);
-        let found = Arc::new(AtomicBool::new(false));
-        let setter = found.clone();
-        let waiter = std::thread::spawn(move || {
+    fn only_target_not_found_errors_are_retryable() {
+        assert!(is_target_not_found("PipeWire stream error: target not found"));
+        assert!(is_target_not_found("TARGET NOT FOUND"));
+        assert!(!is_target_not_found("permission denied"));
+        assert!(!is_target_not_found(""));
+    }
+
+    /// The connect retry watches the same async error slot the state
+    /// callback fills, so a "target not found" that lands after the
+    /// connect call returns 0 is still observed.
+    #[test]
+    fn wait_for_connect_error_observes_the_async_state_error() {
+        let err = Arc::new(Mutex::new(None));
+        let setter = err.clone();
+        let writer = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(50));
-            setter.store(true, Ordering::Release);
+            *setter.lock().unwrap() = Some("PipeWire stream error: target not found".to_owned());
         });
-        assert!(
-            wait_for_node(&found, 135, &log, Duration::from_secs(2)),
-            "the wait must observe the node global"
+        assert_eq!(
+            wait_for_connect_error(&err, Duration::from_secs(2)).as_deref(),
+            Some("PipeWire stream error: target not found")
         );
-        waiter.join().unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
+        writer.join().unwrap();
+        // The slot is consumed, so a healthy next attempt starts clean.
+        assert_eq!(wait_for_connect_error(&err, Duration::from_millis(20)), None);
     }
 
     #[test]
-    fn wait_for_node_is_bounded_when_the_global_never_appears() {
-        let dir = log_dir("wait-timeout");
-        let log = CaptureLog::open(&dir);
-        let found = AtomicBool::new(false);
+    fn wait_for_connect_error_is_bounded_when_nothing_arrives() {
+        let err = Mutex::new(None);
         let started = Instant::now();
-        assert!(!wait_for_node(&found, 135, &log, Duration::from_millis(150)));
+        assert_eq!(
+            wait_for_connect_error(&err, Duration::from_millis(150)),
+            None
+        );
         assert!(started.elapsed() < Duration::from_secs(2), "bounded");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A registry global for the target id sets the waiter and lands
-    /// verbatim in the capture log (the log is the diagnosis).
+    /// Item 60b: one error names every missing symbol, not just the first.
     #[test]
-    fn registry_global_records_the_global_and_marks_the_target() {
-        let dir = log_dir("registry-global");
-        let log = CaptureLog::open(&dir);
-        let found = Arc::new(AtomicBool::new(false));
-        let mut ctx = Box::new(RegistryCtx {
-            target: 135,
-            found: found.clone(),
-            log: log.clone(),
-        });
-        let ty = CString::new("PipeWire:Interface:Node").unwrap();
-        unsafe {
-            on_registry_global(
-                ctx.as_mut() as *mut _ as *mut c_void,
-                135,
-                0x1f,
-                ty.as_ptr(),
-                3,
-                std::ptr::null(),
-            );
-        }
-        assert!(found.load(Ordering::Acquire), "target marked present");
-        let text = std::fs::read_to_string(log.path()).unwrap();
-        assert!(
-            text.contains("registry global id 135 type PipeWire:Interface:Node"),
-            "{text}"
-        );
-        assert!(text.contains("registry: target node 135 is present"), "{text}");
-        let _ = std::fs::remove_dir_all(&dir);
+    fn missing_symbols_error_names_every_missing_name() {
+        let msg = missing_symbols_error(&["pw_core_get_registry", "pw_registry_add_listener"]);
+        assert!(msg.contains("2 required symbol(s)"), "{msg}");
+        assert!(msg.contains("pw_core_get_registry"), "{msg}");
+        assert!(msg.contains("pw_registry_add_listener"), "{msg}");
     }
 
     #[test]
@@ -1946,10 +1803,22 @@ mod tests {
             !REQUIRED_SYMBOLS.contains(&"pw_thread_loop_get_context"),
             "pw_thread_loop_get_context is not part of PipeWire's public thread-loop API"
         );
+        // Item 60a: header-declared is not library-exported. Seth's
+        // libpipewire does not export this name, so the registry path (and
+        // its listener) is gone rather than resolved.
+        assert!(
+            !REQUIRED_SYMBOLS.contains(&"pw_core_get_registry"),
+            "pw_core_get_registry is not exported by the installed libpipewire"
+        );
+        assert!(
+            !REQUIRED_SYMBOLS.contains(&"pw_registry_add_listener"),
+            "the registry dependency was dropped in item 60a"
+        );
         // The real construction sequence: loop -> context -> core (fd) -> stream.
         assert!(REQUIRED_SYMBOLS.contains(&"pw_thread_loop_get_loop"));
         assert!(REQUIRED_SYMBOLS.contains(&"pw_context_new"));
         assert!(REQUIRED_SYMBOLS.contains(&"pw_context_connect_fd"));
         assert!(REQUIRED_SYMBOLS.contains(&"pw_stream_new"));
+        assert!(REQUIRED_SYMBOLS.contains(&"pw_stream_connect"));
     }
 }
