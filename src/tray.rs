@@ -170,12 +170,27 @@ impl Tray for FrackerTray {
                 enabled: false,
                 ..Default::default()
             }),
+            // Build identity (item 57): disabled. The crate version is the
+            // single source of truth, so the menu can never disagree with
+            // what was installed.
+            MenuItem::Standard(StandardItem {
+                label: version_label(),
+                enabled: false,
+                ..Default::default()
+            }),
             MenuItem::Separator,
             menu_action("Quit", move || {
                 let _ = quit.send(TrayCommand::Quit);
             }),
         ]
     }
+}
+
+/// The running build label for the tray menu (item 57). The crate version
+/// is the source of truth: release merges bump `Cargo.toml` in step with
+/// the tag, so this line can never lie about what is installed.
+pub fn version_label() -> String {
+    format!("Fracker v{}", env!("CARGO_PKG_VERSION"))
 }
 
 /// A standard menu entry whose activation pushes a command onto the
@@ -246,6 +261,32 @@ mod tests {
         assert!(items
             .iter()
             .any(|(l, enabled)| l.contains("watching EE.log") && !*enabled));
+    }
+
+    /// Item 57: the build identity is visible and non-interactive, and it
+    /// reads the crate version rather than a hand-copied constant.
+    #[test]
+    fn menu_shows_the_crate_version_as_a_disabled_item() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let tray = FrackerTray {
+            status: Arc::new(Mutex::new(TrayStatus::default())),
+            cmds: tx,
+        };
+        let items = labels(&tray);
+        let version = version_label();
+        assert_eq!(version, format!("Fracker v{}", env!("CARGO_PKG_VERSION")));
+        assert!(
+            version.ends_with(env!("CARGO_PKG_VERSION")),
+            "the menu reads the crate version: {version}"
+        );
+        assert!(
+            items.iter().any(|(l, enabled)| *l == version && !*enabled),
+            "version line is present and disabled: {items:?}"
+        );
+        // It is not one of the clickable verbs.
+        assert!(!items
+            .iter()
+            .any(|(l, enabled)| *enabled && *l == version));
     }
 
     #[test]
