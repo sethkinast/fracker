@@ -262,19 +262,21 @@ async fn headless_resident_strikes_log_completed_alerts_in_the_report() {
     let sd = shutdown.clone();
     let task = tokio::spawn(async move { run_headless(opts, sd).await });
 
-    // Wait for a report that strikes an alert (the watch reads the whole
-    // log, proves the completions, and regenerates).
+    // Wait for the report that strikes all three completions. The watch
+    // feeds the log incrementally and regenerates after each proven
+    // completion, so an earlier report may carry only the first strike;
+    // the §4 SolNode gate (one node, one alert) makes that visible.
     let deadline = Instant::now() + Duration::from_secs(90);
     let html = loop {
         if let Ok(text) = std::fs::read_to_string(&out) {
-            if text.contains("row ev done") {
+            if text.matches("class=\"row ev done\"").count() == 3 {
                 break text;
             }
         }
         if Instant::now() > deadline {
             shutdown.trigger();
             let _ = task.await;
-            panic!("resident never struck a log-completed alert");
+            panic!("resident never struck all three log-completed alerts");
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
