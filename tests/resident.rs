@@ -41,6 +41,7 @@ fn offline_report_config(base: &std::path::Path) -> ReportConfig {
         config_path: base.join("config.toml"),
         offline: true,
         embed_icons: false,
+        push: None,
     }
 }
 

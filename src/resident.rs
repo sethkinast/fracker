@@ -161,7 +161,7 @@ pub async fn run_headless(opts: ResidentOptions, shutdown: Shutdown) -> Result<(
 
 /// Run the resident with an optional tray handle + command channel.
 pub async fn run(
-    opts: ResidentOptions,
+    mut opts: ResidentOptions,
     shutdown: Shutdown,
     tray: Option<ksni::Handle<FrackerTray>>,
     status: Arc<Mutex<TrayStatus>>,
@@ -211,6 +211,13 @@ pub async fn run(
             None
         }
     };
+    // Item 58: every report published by the resident pushes its new
+    // generation through the server's hub, so open pages reload the moment
+    // a regeneration lands instead of waiting for the 60s meta-refresh.
+    // Attached before the watch thread or any report job starts.
+    if let Some(server) = &plan_server {
+        opts.report.push = Some(server.hub());
+    }
     let watch_thread = spawn_watch(
         opts.log_path.clone(),
         opts.watch_interval_ms,
