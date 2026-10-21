@@ -1337,17 +1337,30 @@ impl FrameSource for ScreenCastSource {
 impl Drop for ScreenCastSource {
     fn drop(&mut self) {
         unsafe {
+            // Teardown uses the same thread-loop lock discipline as the
+            // rest of this file: `disconnect`/`destroy` run on the loop's
+            // context thread, so a callback cannot dispatch against the
+            // objects while they are being freed. Do not hold the lock
+            // across `pw_thread_loop_stop` (it waits for the loop, which
+            // needs the lock).
+            let locked = !self.thread_loop.is_null();
+            if locked {
+                (self.api.pw_thread_loop_lock)(self.thread_loop);
+            }
             if self.connected && !self.stream.is_null() {
                 (self.api.pw_stream_disconnect)(self.stream);
                 (self.api.pw_stream_destroy)(self.stream);
+                self.connected = false;
             }
             // The context owns the core/stream; destroy it before the
             // loop it was created on (context.h: the main loop must stay
             // alive until pw_context_destroy()).
             if !self.context.is_null() {
                 (self.api.pw_context_destroy)(self.context);
+                self.context = std::ptr::null_mut();
             }
-            if !self.thread_loop.is_null() {
+            if locked {
+                (self.api.pw_thread_loop_unlock)(self.thread_loop);
                 (self.api.pw_thread_loop_stop)(self.thread_loop);
                 (self.api.pw_thread_loop_destroy)(self.thread_loop);
             }
