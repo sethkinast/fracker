@@ -161,6 +161,7 @@ pub struct Negotiated {
 /// rather than the last state the machine was in.
 pub async fn negotiate(
     restore_token: Option<String>,
+    data_dir: &Path,
     log: &CaptureLog,
 ) -> Result<Negotiated, NegotiateError> {
     let conn = zbus::Connection::session().await.map_err(|e| {
@@ -215,9 +216,19 @@ pub async fn negotiate(
         Value::from(PERSIST_INDEFINITELY),
     );
     if let Some(tok) = restore_token.as_ref() {
+        // Item 60c: replay the persisted token with persist mode so the
+        // portal can skip the full consent dialog. Never log the token
+        // itself — only its tail.
+        log.record(
+            "consent pending",
+            &format!(
+                "replaying saved restore_token {} with persist_mode {PERSIST_INDEFINITELY}",
+                token_hint(tok)
+            ),
+        );
         opts.insert("restore_token".to_owned(), Value::from(tok.clone()));
     }
-    let results = portal_request(
+    portal_request(
         &conn,
         &unique,
         "SelectSources",
@@ -225,9 +236,6 @@ pub async fn negotiate(
         &(session.clone(), opts),
     )
     .await?;
-    let restore_token = results
-        .get("restore_token")
-        .and_then(|v| <&str>::try_from(v).ok().map(str::to_owned));
 
     // 3. Start — the user picks a screen/window; `streams` describes them.
     let handle = crate::portal::handle_token();
@@ -245,16 +253,18 @@ pub async fn negotiate(
     // evidence for "what the portal actually selected" — a node id, its
     // properties (position/size/source_type), or an empty/targetless
     // stream. It is recorded before parsing so even a parse failure leaves
-    // the payload in the log.
-    let raw_reply = results
-        .iter()
-        .map(|(k, v)| format!("{k}={v:?}"))
-        .collect::<Vec<_>>()
-        .join(", ");
+    // the payload in the log. Item 60c: the reply also carries the
+    // restore_token, so the logger redacts that one value and prints only
+    // its tail.
+    let raw_reply = redacted_results(&results);
     log.record(
         "consent pending",
         &format!("ScreenCast Start raw reply: {{{raw_reply}}}"),
     );
+    // Item 60c: the token in the Start reply is the one to keep. Persist
+    // it HERE, before parsing streams or fetching the remote fd, so a
+    // later failure cannot throw away consent the user just granted.
+    let issued_token = persist_start_token(&results, data_dir, log);
     let node_id = parse_streams(results.get("streams").and_then(|v| v.try_clone().ok()))?;
     log.record(
         "consent pending",
@@ -302,7 +312,7 @@ pub async fn negotiate(
     Ok(Negotiated {
         fd,
         node_id,
-        restore_token,
+        restore_token: issued_token,
     })
 }
 
@@ -401,6 +411,86 @@ fn parse_streams(streams: Option<OwnedValue>) -> Result<u32, NegotiateError> {
         ));
     }
     Ok(node_id)
+}
+
+/// The last few characters of a restore token, safe to log.
+///
+/// Item 60c: the token is a credential — the portal uses it to skip the
+/// consent dialog — so logs may only carry enough to correlate events
+/// (the tail plus the length), never the value itself.
+pub fn token_hint(token: &str) -> String {
+    let chars: Vec<char> = token.chars().collect();
+    if chars.is_empty() {
+        return "<empty>".to_owned();
+    }
+    let keep = chars.len().min(4);
+    let tail: String = chars[chars.len() - keep..].iter().collect();
+    format!("…{tail} ({} chars)", chars.len())
+}
+
+/// Read the restore token from the `Start` reply's results. Per item 60c
+/// this is the reply that carries it when the user checked "remember for
+/// future sessions"; `SelectSources` only consumes a replay.
+fn restore_token_from_results(results: &HashMap<String, OwnedValue>) -> Option<String> {
+    results
+        .get("restore_token")
+        .and_then(|v| <&str>::try_from(v).ok().map(str::to_owned))
+        .filter(|t| !t.is_empty())
+}
+
+/// Persist the token carried by the `Start` reply (item 60c). Returns the
+/// issued token so the caller can log the outcome and hand it back.
+///
+/// A write failure is not fatal — the capture can still proceed — but it
+/// is logged: an unpersisted token means the next run asks for full
+/// consent again.
+fn persist_start_token(
+    results: &HashMap<String, OwnedValue>,
+    data_dir: &Path,
+    log: &CaptureLog,
+) -> Option<String> {
+    let token = restore_token_from_results(results)?;
+    log.record(
+        "consent pending",
+        &format!(
+            "ScreenCast Start issued restore_token {}",
+            token_hint(&token)
+        ),
+    );
+    match save_restore_token(data_dir, &token) {
+        Ok(()) => log.record(
+            "consent pending",
+            &format!(
+                "persisted restore_token {} for future sessions",
+                token_hint(&token)
+            ),
+        ),
+        Err(e) => log.record(
+            "consent pending",
+            &format!("could not persist restore_token: {e}"),
+        ),
+    }
+    Some(token)
+}
+
+/// Render a portal reply for the capture log with the `restore_token`
+/// value redacted to its tail. Every other field stays verbatim: `streams`
+/// is the evidence item 54 exists for.
+fn redacted_results(results: &HashMap<String, OwnedValue>) -> String {
+    results
+        .iter()
+        .map(|(k, v)| {
+            if k == "restore_token" {
+                let hint = <&str>::try_from(v)
+                    .map(token_hint)
+                    .unwrap_or_else(|_| "<redacted>".to_owned());
+                format!("{k}={hint}")
+            } else {
+                format!("{k}={v:?}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Persist/read the ScreenCast restore token in app data.
@@ -1654,6 +1744,67 @@ mod tests {
         // A blank file means "no token", not an empty-string token.
         std::fs::write(restore_token_path(&dir), "  \n").unwrap();
         assert_eq!(load_restore_token(&dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restore_token_hint_keeps_only_the_tail() {
+        let token = "restore-token-0123456789abcdef";
+        let hint = token_hint(token);
+        assert!(!hint.contains(token), "the full token must not be logged: {hint}");
+        assert!(hint.contains("cdef"), "the tail is the correlation clue: {hint}");
+        assert!(hint.contains("30 chars"), "the length is useful evidence: {hint}");
+        assert_eq!(token_hint(""), "<empty>");
+    }
+
+    #[test]
+    fn start_reply_token_is_read_and_redacted_in_the_raw_log() {
+        let mut results = HashMap::new();
+        results.insert(
+            "restore_token".to_owned(),
+            OwnedValue::try_from(Value::from("restore-token-0123456789abcdef")).unwrap(),
+        );
+        results.insert(
+            "streams".to_owned(),
+            OwnedValue::try_from(Value::from(7u32)).unwrap(),
+        );
+        assert_eq!(
+            restore_token_from_results(&results).as_deref(),
+            Some("restore-token-0123456789abcdef")
+        );
+        let logged = redacted_results(&results);
+        assert!(!logged.contains("restore-token-0123456789abcdef"), "{logged}");
+        assert!(logged.contains("restore_token=…cdef"), "{logged}");
+        // Other reply fields stay verbatim: streams is the evidence.
+        assert!(logged.contains("streams="), "{logged}");
+        // No token in the reply is simply no token.
+        results.remove("restore_token");
+        assert_eq!(restore_token_from_results(&results), None);
+        assert!(!redacted_results(&results).contains("restore_token"));
+    }
+
+    #[test]
+    fn start_reply_token_is_persisted_from_the_start_reply() {
+        let dir = log_dir("start-token");
+        let log = CaptureLog::open(&dir);
+        let token = "restore-token-0123456789abcdef";
+        let mut results = HashMap::new();
+        results.insert(
+            "restore_token".to_owned(),
+            OwnedValue::try_from(Value::from(token)).unwrap(),
+        );
+        assert_eq!(
+            persist_start_token(&results, &dir, &log).as_deref(),
+            Some(token)
+        );
+        // The Start reply's token is now in the app-data store, ready to
+        // be replayed by the next SelectSources.
+        assert_eq!(load_restore_token(&dir).as_deref(), Some(token));
+        // The capture log got the event but only the token tail.
+        let text = std::fs::read_to_string(log.path()).unwrap();
+        assert!(!text.contains(token), "{text}");
+        assert!(text.contains("issued restore_token …cdef"), "{text}");
+        assert!(text.contains("persisted restore_token …cdef"), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

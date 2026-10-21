@@ -532,33 +532,30 @@ async fn start_capture(
     }
     let token = screencast::load_restore_token(&opts.state_dir);
     match token.as_ref() {
-        Some(_) => log.record("consent pending", "using saved restore token"),
+        Some(t) => log.record(
+            "consent pending",
+            &format!(
+                "using saved restore token {} with persist mode",
+                screencast::token_hint(t)
+            ),
+        ),
         None => log.record(
             "consent pending",
             "no restore token yet (first run) — full consent required",
         ),
     }
-    let negotiated = screencast::negotiate(token, log).await?;
+    let negotiated = screencast::negotiate(token, &opts.state_dir, log).await?;
+    let token_state = match negotiated.restore_token.as_ref() {
+        Some(t) => format!("issued {}", screencast::token_hint(t)),
+        None => "unchanged".to_owned(),
+    };
     log.record(
         "consent pending",
         &format!(
-            "consent granted; selected ScreenCast node {}; remote fd ready (restore_token {})",
+            "consent granted; selected ScreenCast node {}; remote fd ready (restore_token {token_state})",
             negotiated.node_id,
-            if negotiated.restore_token.is_some() {
-                "issued"
-            } else {
-                "unchanged"
-            },
         ),
     );
-    if let Some(tok) = negotiated.restore_token.clone() {
-        if let Err(e) = screencast::save_restore_token(&opts.state_dir, &tok) {
-            // A token we cannot persist costs Seth a consent dialog next
-            // time; it is not fatal, but it is visible.
-            eprintln!("resident: could not save ScreenCast token: {e}");
-            log.record("consent pending", &format!("could not save token: {e}"));
-        }
-    }
     // Consent is done; the worker owns connecting → capturing.
     set_capture_stage(status, log, CaptureStage::Connecting);
     let (tx, events) = std::sync::mpsc::channel();
