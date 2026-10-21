@@ -274,9 +274,17 @@ const ACTIVATION_EPSILON_SECS: i64 = 120;
 impl MissionCompletion {
     /// A positive identity match against a worldstate alert — never
     /// inferred. Matches when the alert ids are equal, or when the event
-    /// tag agrees AND (the internal SolNode location is equal, or the
-    /// mission types normalize equal, or a payout resource uniqueName is
-    /// shared). Display nodes are never compared.
+    /// tag agrees AND the identity evidence corroborates it.
+    ///
+    /// **Addendum #59 (node gates corroboration).** When both the
+    /// completion and the alert carry a SolNode, the node is the ONLY
+    /// corroboration allowed; a shared mission type or payout resource is
+    /// not identity evidence in that case. This is what stops one
+    /// completion from striking every same-tag sibling that happens to pay
+    /// the same event currency (Seth's four Road To Tau alerts all paid
+    /// 50 Moonflesh). Type/reward fallbacks apply only when node data is
+    /// absent on either side (legacy feeds), and are never consulted when
+    /// both nodes disagree.
     ///
     /// Twelfth-pass §4 (instance-strict): every corroboration path
     /// (tag+node, tag+type, tag+reward) additionally requires the
@@ -298,14 +306,16 @@ impl MissionCompletion {
         if !tag_eq {
             return false;
         }
-        // Addendum #51 bonus: EE.log and DE both carry SolNode keys, so an
-        // exact internal-node match is positive instance evidence.
-        if !info.location.is_empty()
-            && !alert.mission.sol_node.is_empty()
-            && info.location.eq_ignore_ascii_case(&alert.mission.sol_node)
-        {
-            return true;
+        // Addendum #59: with node data on BOTH sides, only the node (or
+        // the exact id above) can corroborate. Returning here also stops
+        // the type/reward fallbacks from striking same-tag siblings that
+        // share a mission type or event currency.
+        if !info.location.is_empty() && !alert.mission.sol_node.is_empty() {
+            return info
+                .location
+                .eq_ignore_ascii_case(&alert.mission.sol_node);
         }
+        // Legacy fallbacks for node-less data only.
         let mine = mission_type_key(&info.mission_type);
         let theirs = mission_type_key(&alert.mission.mission_type);
         if !mine.is_empty() && mine == theirs {
@@ -991,6 +1001,64 @@ mod tests {
         let mut early = alert("SolNode175");
         early.activation = "2026-10-18T00:00:00Z".to_owned();
         assert!(!completion.matches_alert(&early));
+    }
+
+    /// Addendum #59 regression, exactly Seth's live case: four same-tag
+    /// Road To Tau alerts with distinct nodes/types and the SAME shared
+    /// event currency. One completion may strike only its node's alert;
+    /// the old OR-of-tag+type/tag+reward struck all four.
+    #[test]
+    fn one_completion_strikes_exactly_one_same_tag_sibling() {
+        use crate::model::{Alert, AlertMission, AlertReward, CountedItem};
+        let shared_reward = "/Lotus/Types/Gameplay/Events/RoadToTauEvent/RoadToTauEventResource";
+        let completion = MissionCompletion {
+            info: MissionInfo {
+                alert_id: String::new(),
+                alert_tag: "RoadToTauEvent".to_owned(),
+                mission_type: "MT_HIVE".to_owned(),
+                location: "SolNode175".to_owned(),
+                reward_items: vec![shared_reward.to_owned()],
+                ..Default::default()
+            },
+            day: "2026-10-21".to_owned(),
+            observed_at: "2026-10-21T12:00:00Z".to_owned(),
+        };
+        let sibling = |node: &str, mtype: &str| Alert {
+            id: String::new(),
+            tag: "RoadToTauEvent".to_owned(),
+            activation: "2026-10-21T11:00:00Z".to_owned(),
+            mission: AlertMission {
+                node: format!("{} (Eris)", mtype),
+                sol_node: node.to_owned(),
+                mission_type: mtype.to_owned(),
+                faction: "Infested".to_owned(),
+                reward: AlertReward {
+                    counted_items: vec![CountedItem {
+                        unique_name: shared_reward.to_owned(),
+                        kind: "Tau Resource".to_owned(),
+                        count: 50,
+                    }],
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let siblings = [
+            sibling("SolNode175", "Hive"),
+            sibling("SolNode176", "Mobile Defense"),
+            sibling("SolNode177", "Extermination"),
+            sibling("SolNode178", "Survival"),
+        ];
+        let struck: Vec<usize> = siblings
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| completion.matches_alert(a))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(struck, vec![0], "only the matching SolNode is struck");
+        // Even a same-tag sibling with the same mission type (but a
+        // different node) must not corroborate once both nodes are present.
+        assert!(!completion.matches_alert(&sibling("SolNode176", "Hive")));
     }
 
     /// Twelfth-pass §4 (instance-strict): a corroboration-only match must
