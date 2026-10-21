@@ -532,3 +532,7 @@ it refines the brief where they disagree. For the next worker pass.
     unchanged" on a first run — if the reply's token is
     not persisted, every capture demands full consent,
     against the pass-9 design.
+    RESOLVED (Seth, 2026-10-21, v0.5.2): Quit confirmed
+    working live. The pass-15 restructure (reports as
+    tasks, bounded teardown, D-Bus-gated test) closed
+    items 48/53 after two earlier attempts missed.
