@@ -475,3 +475,19 @@ it refines the brief where they disagree. For the next worker pass.
     cannot silently drift them. Recorded, NOT scheduled:
     the unbounded frame channel and tray_quit.rs's hard
     dbus-daemon requirement.
+57. **Version in the tray menu (Seth, 2026-10-21).** A
+    disabled menu item showing the running build
+    ("Fracker v0.5.2") in the tray menu. Source of truth:
+    the crate version — release merges bump Cargo.toml's
+    version in step with the tag so the menu can never
+    lie about what's installed.
+58. **Push plan updates over WebSocket (Seth, 2026-10-21).**
+    The plan server (loopback, :8791) should push a new
+    generation to open pages the moment a regen lands,
+    instead of pages discovering it at the 60s meta-
+    refresh. Reload-on-push is safe: ticks live server-
+    side and tab scope is generation-aware (item 52), so
+    a pushed reload lands on First Crack like a manual
+    one. Keep the meta-refresh as the backstop for a
+    dropped socket (with reconnect), not as the primary
+    mechanism.
