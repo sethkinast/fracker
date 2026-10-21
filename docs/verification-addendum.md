@@ -491,3 +491,20 @@ it refines the brief where they disagree. For the next worker pass.
     one. Keep the meta-refresh as the backstop for a
     dropped socket (with reconnect), not as the primary
     mechanism.
+59. **One completion struck ALL FOUR event alerts (Seth,
+    2026-10-21, v0.5.2).** He ran one Road To Tau alert;
+    every sibling rendered struck "log". Mechanism (Graf,
+    src/elog.rs matches_alert): corroboration is an OR of
+    tag+SolNode, tag+mission-type, tag+shared-payout. The
+    payout path treats any shared counted-item uniqueName
+    as identity evidence — but all Road To Tau alerts pay
+    the SAME event resource (50 Moonflesh), so one
+    completion's reward list matches every sibling. The
+    pass-12 activation guard doesn't help: all four were
+    live before he ran his. Fix rule: when both the
+    completion and the alert carry a SolNode, ONLY the
+    node (or the exact id) corroborates; the type/reward
+    paths are legacy fallbacks for node-less data only.
+    Regression test = the screenshot: four same-tag
+    siblings with distinct nodes/types and a shared
+    currency reward, one completion -> exactly one struck.
