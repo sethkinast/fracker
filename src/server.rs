@@ -19,7 +19,16 @@
 //!   id + in-game day;
 //! - `GET /tab/<slug>` records the active plan tab (the tab links carry
 //!   `?tab=<slug>`, which `GET /` also honours);
+//! - `GET /ws` upgrades to a WebSocket and pushes the plan generation the
+//!   moment a regeneration is published (item 58), so open pages refresh
+//!   immediately instead of waiting for the 60s meta-refresh (which stays
+//!   as the backstop);
 //! - `GET /health` is a liveness probe.
+//!
+//! The WebSocket side is a minimal RFC 6455 implementation — handshake,
+//! unmasked server text frames, masked client frame parsing, and close —
+//! in keeping with the hand-rolled server (no new crates: SHA-1 and
+//! base64 are local).
 //!
 //! No outbound network is added: the server reads only the report file it
 //! is handed and the tick/tab stores in the app data dir.
@@ -28,6 +37,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -35,10 +45,86 @@ use crate::render::base64_encode;
 use crate::tabs::TabStore;
 use crate::ticks::TickStore;
 
+/// The generation push fan-out (item 58).
+///
+/// The report pipeline publishes every new generation token here at the
+/// exact point the page is atomically renamed into place; the server then
+/// writes a text frame to every open WebSocket page. A page that connects
+/// late is handed the current generation immediately, so it can catch up
+/// after a dropped socket without waiting for the meta-refresh.
+pub struct GenerationHub {
+    current: Mutex<String>,
+    subscribers: Mutex<Vec<mpsc::Sender<String>>>,
+}
+
+impl GenerationHub {
+    /// A hub seeded with the generation already on disk (empty when no
+    /// report has been published yet).
+    pub fn new(generation: String) -> Self {
+        Self {
+            current: Mutex::new(generation),
+            subscribers: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The most recently published generation.
+    pub fn current(&self) -> String {
+        self.current
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    /// Publish a freshly rendered generation to every open page.
+    pub fn publish(&self, generation: &str) {
+        if let Ok(mut current) = self.current.lock() {
+            *current = generation.to_owned();
+        }
+        let message = generation_message(generation);
+        if let Ok(mut subscribers) = self.subscribers.lock() {
+            // A closed page's receiver fails the send; retire it here so a
+            // long-lived resident does not accumulate dead sockets.
+            subscribers.retain(|tx| tx.send(message.clone()).is_ok());
+        }
+    }
+
+    /// Register an open page. Returns the generation to send first plus the
+    /// receiver carrying subsequent pushes.
+    pub(crate) fn subscribe(&self) -> (String, Receiver<String>) {
+        let (tx, rx) = mpsc::channel();
+        let current = self.current();
+        if let Ok(mut subscribers) = self.subscribers.lock() {
+            subscribers.push(tx);
+        }
+        (current, rx)
+    }
+}
+
+impl Default for GenerationHub {
+    fn default() -> Self {
+        Self::new(String::new())
+    }
+}
+
+impl std::fmt::Debug for GenerationHub {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GenerationHub")
+            .field("current", &self.current())
+            .finish_non_exhaustive()
+    }
+}
+
+/// The push payload: the new generation token, JSON-encoded for the page
+/// script (tokens are numeric today, but never interpolate raw text).
+fn generation_message(generation: &str) -> String {
+    serde_json::json!({ "generation": generation }).to_string()
+}
+
 /// A running loopback server. Dropping it stops the accept loop.
 pub struct PlanServer {
     port: u16,
     url: String,
+    hub: Arc<GenerationHub>,
     stop: Arc<AtomicBool>,
     join: Option<std::thread::JoinHandle<()>>,
 }
@@ -52,6 +138,11 @@ impl PlanServer {
     /// The live URL "Open plan page" / auto-open use.
     pub fn url(&self) -> &str {
         &self.url
+    }
+
+    /// The generation hub the report pipeline publishes into (item 58).
+    pub fn hub(&self) -> Arc<GenerationHub> {
+        self.hub.clone()
     }
 }
 
@@ -86,6 +177,10 @@ pub fn serve(
         .port();
     let url = format!("http://127.0.0.1:{port}/");
     let tabs = Arc::new(Mutex::new(TabStore::load(&tabs_path)));
+    // Seed the hub from the report already on disk so a late page's initial
+    // push names its own generation (no spurious reload).
+    let hub = Arc::new(GenerationHub::new(report_generation(&report_path)));
+    let hub_thread = hub.clone();
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = stop.clone();
     let join = std::thread::spawn(move || {
@@ -96,12 +191,14 @@ pub fn serve(
             tabs_path,
             ticks,
             tabs,
+            hub_thread,
             stop_thread,
         )
     });
     Ok(PlanServer {
         port,
         url,
+        hub,
         stop,
         join: Some(join),
     })
@@ -125,6 +222,7 @@ fn accept_loop(
     tabs_path: PathBuf,
     ticks: Arc<Mutex<TickStore>>,
     tabs: Arc<Mutex<TabStore>>,
+    hub: Arc<GenerationHub>,
     stop: Arc<AtomicBool>,
 ) {
     let _ = listener.set_nonblocking(true);
@@ -136,8 +234,19 @@ fn accept_loop(
                 let tabs_file = tabs_path.clone();
                 let store = ticks.clone();
                 let tab_store = tabs.clone();
+                let push = hub.clone();
+                let stopped = stop.clone();
                 std::thread::spawn(move || {
-                    let _ = handle(stream, &report, &ticks_file, &tabs_file, &store, &tab_store);
+                    let _ = handle(
+                        stream,
+                        &report,
+                        &ticks_file,
+                        &tabs_file,
+                        &store,
+                        &tab_store,
+                        &push,
+                        &stopped,
+                    );
                 });
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -157,6 +266,8 @@ fn handle(
     tabs_path: &std::path::Path,
     ticks: &Arc<Mutex<TickStore>>,
     tabs: &Arc<Mutex<TabStore>>,
+    hub: &Arc<GenerationHub>,
+    stop: &Arc<AtomicBool>,
 ) -> std::io::Result<()> {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
@@ -170,8 +281,10 @@ fn handle(
     let method = parts.next().unwrap_or("").to_owned();
     let target = parts.next().unwrap_or("/").to_owned();
 
-    // Drain headers, capturing Content-Length for the POST body.
+    // Drain headers, capturing Content-Length for the POST body and the
+    // WebSocket key for the upgrade handshake.
     let mut content_length = 0usize;
+    let mut ws_key: Option<String> = None;
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line)? == 0 {
@@ -181,16 +294,20 @@ fn handle(
         if trimmed.is_empty() {
             break;
         }
-        if let Some(v) = trimmed
-            .split_once(':')
-            .filter(|(k, _)| k.eq_ignore_ascii_case("content-length"))
-            .map(|(_, v)| v.trim())
-        {
-            content_length = v.parse().unwrap_or(0);
+        if let Some((name, value)) = trimmed.split_once(':') {
+            let value = value.trim();
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = value.parse().unwrap_or(0);
+            } else if name.eq_ignore_ascii_case("sec-websocket-key") {
+                ws_key = Some(value.to_owned());
+            }
         }
     }
-    let mut body = vec![0u8; content_length.min(64 * 1024)];
-    if !body.is_empty() {
+    // A WebSocket upgrade has no body and takes over the raw stream below,
+    // so the buffered reader must not be the one reading frames.
+    let mut body = Vec::new();
+    if ws_key.is_none() && content_length > 0 {
+        body.resize(content_length.min(64 * 1024), 0);
         reader.read_exact(&mut body)?;
     }
     let body = String::from_utf8_lossy(&body).into_owned();
@@ -227,6 +344,15 @@ fn handle(
             "application/json",
             &tick_ok(),
         ),
+        ("GET", "/ws") => match ws_key.as_deref() {
+            Some(key) => ws_upgrade(&mut stream, key, hub, stop),
+            None => respond(
+                &mut stream,
+                "400 Bad Request",
+                "text/plain",
+                b"websocket upgrade requires Sec-WebSocket-Key",
+            ),
+        },
         ("GET", "/health") => respond(&mut stream, "200 OK", "text/plain", b"ok"),
         _ => respond(&mut stream, "404 Not Found", "text/plain", b"not found"),
     }
@@ -460,6 +586,200 @@ fn respond(
     stream.write_all(head.as_bytes())?;
     stream.write_all(body)?;
     stream.flush()
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket push (item 58): a minimal RFC 6455 implementation
+// ---------------------------------------------------------------------------
+
+/// RFC 6455 §1.3 handshake GUID.
+const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+/// The `Sec-WebSocket-Accept` value for a client key:
+/// base64(SHA-1(key + GUID)).
+fn ws_accept(key: &str) -> String {
+    let mut material = Vec::with_capacity(key.len() + WS_GUID.len());
+    material.extend_from_slice(key.trim().as_bytes());
+    material.extend_from_slice(WS_GUID.as_bytes());
+    crate::render::base64_encode(&sha1(&material))
+}
+
+/// Upgrade one connection and stream generation pushes until the page
+/// closes (or the server stops). The handshake is the only HTTP this
+/// connection carries; after the 101 the raw socket speaks frames.
+fn ws_upgrade(
+    stream: &mut TcpStream,
+    key: &str,
+    hub: &GenerationHub,
+    stop: &AtomicBool,
+) -> std::io::Result<()> {
+    let head = format!(
+        "HTTP/1.1 101 Switching Protocols\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Accept: {}\r\n\r\n",
+        ws_accept(key)
+    );
+    stream.write_all(head.as_bytes())?;
+    stream.flush()?;
+
+    let (current, pushes) = hub.subscribe();
+    // Catch a page up after a dropped socket: its first frame names the
+    // generation already on disk; the page reloads only on a mismatch.
+    stream.write_all(&ws_text_frame(&generation_message(&current)))?;
+    stream.flush()?;
+
+    // A short read timeout lets this thread alternate between pushing and
+    // noticing a client close without blocking the push path.
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+    let mut pending: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 512];
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            let _ = stream.write_all(&ws_close_frame());
+            return Ok(());
+        }
+        while let Ok(message) = pushes.try_recv() {
+            stream.write_all(&ws_text_frame(&message))?;
+            stream.flush()?;
+        }
+        match stream.read(&mut buf) {
+            Ok(0) => return Ok(()),
+            Ok(n) => {
+                pending.extend_from_slice(&buf[..n]);
+                let mut consumed = 0usize;
+                let mut closed = false;
+                while let Some((opcode, total)) = ws_frame(&pending[consumed..]) {
+                    if opcode == 0x8 {
+                        closed = true;
+                    }
+                    consumed += total;
+                }
+                pending.drain(..consumed);
+                if closed {
+                    let _ = stream.write_all(&ws_close_frame());
+                    return Ok(());
+                }
+                // A page that never reads its own frames is not ours to
+                // buffer forever.
+                if pending.len() > 64 * 1024 {
+                    return Ok(());
+                }
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(_) => return Ok(()),
+        }
+    }
+}
+
+/// One unmasked server text frame (FIN + opcode 0x1).
+fn ws_text_frame(text: &str) -> Vec<u8> {
+    let payload = text.as_bytes();
+    let mut frame = Vec::with_capacity(payload.len() + 10);
+    frame.push(0x81);
+    if payload.len() < 126 {
+        frame.push(payload.len() as u8);
+    } else if payload.len() <= u16::MAX as usize {
+        frame.push(126);
+        frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    } else {
+        frame.push(127);
+        frame.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+    }
+    frame.extend_from_slice(payload);
+    frame
+}
+
+/// A close frame with no status payload.
+fn ws_close_frame() -> [u8; 2] {
+    [0x88, 0x00]
+}
+
+/// Parse one complete client frame from `buf`: `(opcode, total bytes)`.
+/// `None` means the frame is still incomplete. Client frames are masked
+/// (RFC 6455 §5.3); the mask key is skipped, not applied — the server only
+/// needs control opcodes, never client payload text.
+fn ws_frame(buf: &[u8]) -> Option<(u8, usize)> {
+    let header = buf.get(..2)?;
+    let opcode = header[0] & 0x0f;
+    let masked = header[1] & 0x80 != 0;
+    let short = (header[1] & 0x7f) as usize;
+    let (mut offset, payload): (usize, usize) = match short {
+        126 => {
+            let ext = buf.get(2..4)?;
+            (4, u16::from_be_bytes([ext[0], ext[1]]) as usize)
+        }
+        127 => {
+            let ext = buf.get(2..10)?;
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(ext);
+            (10, usize::try_from(u64::from_be_bytes(bytes)).ok()?)
+        }
+        n => (2, n),
+    };
+    if masked {
+        offset += 4;
+    }
+    let total = offset.checked_add(payload)?;
+    (buf.len() >= total).then_some((opcode, total))
+}
+
+/// SHA-1 (FIPS 180-4). Hand-rolled because the packaging contract only
+/// vendors real dependencies and the handshake needs exactly this one
+/// primitive.
+fn sha1(data: &[u8]) -> [u8; 20] {
+    let mut h: [u32; 5] = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0];
+    let bit_len = (data.len() as u64).wrapping_mul(8);
+    let mut message = data.to_vec();
+    message.push(0x80);
+    while message.len() % 64 != 56 {
+        message.push(0);
+    }
+    message.extend_from_slice(&bit_len.to_be_bytes());
+
+    for chunk in message.chunks(64) {
+        let mut w = [0u32; 80];
+        for (i, word) in chunk.chunks(4).take(16).enumerate() {
+            w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
+        }
+        for i in 16..80 {
+            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+        }
+        let (mut a, mut b, mut c, mut d, mut e) = (h[0], h[1], h[2], h[3], h[4]);
+        for (i, word) in w.iter().enumerate() {
+            let (f, k) = match i {
+                0..=19 => ((b & c) | ((!b) & d), 0x5A82_7999),
+                20..=39 => (b ^ c ^ d, 0x6ED9_EBA1),
+                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1B_BCDC),
+                _ => (b ^ c ^ d, 0xCA62_C1D6),
+            };
+            let temp = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(*word);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = temp;
+        }
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+    }
+
+    let mut out = [0u8; 20];
+    for (i, word) in h.iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
+    }
+    out
 }
 
 /// Served while the first report is still being generated.
@@ -764,5 +1084,171 @@ mod tests {
             Some("42")
         );
         assert_eq!(body_generation("<body data-day=\"x\">"), None);
+    }
+
+    // ---- §2 WebSocket push (item 58) ----
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn sha1_matches_the_fips_vectors() {
+        assert_eq!(hex(&sha1(b"")), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
+        assert_eq!(hex(&sha1(b"abc")), "a9993e364706816aba3e25717850c26c9cd0d89d");
+        assert_eq!(
+            hex(&sha1(
+                b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+            )),
+            "84983e441c3bd26ebaae4aa1f95129e5e54670f1"
+        );
+    }
+
+    /// The RFC 6455 §1.3 worked example: this exact key/accept pair is what
+    /// a real browser's handshake is checked against.
+    #[test]
+    fn websocket_accept_matches_the_rfc_example() {
+        assert_eq!(
+            ws_accept("dGhlIHNhbXBsZSBub25jZQ=="),
+            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+        );
+    }
+
+    #[test]
+    fn websocket_frames_encode_and_parse_across_lengths() {
+        // Server text frame, short payload.
+        assert_eq!(ws_text_frame("hi"), vec![0x81, 0x02, b'h', b'i']);
+        // 16-bit extended length.
+        let long = ws_text_frame(&"x".repeat(300));
+        assert_eq!(&long[..4], &[0x81, 0x7e, 0x01, 0x2c]);
+        assert_eq!(long.len(), 304);
+        assert_eq!(ws_frame(&long), Some((1, 304)));
+        // A masked client close frame (browser-style) parses once complete.
+        let close = [0x88, 0x82, 0x01, 0x02, 0x03, 0x04, 0x03, 0xe8];
+        assert_eq!(ws_frame(&close[..7]), None, "incomplete frame waits");
+        assert_eq!(ws_frame(&close), Some((8, 8)));
+        // An unmasked frame is still parsed (the server only needs opcodes).
+        assert_eq!(ws_frame(&ws_text_frame("x")), Some((1, 3)));
+    }
+
+    /// Read one unmasked server frame (handshake responses are read first
+    /// byte-by-byte so no frame bytes are swallowed).
+    fn read_ws_frame_e2e(stream: &mut TcpStream) -> (u8, Vec<u8>) {
+        let mut header = [0u8; 2];
+        stream.read_exact(&mut header).unwrap();
+        let opcode = header[0] & 0x0f;
+        let short = (header[1] & 0x7f) as usize;
+        let len = match short {
+            126 => {
+                let mut ext = [0u8; 2];
+                stream.read_exact(&mut ext).unwrap();
+                u16::from_be_bytes(ext) as usize
+            }
+            127 => {
+                let mut ext = [0u8; 8];
+                stream.read_exact(&mut ext).unwrap();
+                u64::from_be_bytes(ext) as usize
+            }
+            n => n,
+        };
+        let mut payload = vec![0u8; len];
+        stream.read_exact(&mut payload).unwrap();
+        (opcode, payload)
+    }
+
+    fn read_http_head(stream: &mut TcpStream) -> String {
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            head.push(byte[0]);
+            assert!(head.len() < 16 * 1024, "handshake head is bounded");
+        }
+        String::from_utf8(head).unwrap()
+    }
+
+    fn generation_of(payload: &[u8]) -> String {
+        let v: serde_json::Value = serde_json::from_slice(payload).unwrap();
+        v["generation"].as_str().unwrap().to_owned()
+    }
+
+    /// The §2 gate at server scale: a real upgrade handshake, the current
+    /// generation on connect, and a pushed frame the instant a new one is
+    /// published — no 60s refresh involved.
+    #[test]
+    fn websocket_pushes_a_new_generation_to_an_open_page() {
+        let dir = std::env::temp_dir().join(format!(
+            "fracker-ws-push-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let report = dir.join("plan.html");
+        std::fs::write(
+            &report,
+            "<!DOCTYPE html><html><body data-day=\"2026-10-21\" data-generation=\"gen-1\"></body></html>",
+        )
+        .unwrap();
+        let server = serve(
+            0,
+            report,
+            TickStore::file(&dir),
+            TabStore::file(&dir),
+            Arc::new(Mutex::new(TickStore::default())),
+        )
+        .expect("server binds");
+
+        let mut s = TcpStream::connect(("127.0.0.1", server.port())).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        write!(
+            s,
+            "GET /ws HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\n\
+             Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+        )
+        .unwrap();
+        let head = read_http_head(&mut s);
+        assert!(head.starts_with("HTTP/1.1 101 Switching Protocols"), "{head}");
+        assert!(
+            head.contains("Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo="),
+            "{head}"
+        );
+
+        // The first frame names the generation already on disk (catch-up for
+        // a page that reconnected after missing a push).
+        let (opcode, payload) = read_ws_frame_e2e(&mut s);
+        assert_eq!(opcode, 0x1, "server frames are text");
+        assert_eq!(generation_of(&payload), "gen-1");
+
+        // A regeneration is published: the open page is pushed immediately.
+        server.hub().publish("gen-2");
+        let (opcode, payload) = read_ws_frame_e2e(&mut s);
+        assert_eq!(opcode, 0x1);
+        assert_eq!(generation_of(&payload), "gen-2");
+
+        // A browser close is answered and the connection retires.
+        s.write_all(&[0x88, 0x82, 0x01, 0x02, 0x03, 0x04, 0x03, 0xe8])
+            .unwrap();
+        let (opcode, payload) = read_ws_frame_e2e(&mut s);
+        assert_eq!(opcode, 0x8, "close is acknowledged");
+        assert!(payload.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn websocket_upgrade_without_a_key_is_refused() {
+        let dir = std::env::temp_dir().join(format!("fracker-ws-nokey-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let server = serve(
+            0,
+            dir.join("plan.html"),
+            TickStore::file(&dir),
+            TabStore::file(&dir),
+            Arc::new(Mutex::new(TickStore::default())),
+        )
+        .expect("server binds");
+        let response = http_get(server.port(), "/ws");
+        assert!(response.contains("400 Bad Request"), "{response}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

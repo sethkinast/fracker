@@ -306,8 +306,11 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     let mut h = String::new();
     h.push_str("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n");
     h.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
-    // Converge without a server; the refresh-flash rule (§19) keeps
-    // every repaint dark (root background + color-scheme: dark).
+    // Backstop only since item 58: the loopback server pushes a new
+    // generation over WebSocket when a regeneration lands. The meta-refresh
+    // still converges a dropped socket (with the client reconnecting), and
+    // a file:// demo export has no push. The refresh-flash rule (§19)
+    // keeps every repaint dark (root background + color-scheme: dark).
     h.push_str("<meta http-equiv=\"refresh\" content=\"60\">\n");
     h.push_str("<title>Fracker — session plan</title>\n");
     // Demo exports are self-contained (addendum #23: zero CDN
@@ -1315,6 +1318,37 @@ const JS: &str = r#"
   });
   try { filt(sessionStorage.getItem('fracker:f') || 'all'); } catch (e) {}
 })();
+// Live plan push (item 58): the loopback server pushes the current
+// generation over WebSocket the moment a regeneration lands; a mismatch
+// reloads the page onto the fresh plan. Ticks are server-side and tab
+// scope is generation-aware, so a pushed reload lands on First Crack like
+// a manual regen. The 60s meta-refresh stays as the backstop, and a
+// dropped socket reconnects — on connect the server names the current
+// generation, which catches up a page that missed a push.
+(function () {
+  if (!window.WebSocket || location.protocol !== 'http:') { return; }
+  var gen = document.body.getAttribute('data-generation') || '';
+  var timer = null;
+  function reconnect() {
+    if (timer) { return; }
+    timer = setTimeout(function () { timer = null; connect(); }, 2000);
+  }
+  function connect() {
+    var ws;
+    try { ws = new WebSocket('ws://' + location.host + '/ws'); }
+    catch (e) { reconnect(); return; }
+    ws.onmessage = function (ev) {
+      var msg;
+      try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      if (msg && msg.generation && msg.generation !== gen) {
+        location.reload();
+      }
+    };
+    ws.onclose = reconnect;
+    ws.onerror = function () { try { ws.close(); } catch (e) {} };
+  }
+  connect();
+})();
 "#;
 
 // ---------------------------------------------------------------------------
@@ -1409,7 +1443,12 @@ mod tests {
             assert!(html.contains(section), "missing section: {section}");
         }
         assert!(html.contains("color-scheme:dark"), "refresh-flash rule");
-        assert!(html.contains("http-equiv=\"refresh\""), "meta refresh");
+        assert!(html.contains("http-equiv=\"refresh\""), "meta refresh backstop");
+        assert!(
+            html.contains("/ws") && html.contains("WebSocket"),
+            "the page subscribes to generation pushes (§2 item 58)"
+        );
+        assert!(html.contains("location.reload()"), "a push reloads the page");
         assert!(html.contains("localStorage"), "checkbox persistence");
         assert!(
             html.contains("data-day=\""),

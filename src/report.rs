@@ -20,11 +20,13 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 
 use crate::elog::MissionCompletion;
 use crate::model::{OwnedEquipment, RelicStock};
+use crate::server::GenerationHub;
 use crate::tuning::Tuning;
 use crate::{config, fetch, model, pack, plan, render};
 
@@ -55,6 +57,11 @@ pub struct ReportConfig {
     pub offline: bool,
     /// Embed ≤128px data-URI icons (demo) instead of CDN hotlinks.
     pub embed_icons: bool,
+    /// Generation push (item 58). When set (the resident's loopback server
+    /// provides one), the freshly rendered generation is published to open
+    /// WebSocket pages at the same instant the report file is renamed into
+    /// place. `--demo` and tests leave it `None`.
+    pub push: Option<Arc<GenerationHub>>,
 }
 
 impl ReportConfig {
@@ -74,6 +81,7 @@ impl ReportConfig {
             config_path,
             offline: false,
             embed_icons: false,
+            push: None,
         }
     }
 }
@@ -97,6 +105,8 @@ pub struct ReportOutcome {
     pub offline: bool,
     pub generated_at: DateTime<Utc>,
     pub out: PathBuf,
+    /// The generation token stamped on this page (item 52/58).
+    pub generation: String,
 }
 
 impl ReportOutcome {
@@ -334,14 +344,16 @@ pub async fn generate(
         None
     };
 
+    // Item 52: unique per REGENERATION (not the worldstate's timestamp,
+    // which can repeat across runs). The server scopes the remembered tab
+    // to this value: same generation = the 60s refreshes keep the tab; a
+    // new report = First Crack. Item 58 publishes this token to open pages
+    // once the page file is in place.
+    let generation = next_generation();
     let ctx = render::RenderContext {
         world: &world,
         generated_label: now.format("%Y-%m-%d %H:%M UTC").to_string(),
-        // Item 52: unique per REGENERATION (not the worldstate's timestamp,
-        // which can repeat across runs). The server scopes the remembered
-        // tab to this value: same generation = the 60s refreshes keep the
-        // tab; a new report = First Crack.
-        generation: next_generation(),
+        generation: generation.clone(),
         targets_status: format!(
             "backlog {} primes · profile {}",
             backlog.primes.unmastered.len(),
@@ -369,6 +381,13 @@ pub async fn generate(
     let tmp = cfg.out.with_extension("html.tmp");
     std::fs::write(&tmp, html).map_err(|e| format!("write report: {e}"))?;
     std::fs::rename(&tmp, &cfg.out).map_err(|e| format!("publish report: {e}"))?;
+    // Item 58: the page is now atomically in place, so this is the exact
+    // publication point that pushes the new generation to open pages. A
+    // reload lands on the generation whose token rode the same run (item
+    // 52: ticks stay server-side, tab scope is generation-aware).
+    if let Some(hub) = &cfg.push {
+        hub.publish(&generation);
+    }
 
     // Pass-4 bars: one per standing pool (PvP excluded) + focus.
     let bars = match &ctx.daily {
@@ -389,6 +408,7 @@ pub async fn generate(
         offline: cfg.offline,
         generated_at: now,
         out: cfg.out.clone(),
+        generation,
     })
 }
 
@@ -620,6 +640,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Item 58 gate: the generation is pushed at publication, and the token
+    /// on the wire is exactly the one stamped into the served page.
+    #[tokio::test]
+    async fn publishing_a_generation_pushes_it_to_open_pages() {
+        let dir = std::env::temp_dir().join(format!(
+            "fracker-report-push-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("plan.html");
+        let hub = Arc::new(GenerationHub::default());
+        let (_current, pushes) = hub.subscribe();
+
+        let mut cfg = test_cfg(out.clone());
+        cfg.push = Some(hub.clone());
+        let outcome = generate(&cfg, &[]).await.expect("offline generate");
+
+        // One frame per publication, naming the page's own generation.
+        let pushed: String = pushes.try_recv().expect("push on publication");
+        let message: serde_json::Value = serde_json::from_str(&pushed).unwrap();
+        assert_eq!(message["generation"].as_str(), Some(outcome.generation.as_str()));
+
+        let html = std::fs::read_to_string(&out).unwrap();
+        let start = html.find("data-generation=\"").unwrap() + "data-generation=\"".len();
+        let rest = &html[start..];
+        let stamped = &rest[..rest.find('"').unwrap()];
+        assert_eq!(
+            stamped, outcome.generation,
+            "the pushed token is the one on the page"
+        );
+        assert_eq!(hub.current(), outcome.generation);
+        // A second regeneration pushes a different token.
+        generate(&cfg, &[]).await.expect("second generate");
+        let second: String = pushes.try_recv().expect("second push");
+        assert_ne!(second, pushed);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn test_cfg(out: PathBuf) -> ReportConfig {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         ReportConfig {
@@ -631,6 +690,7 @@ mod tests {
             config_path: root.join("does-not-exist.toml"),
             offline: true,
             embed_icons: false,
+            push: None,
         }
     }
 
