@@ -536,3 +536,13 @@ it refines the brief where they disagree. For the next worker pass.
     working live. The pass-15 restructure (reports as
     tasks, bounded teardown, D-Bus-gated test) closed
     items 48/53 after two earlier attempts missed.
+    CONFIRMED (Seth, 2026-10-21): a fresh run asked for
+    full consent again despite the portal dialog's
+    "remember for future sessions" being checked. The
+    portal issues the token (it is in the Start reply);
+    the app never persists or replays it. Defect, not a
+    question: capture the Start reply's restore_token
+    into the app-data store, pass it with persist_mode
+    on later SelectSources calls, and log only its last
+    few characters — the pass-15 raw-reply logging
+    currently prints the whole token.
