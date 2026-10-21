@@ -425,6 +425,9 @@ pub fn save_restore_token(data_dir: &Path, token: &str) -> Result<(), String> {
 /// library, so we lay the bytes out ourselves.
 mod pod {
     // SPA pod types (spa/utils/type.h).
+    /// `SPA_TYPE_None`: a valid pod with no body (`size = 0`). Used by
+    /// PipeWire to say "no value"; it must never be read as a format.
+    pub const SPA_TYPE_NONE: u32 = 1;
     pub const SPA_TYPE_ID: u32 = 3;
     pub const SPA_TYPE_RECTANGLE: u32 = 10;
     pub const SPA_TYPE_FRACTION: u32 = 11;
@@ -585,6 +588,20 @@ mod pod {
         Some((size, ty))
     }
 
+    /// Total byte length of a serialized pod from its 8-byte header.
+    ///
+    /// `spa_pod.size` is the body length, so the object occupies
+    /// `size + 8` bytes. `SPA_TYPE_None` is a header-only pod (no body):
+    /// there is nothing to read and `None` is returned. A body size that
+    /// cannot be represented is rejected as malformed.
+    pub fn pod_total_len(header: &[u8]) -> Option<usize> {
+        let (size, ty) = read_header(header)?;
+        if ty == SPA_TYPE_NONE {
+            return None;
+        }
+        (size as usize).checked_add(8)
+    }
+
     /// Find `SPA_FORMAT_VIDEO_format` in a negotiated `Format` object pod
     /// (delivered to `param_changed`). Best-effort: `None` on anything we
     /// do not recognise, so a malformed pod degrades to the BGRA default
@@ -600,12 +617,17 @@ mod pod {
             let key = u32::from_le_bytes(bytes[off..off + 4].try_into().ok()?);
             let value_off = off + 8;
             let (vsize, vtype) = read_header(&bytes[value_off..])?;
+            let value_len = 8usize.checked_add(vsize as usize)?;
             if key == SPA_FORMAT_VIDEO_FORMAT && vtype == SPA_TYPE_ID {
+                // An Id body is 4 bytes; reject a truncated pod instead
+                // of reading past the slice the caller bounded.
+                if value_len < 12 || value_off + 12 > bytes.len() {
+                    return None;
+                }
                 return Some(u32::from_le_bytes(
                     bytes[value_off + 8..value_off + 12].try_into().ok()?,
                 ));
             }
-            let value_len = 8 + vsize as usize;
             off = value_off + (value_len + 7) / 8 * 8;
         }
         None
@@ -1315,17 +1337,30 @@ impl FrameSource for ScreenCastSource {
 impl Drop for ScreenCastSource {
     fn drop(&mut self) {
         unsafe {
+            // Teardown uses the same thread-loop lock discipline as the
+            // rest of this file: `disconnect`/`destroy` run on the loop's
+            // context thread, so a callback cannot dispatch against the
+            // objects while they are being freed. Do not hold the lock
+            // across `pw_thread_loop_stop` (it waits for the loop, which
+            // needs the lock).
+            let locked = !self.thread_loop.is_null();
+            if locked {
+                (self.api.pw_thread_loop_lock)(self.thread_loop);
+            }
             if self.connected && !self.stream.is_null() {
                 (self.api.pw_stream_disconnect)(self.stream);
                 (self.api.pw_stream_destroy)(self.stream);
+                self.connected = false;
             }
             // The context owns the core/stream; destroy it before the
             // loop it was created on (context.h: the main loop must stay
             // alive until pw_context_destroy()).
             if !self.context.is_null() {
                 (self.api.pw_context_destroy)(self.context);
+                self.context = std::ptr::null_mut();
             }
-            if !self.thread_loop.is_null() {
+            if locked {
+                (self.api.pw_thread_loop_unlock)(self.thread_loop);
                 (self.api.pw_thread_loop_stop)(self.thread_loop);
                 (self.api.pw_thread_loop_destroy)(self.thread_loop);
             }
@@ -1494,7 +1529,15 @@ unsafe extern "C" fn on_param_changed(data: *mut c_void, id: u32, param: *const 
         return;
     }
     let ctx = &mut *(data as *mut StreamCtx);
-    let bytes = std::slice::from_raw_parts(param as *const u8, 256);
+    // The pod's own `size` header bounds the read. Probe pods are often
+    // ≥256B, but the SPA ABI lets a format pod be much smaller (and a
+    // `SPA_TYPE_None` pod has no body at all); a fixed 256-byte slice
+    // would read past the object in both cases.
+    let header = std::slice::from_raw_parts(param as *const u8, 8);
+    let Some(len) = pod::pod_total_len(header) else {
+        return;
+    };
+    let bytes = std::slice::from_raw_parts(param as *const u8, len);
     if let Some(fmt) = pod::parse_video_format(bytes) {
         ctx.format.store(fmt, Ordering::Relaxed);
     }
@@ -1650,6 +1693,41 @@ mod tests {
         );
         // Garbage in -> None (never a panic).
         assert_eq!(pod::parse_video_format(&[0, 1, 2]), None);
+    }
+
+    #[test]
+    fn a_small_pod_is_bounded_by_its_own_size_header() {
+        // Sixteenth pass §1: the callback used to copy a fixed 256 bytes.
+        // This Format pod is deliberately much smaller than that, so the
+        // size-extraction logic must return its real length and the
+        // parser must still read the format prop without overrunning.
+        let small = pod::object(
+            pod::SPA_TYPE_OBJECT_FORMAT,
+            pod::SPA_PARAM_FORMAT,
+            &[pod::prop(
+                pod::SPA_FORMAT_VIDEO_FORMAT,
+                pod::id(pod::SPA_VIDEO_FORMAT_RGBA),
+            )],
+        );
+        assert!(small.len() < 256, "test pod must be smaller than the old fixed read");
+        assert_eq!(pod::pod_total_len(&small[..8]), Some(small.len()));
+        assert_eq!(
+            pod::parse_video_format(&small),
+            Some(pod::SPA_VIDEO_FORMAT_RGBA)
+        );
+
+        // `SPA_TYPE_None` is header-only: nothing to read, never parsed.
+        let none = {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(&0u32.to_le_bytes());
+            bytes.extend_from_slice(&pod::SPA_TYPE_NONE.to_le_bytes());
+            bytes
+        };
+        assert_eq!(pod::pod_total_len(&none), None);
+        assert_eq!(pod::parse_video_format(&none), None);
+
+        // A truncated/garbage header is rejected rather than underflowed.
+        assert_eq!(pod::pod_total_len(&[0, 1, 2]), None);
     }
 
     #[test]

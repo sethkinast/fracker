@@ -445,6 +445,10 @@ pub fn rank_fissures(
         .iter()
         .filter(|f| f.accepts_eras(eras))
         .filter_map(|f| {
+            // An unreadable expiry cannot rank. Parsing already recorded
+            // the loss in `WorldState::decode_gaps`
+            // ("fissure:<node>.Expiry unreadable"), so a drop here is
+            // visible and never reads as "DE has no fissures".
             let expiry = parse_time(&f.expiry)?;
             if expiry <= now {
                 return None;
@@ -1531,6 +1535,8 @@ fn filler_fissure(input: &PlanInput<'_>) -> Option<crate::model::Fissure> {
         .world
         .fissures
         .iter()
+        // Same contract as `rank_fissures`: an unreadable expiry is
+        // already a decode gap, so this filter cannot hide it.
         .filter(|f| parse_time(&f.expiry).map(|t| t > input.now).unwrap_or(false))
         .filter(|f| !f.is_storm)
         .collect();
@@ -2115,6 +2121,7 @@ mod tests {
             id: id.to_owned(),
             tag: tag.to_owned(),
             activation: String::new(),
+            activation_degraded: false,
             expiry: expiry.to_owned(),
             mission: AlertMission {
                 description: desc.to_owned(),

@@ -690,10 +690,78 @@ fn as_array<'a>(v: Option<&'a serde_json::Value>) -> &'a [serde_json::Value] {
     v.and_then(|v| v.as_array()).map(Vec::as_slice).unwrap_or(&[])
 }
 
+/// A section the planner/renderer consumes. DE's payload is a fixed
+/// schema, so a missing key is a rename/shape change, not "no data";
+/// record it as a gap and let the caller keep the empty default
+/// (addendum #56b: no silent empty plan).
+fn required_section<'a>(
+    root: &'a serde_json::Value,
+    key: &str,
+    gaps: &mut Vec<String>,
+) -> Option<&'a serde_json::Value> {
+    let value = root.get(key);
+    if value.is_none() {
+        push_gap(gaps, &format!("section:{key} missing"));
+    }
+    value
+}
+
 fn de_str<'a>(v: Option<&'a serde_json::Value>, key: &str) -> &'a str {
     v.and_then(|v| v.get(key))
         .and_then(|x| x.as_str())
         .unwrap_or("")
+}
+
+/// A DE string field the plan renders. An absent/renamed or empty field
+/// degrades to `""` exactly as before, but the loss is recorded in the
+/// worldstate gaps channel instead of disappearing (addendum #56b).
+fn de_str_tracked<'a>(
+    v: Option<&'a serde_json::Value>,
+    key: &str,
+    label: &str,
+    gaps: &mut Vec<String>,
+) -> &'a str {
+    let field = v.and_then(|v| v.get(key));
+    let out = de_str(v, key);
+    if out.is_empty() {
+        let state = match field {
+            None => "missing",
+            Some(f) if f.as_str() == Some("") => "empty",
+            Some(_) => "not a string",
+        };
+        push_gap(gaps, &format!("{label}.{key} {state}"));
+    }
+    out
+}
+
+/// A DE date field the plan renders. `de_date` still degrades to `""`
+/// (never a guessed date); failures land in the gaps channel with the
+/// section/entry that lost them (addendum #56b).
+fn de_date_tracked(
+    v: Option<&serde_json::Value>,
+    key: &str,
+    label: &str,
+    gaps: &mut Vec<String>,
+) -> String {
+    let field = v.and_then(|v| v.get(key));
+    let out = de_date(field);
+    if out.is_empty() {
+        let state = if field.is_none() { "missing" } else { "unreadable" };
+        push_gap(gaps, &format!("{label}.{key} {state}"));
+    }
+    out
+}
+
+/// Stable identity for a gap label: prefer the display node, then the
+/// Mongo id, then a positional fallback so nothing is swallowed.
+fn gap_identity(prefix: &str, node: &str, id: &str, index: usize) -> String {
+    if !node.is_empty() {
+        format!("{prefix}:{node}")
+    } else if !id.is_empty() {
+        format!("{prefix}:{id}")
+    } else {
+        format!("{prefix}:#{index}")
+    }
 }
 
 /// Node display = `name (system)` as today; an unmapped key stays raw and
@@ -896,6 +964,12 @@ pub struct Alert {
     /// an alert it could actually belong to — observed at/after this time.
     #[serde(default)]
     pub activation: String,
+    /// True when DE sent an `Activation` field this parser could not read.
+    /// The guard then refuses corroboration instead of failing open; a
+    /// genuinely absent field stays the documented legacy path (empty
+    /// string, not degraded). Set by `WorldState::from_de_json` only.
+    #[serde(skip)]
+    pub activation_degraded: bool,
     #[serde(default)]
     pub expiry: String,
     #[serde(default)]
@@ -1151,24 +1225,46 @@ impl WorldState {
 
         // DE's payload carries `Time` in unix seconds; the render clock is
         // judged against this stamp, never against the fetch time.
-        if let Some(secs) = root.get("Time").and_then(|v| v.as_i64()) {
-            if let Some(dt) = chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0) {
-                world.timestamp = dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        match root.get("Time").and_then(|v| v.as_i64()) {
+            Some(secs) => {
+                if let Some(dt) = chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0) {
+                    world.timestamp = dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                } else {
+                    push_gap(&mut gaps, "Time out of range");
+                }
             }
+            None => push_gap(&mut gaps, "Time missing/unreadable"),
         }
 
         // Alerts.
-        for a in as_array(root.get("Alerts")) {
+        for (index, a) in
+            as_array(required_section(&root, "Alerts", &mut gaps)).iter().enumerate()
+        {
             let mission = a.get("MissionInfo");
-            let location = de_str(mission, "location");
+            let id = de_oid(a.get("_id"));
+            let tag_raw = de_str(Some(a), "Tag");
+            let label = gap_identity(
+                "alert",
+                "",
+                if !id.is_empty() { &id } else { tag_raw },
+                index,
+            );
+            let mission_label = format!("{label}.MissionInfo");
+            let location = de_str_tracked(mission, "location", &mission_label, &mut gaps);
             let counted_items = as_array(
                 mission
                     .and_then(|m| m.get("missionReward"))
                     .and_then(|r| r.get("countedItems")),
             )
             .iter()
-            .filter_map(|c| {
-                let unique_name = de_str(Some(c), "ItemType");
+            .enumerate()
+            .filter_map(|(item_index, c)| {
+                let unique_name = de_str_tracked(
+                    Some(c),
+                    "ItemType",
+                    &format!("{mission_label}.countedItems[{item_index}]"),
+                    &mut gaps,
+                );
                 if unique_name.is_empty() {
                     return None;
                 }
@@ -1179,21 +1275,38 @@ impl WorldState {
                 })
             })
             .collect();
+            // A present-but-unreadable Activation must not silently take
+            // the legacy fail-open path; an absent field is the real
+            // legacy feed (addendum #56b).
+            let activation_field = a.get("Activation");
+            let activation = de_date(activation_field);
+            let activation_degraded = activation_field.is_some() && activation.is_empty();
+            if activation_degraded {
+                push_gap(&mut gaps, &format!("{label}.Activation unreadable"));
+            }
+            let tag = de_str_tracked(Some(a), "Tag", &label, &mut gaps);
             world.alerts.push(Alert {
-                id: de_oid(a.get("_id")),
-                tag: de_str(Some(a), "Tag").to_owned(),
-                activation: de_date(a.get("Activation")),
-                expiry: de_date(a.get("Expiry")),
+                id,
+                tag: tag.to_owned(),
+                activation,
+                activation_degraded,
+                expiry: de_date_tracked(Some(a), "Expiry", &label, &mut gaps),
                 mission: AlertMission {
-                    description: humanize_language_key(de_str(mission, "descText")),
+                    description: humanize_language_key(de_str_tracked(
+                        mission,
+                        "descText",
+                        &mission_label,
+                        &mut gaps,
+                    )),
                     node: decode_node_display(location, decodes, &mut gaps),
                     sol_node: location.to_owned(),
                     mission_type: decode_mission_type(
-                        de_str(mission, "missionType"),
+                        de_str_tracked(mission, "missionType", &mission_label, &mut gaps),
                         decodes,
                         &mut gaps,
                     ),
-                    faction: de_str(mission, "faction").to_owned(),
+                    faction: de_str_tracked(mission, "faction", &mission_label, &mut gaps)
+                        .to_owned(),
                     reward: AlertReward { counted_items },
                     counted_items_flat: Vec::new(),
                 },
@@ -1202,18 +1315,29 @@ impl WorldState {
 
         // ActiveMissions -> fissures. `Hard` is the entry's own Steel Path
         // flag; `Modifier` carries the era tier.
-        for m in as_array(root.get("ActiveMissions")) {
+        for (index, m) in
+            as_array(required_section(&root, "ActiveMissions", &mut gaps)).iter().enumerate()
+        {
+            let id = de_oid(m.get("_id"));
             let nod = de_str(Some(m), "Node");
+            let label = gap_identity("fissure", nod, &id, index);
             world.fissures.push(Fissure {
-                id: de_oid(m.get("_id")),
-                node: decode_node_display(nod, decodes, &mut gaps),
-                mission_type: decode_mission_type(
-                    de_str(Some(m), "MissionType"),
+                id,
+                node: decode_node_display(
+                    de_str_tracked(Some(m), "Node", &label, &mut gaps),
                     decodes,
                     &mut gaps,
                 ),
-                tier: decode_tier(de_str(Some(m), "Modifier"), &mut gaps),
-                expiry: de_date(m.get("Expiry")),
+                mission_type: decode_mission_type(
+                    de_str_tracked(Some(m), "MissionType", &label, &mut gaps),
+                    decodes,
+                    &mut gaps,
+                ),
+                tier: decode_tier(
+                    de_str_tracked(Some(m), "Modifier", &label, &mut gaps),
+                    &mut gaps,
+                ),
+                expiry: de_date_tracked(Some(m), "Expiry", &label, &mut gaps),
                 is_storm: false,
                 is_hard: m.get("Hard").and_then(|v| v.as_bool()).unwrap_or(false),
             });
@@ -1222,14 +1346,25 @@ impl WorldState {
         // VoidStorms -> fissures with `is_storm`. The storm payload carries
         // only Node/Tier/Activation/Expiry (no mission type), so the type
         // stays empty rather than being inferred.
-        for s in as_array(root.get("VoidStorms")) {
+        for (index, s) in
+            as_array(required_section(&root, "VoidStorms", &mut gaps)).iter().enumerate()
+        {
+            let id = de_oid(s.get("_id"));
             let nod = de_str(Some(s), "Node");
+            let label = gap_identity("void-storm", nod, &id, index);
             world.fissures.push(Fissure {
-                id: de_oid(s.get("_id")),
-                node: decode_node_display(nod, decodes, &mut gaps),
+                id,
+                node: decode_node_display(
+                    de_str_tracked(Some(s), "Node", &label, &mut gaps),
+                    decodes,
+                    &mut gaps,
+                ),
                 mission_type: String::new(),
-                tier: decode_tier(de_str(Some(s), "ActiveMissionTier"), &mut gaps),
-                expiry: de_date(s.get("Expiry")),
+                tier: decode_tier(
+                    de_str_tracked(Some(s), "ActiveMissionTier", &label, &mut gaps),
+                    &mut gaps,
+                ),
+                expiry: de_date_tracked(Some(s), "Expiry", &label, &mut gaps),
                 is_storm: true,
                 is_hard: false,
             });
@@ -1238,25 +1373,42 @@ impl WorldState {
         // Goals -> events (community/event progress incl. Road To Tau).
         // DE's top-level `Events` array is Discord/community messaging, not
         // game events, and is deliberately ignored.
-        for g in as_array(root.get("Goals")) {
+        for (index, g) in as_array(required_section(&root, "Goals", &mut gaps)).iter().enumerate() {
+            let desc = de_str(Some(g), "Desc");
+            let label = gap_identity("goal", desc, "", index);
             world.events.push(WorldEvent {
-                description: humanize_language_key(de_str(Some(g), "Desc")),
+                description: humanize_language_key(de_str_tracked(
+                    Some(g),
+                    "Desc",
+                    &label,
+                    &mut gaps,
+                )),
                 health: g.get("HealthPct").and_then(|v| v.as_f64()),
                 is_community: g
                     .get("Community")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
-                expiry: de_date(g.get("Expiry")),
-                activation: de_date(g.get("Activation")),
+                expiry: de_date_tracked(Some(g), "Expiry", &label, &mut gaps),
+                activation: de_date_tracked(Some(g), "Activation", &label, &mut gaps),
             });
         }
 
         // PrimeVaultTraders (Varzia).
-        if let Some(vt) = as_array(root.get("PrimeVaultTraders")).first() {
+        if let Some(vt) =
+            as_array(required_section(&root, "PrimeVaultTraders", &mut gaps)).first()
+        {
+            let id = de_oid(vt.get("_id"));
+            let label = gap_identity("vault-trader", de_str(Some(vt), "Node"), &id, 0);
             let inventory = as_array(vt.get("Manifest"))
                 .iter()
-                .filter_map(|item| {
-                    let unique_name = de_str(Some(item), "ItemType");
+                .enumerate()
+                .filter_map(|(item_index, item)| {
+                    let unique_name = de_str_tracked(
+                        Some(item),
+                        "ItemType",
+                        &format!("{label}.Manifest[{item_index}]"),
+                        &mut gaps,
+                    );
                     if unique_name.is_empty() {
                         return None;
                     }
@@ -1267,58 +1419,85 @@ impl WorldState {
                 })
                 .collect();
             world.vault_trader = Some(VaultTrader {
-                id: de_oid(vt.get("_id")),
-                activation: de_date(vt.get("Activation")),
-                expiry: de_date(vt.get("Expiry")),
+                id,
+                activation: de_date_tracked(Some(vt), "Activation", &label, &mut gaps),
+                expiry: de_date_tracked(Some(vt), "Expiry", &label, &mut gaps),
                 character: String::new(),
-                location: decode_hub(de_str(Some(vt), "Node"), decodes, &mut gaps),
+                location: decode_hub(
+                    de_str_tracked(Some(vt), "Node", &label, &mut gaps),
+                    decodes,
+                    &mut gaps,
+                ),
                 inventory,
             });
         }
 
         // VoidTraders (Baro). `active` is derived from the window at render
         // time by `is_live`, so the DE entry leaves it false.
-        for t in as_array(root.get("VoidTraders")) {
+        for (index, t) in
+            as_array(required_section(&root, "VoidTraders", &mut gaps)).iter().enumerate()
+        {
+            let label = gap_identity("void-trader", de_str(Some(t), "Node"), "", index);
             world.void_traders.push(VoidTrader {
-                activation: de_date(t.get("Activation")),
-                expiry: de_date(t.get("Expiry")),
-                location: decode_hub(de_str(Some(t), "Node"), decodes, &mut gaps),
+                activation: de_date_tracked(Some(t), "Activation", &label, &mut gaps),
+                expiry: de_date_tracked(Some(t), "Expiry", &label, &mut gaps),
+                location: decode_hub(
+                    de_str_tracked(Some(t), "Node", &label, &mut gaps),
+                    decodes,
+                    &mut gaps,
+                ),
                 active: false,
             });
         }
         world.baro = world.void_traders.first().cloned();
 
         // Sorties.
-        if let Some(s) = as_array(root.get("Sorties")).first() {
+        if let Some(s) = as_array(required_section(&root, "Sorties", &mut gaps)).first() {
             world.sortie = Some(Sortie {
-                expiry: de_date(s.get("Expiry")),
+                expiry: de_date_tracked(Some(s), "Expiry", "sortie", &mut gaps),
                 variants: as_array(s.get("Variants"))
                     .iter()
-                    .map(|v| SortieVariant {
-                        node: decode_node_display(de_str(Some(v), "node"), decodes, &mut gaps),
-                        mission_type: decode_mission_type(
-                            de_str(Some(v), "missionType"),
-                            decodes,
-                            &mut gaps,
-                        ),
+                    .enumerate()
+                    .map(|(index, v)| {
+                        let label = format!("sortie.variants[{index}]");
+                        SortieVariant {
+                            node: decode_node_display(
+                                de_str_tracked(Some(v), "node", &label, &mut gaps),
+                                decodes,
+                                &mut gaps,
+                            ),
+                            mission_type: decode_mission_type(
+                                de_str_tracked(Some(v), "missionType", &label, &mut gaps),
+                                decodes,
+                                &mut gaps,
+                            ),
+                        }
                     })
                     .collect(),
             });
         }
 
         // LiteSorties -> the Archon weekly (parsed; planner later).
-        if let Some(s) = as_array(root.get("LiteSorties")).first() {
+        if let Some(s) = as_array(required_section(&root, "LiteSorties", &mut gaps)).first() {
             world.archon = Some(Sortie {
-                expiry: de_date(s.get("Expiry")),
+                expiry: de_date_tracked(Some(s), "Expiry", "archon", &mut gaps),
                 variants: as_array(s.get("Missions"))
                     .iter()
-                    .map(|v| SortieVariant {
-                        node: decode_node_display(de_str(Some(v), "node"), decodes, &mut gaps),
-                        mission_type: decode_mission_type(
-                            de_str(Some(v), "missionType"),
-                            decodes,
-                            &mut gaps,
-                        ),
+                    .enumerate()
+                    .map(|(index, v)| {
+                        let label = format!("archon.missions[{index}]");
+                        SortieVariant {
+                            node: decode_node_display(
+                                de_str_tracked(Some(v), "node", &label, &mut gaps),
+                                decodes,
+                                &mut gaps,
+                            ),
+                            mission_type: decode_mission_type(
+                                de_str_tracked(Some(v), "missionType", &label, &mut gaps),
+                                decodes,
+                                &mut gaps,
+                            ),
+                        }
                     })
                     .collect(),
             });
@@ -1327,10 +1506,12 @@ impl WorldState {
         // SeasonInfo -> Nightwave. Titles/descriptions/standing come from
         // the baked Nightwave decode; `|COUNT|` is substituted with the
         // challenge's required count. `WeeklyHard` marks elites.
-        if let Some(si) = root.get("SeasonInfo") {
+        if let Some(si) = required_section(&root, "SeasonInfo", &mut gaps) {
             let mut active_challenges = Vec::new();
             for c in as_array(si.get("ActiveChallenges")) {
-                let key = de_str(Some(c), "Challenge");
+                let id = de_oid(c.get("_id"));
+                let label = gap_identity("nightwave", "", &id, active_challenges.len());
+                let key = de_str_tracked(Some(c), "Challenge", &label, &mut gaps);
                 let (title, desc, standing) = match decodes.nightwave.get(key) {
                     Some(d) => (
                         d.name.clone(),
@@ -1894,6 +2075,105 @@ mod tests {
             12
         );
         assert_eq!(world.decode_gaps.len(), 13);
+    }
+
+    #[test]
+    fn degraded_de_fields_surface_in_gaps_instead_of_disappearing() {
+        // Addendum #56b: a renamed/missing field the plan renders must
+        // land in the gaps channel. This payload also proves the
+        // activation guard can tell a present-but-unreadable timestamp
+        // from the legacy "field absent" feed, and that an unreadable
+        // fissure expiry is reported before ranking drops the fissure.
+        let json = r#"{
+            "Time": 1792387004,
+            "Alerts": [{
+                "_id": {"$oid": "alert-1"},
+                "Tag": "RoadToTauEvent",
+                "Activation": {"$date": {"$numberLong": "not-a-number"}},
+                "Expiry": {"$date": {"$numberLong": "1792389600000"}},
+                "MissionInfo": {
+                    "location": "SolNode1",
+                    "missionType": "MT_SURVIVAL",
+                    "descText": "Event Alert Title",
+                    "missionReward": {"countedItems": [{"ItemType": "/Lotus/X", "ItemCount": 5}]}
+                }
+            }, {
+                "_id": {"$oid": "alert-legacy"},
+                "Tag": "RoadToTauEvent",
+                "Expiry": {"$date": {"$numberLong": "1792389600000"}},
+                "MissionInfo": {
+                    "location": "SolNode1",
+                    "missionType": "MT_SURVIVAL",
+                    "faction": "FC_INFESTATION",
+                    "descText": "Event Alert Title"
+                }
+            }],
+            "ActiveMissions": [{
+                "_id": {"$oid": "fissure-1"},
+                "Node": "SolNode2",
+                "MissionType": "MT_SURVIVAL",
+                "Modifier": "VoidT1",
+                "Expiry": {"$date": {"$numberLong": "still-not-a-number"}}
+            }]
+        }"#;
+        let world = WorldState::from_de_json(json, &Decodes::default()).unwrap();
+
+        // A renamed/absent top-level section is visible even when it
+        // would otherwise just parse as an empty array.
+        assert!(world
+            .decode_gaps
+            .iter()
+            .any(|g| g == "section:Goals missing"));
+        assert!(world
+            .decode_gaps
+            .iter()
+            .any(|g| g == "section:VoidStorms missing"));
+
+        let degraded = &world.alerts[0];
+        assert!(degraded.activation_degraded);
+        assert!(world
+            .decode_gaps
+            .iter()
+            .any(|g| g.contains("alert:alert-1.Activation unreadable")));
+        // The renamed/missing faction is visible, not silently "".
+        assert!(world
+            .decode_gaps
+            .iter()
+            .any(|g| g.contains("alert:alert-1.MissionInfo.faction missing")));
+
+        let legacy = &world.alerts[1];
+        assert!(!legacy.activation_degraded, "absent Activation is legacy");
+        assert!(
+            !world
+                .decode_gaps
+                .iter()
+                .any(|g| g.contains("alert:alert-legacy.Activation")),
+            "legacy absence is not reported as a degraded timestamp"
+        );
+
+        let fissure = &world.fissures[0];
+        assert!(fissure.expiry.is_empty());
+        assert!(world
+            .decode_gaps
+            .iter()
+            .any(|g| g.contains("fissure:SolNode2.Expiry unreadable")));
+        let tuning = crate::tuning::Tuning::load(
+            &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data"),
+        )
+        .unwrap();
+        let now = "2026-10-19T05:17:00Z".parse::<chrono::DateTime<chrono::Utc>>().unwrap();
+        let ranked = crate::plan::rank_fissures(
+            &world.fissures,
+            &["Lith"],
+            1,
+            now,
+            false,
+            &tuning,
+        );
+        assert!(
+            ranked.is_empty(),
+            "the unreadable fissure cannot rank — but the gap above records why"
+        );
     }
 
     #[test]

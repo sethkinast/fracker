@@ -27,14 +27,38 @@ fn world_from_fixture() -> WorldState {
     let world_text =
         std::fs::read_to_string(root().join("fixtures/worldstate.json")).unwrap();
     let decodes = Decodes::load(&root().join("data")).unwrap();
-    WorldState::from_de_json(&world_text, &decodes).unwrap()
+    let world = WorldState::from_de_json(&world_text, &decodes).unwrap();
+    assert_golden_clock_matches_fixture(&world);
+    world
 }
 
-/// Planner "now" just after the DE payload's `Time` (2026-10-19T05:16:44Z):
-/// alerts/fissures expiring imminently exercise the expiry cascade
-/// deterministically.
+/// The planner clock is tied to the committed fixture's own `Time`
+/// (2026-10-19T05:16:44Z). Regenerating `fixtures/worldstate.json`
+/// (`FRACKER_REFRESH_FIXTURES=1`) must not silently drift every golden
+/// timestamp: [`assert_golden_clock_matches_fixture`] fails loudly when
+/// the fixture's `Time` no longer matches this constant.
+const GOLDEN_FIXTURE_TIME: &str = "2026-10-19T05:16:44Z";
+
 fn golden_now() -> DateTime<Utc> {
-    "2026-10-19T05:17:00Z".parse().unwrap()
+    GOLDEN_FIXTURE_TIME.parse().unwrap()
+}
+
+/// Sixteenth pass §4: the hardcoded golden clock and the committed
+/// fixture must agree. A refreshed fixture carries a new `Time`; without
+/// this assertion the suite would keep asserting the old expectations
+/// against new data and drift silently.
+fn assert_golden_clock_matches_fixture(world: &WorldState) {
+    assert_eq!(
+        world.timestamp, GOLDEN_FIXTURE_TIME,
+        "fixtures/worldstate.json Time drifted from the golden clock; \
+         regenerate the golden expectations and update GOLDEN_FIXTURE_TIME \
+         deliberately (FRACKER_REFRESH_FIXTURES=1 rewrites the fixture)"
+    );
+    assert_eq!(
+        golden_now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        world.timestamp,
+        "golden_now() must be the committed fixture's Time"
+    );
 }
 
 struct Golden {
@@ -92,6 +116,16 @@ fn golden_plan_recompute() -> Golden {
         std::fs::read_to_string(root().join("data/backlog.json")).unwrap();
     let backlog = Backlog::from_json(&backlog_text).unwrap();
     Golden { plan, backlog }
+}
+
+#[test]
+#[should_panic(expected = "Time drifted")]
+fn golden_clock_guard_rejects_a_refreshed_fixture() {
+    // A regeneration rewrites `Time`; the guard must fail loudly rather
+    // than letting every golden assertion run against drifted data.
+    let mut world = world_from_fixture();
+    world.timestamp = "2026-10-20T00:00:00Z".to_owned();
+    assert_golden_clock_matches_fixture(&world);
 }
 
 #[test]
