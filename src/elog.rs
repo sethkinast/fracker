@@ -322,13 +322,20 @@ impl MissionCompletion {
 
     /// The §4 activation guard for corroboration paths. An alert with no
     /// recorded activation cannot be guarded, so the corroboration is
-    /// allowed (legacy feeds). A completion with no trustworthy
-    /// observed-at cannot corroborate an *activated* alert — it may only
-    /// strike on exact id.
+    /// allowed (legacy feeds with no `Activation` field at all). A
+    /// present-but-unreadable activation is different: DE sent a value we
+    /// could not parse, so the guard stays closed and the loss is already
+    /// in the worldstate gaps (addendum #56b). A completion with no
+    /// trustworthy observed-at cannot corroborate an *activated* alert —
+    /// it may only strike on exact id.
     fn corroborates_activation(&self, alert: &crate::model::Alert) -> bool {
+        if alert.activation_degraded {
+            return false;
+        }
         let activation = match alert.activation.parse::<chrono::DateTime<chrono::Utc>>() {
             Ok(t) => t,
-            Err(_) => return true,
+            Err(_) if alert.activation.is_empty() => return true,
+            Err(_) => return false,
         };
         let observed = match self.observed_at.parse::<chrono::DateTime<chrono::Utc>>() {
             Ok(t) => t,
@@ -918,6 +925,7 @@ mod tests {
             id: id.to_owned(),
             tag: tag.to_owned(),
             activation: String::new(),
+            activation_degraded: false,
             expiry: String::new(),
             mission: AlertMission {
                 node: "Nimus (Eris)".to_owned(),
@@ -1007,6 +1015,7 @@ mod tests {
             id: String::new(),
             tag: "RoadToTauEvent".to_owned(),
             activation: activation.to_owned(),
+            activation_degraded: false,
             expiry: String::new(),
             mission: AlertMission {
                 node: "Nimus (Eris)".to_owned(),
@@ -1041,6 +1050,21 @@ mod tests {
         assert!(
             today.matches_alert(&alert("2026-10-17T00:00:00Z")),
             "a post-activation corroborating completion must strike"
+        );
+        // A present-but-unreadable activation is NOT the legacy empty feed:
+        // the guard stays closed instead of failing open (addendum #56b).
+        let mut degraded = alert("");
+        degraded.activation = "not-a-timestamp".to_owned();
+        degraded.activation_degraded = true;
+        assert!(
+            !today.matches_alert(&degraded),
+            "a degraded activation must not skip the guard"
+        );
+        // The genuinely legacy feed (field absent) keeps its documented
+        // behavior: corroboration is allowed when no activation exists.
+        assert!(
+            today.matches_alert(&alert("")),
+            "legacy empty activation still corroborates"
         );
         // A completion with no trustworthy observed-at cannot corroborate.
         let unknown = MissionCompletion {
