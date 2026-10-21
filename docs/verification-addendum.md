@@ -508,3 +508,27 @@ it refines the brief where they disagree. For the next worker pass.
     Regression test = the screenshot: four same-tag
     siblings with distinct nodes/types and a shared
     currency reward, one completion -> exactly one struck.
+60. **Capture round 3 (Seth's log, 2026-10-21, v0.5.2).**
+    Consent, window pick, and node selection all worked
+    (Start selected node 151, source_type 2 = window);
+    the run then died at "connecting": **libpipewire
+    missing symbol pw_core_get_registry** — the pass-15
+    registry step never ran, so the registration-race
+    question remains OPEN (v0.5.0's target-not-found at
+    connect is still unexplained by it). Lessons:
+    (a) The symbol audits validated names against HEADERS;
+    for a dlopen FFI, header-declared is not the same as
+    library-exported — the installed .so's symbol table
+    is the only ground truth, and this name isn't in
+    Seth's. Obtain the registry through an exported
+    mechanism, or drop the registry dependency and retry
+    the connect itself on target-not-found.
+    (b) META-FIX: resolve EVERY capture symbol up front,
+    before the portal flow starts, and report ALL missing
+    names in one error — three live runs have each died
+    on a different stage because discovery is serialized.
+    (c) Question for the code: the Start reply CARRIES a
+    restore_token, yet the log says "restore_token
+    unchanged" on a first run — if the reply's token is
+    not persisted, every capture demands full consent,
+    against the pass-9 design.
