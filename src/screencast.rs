@@ -85,15 +85,26 @@ const OPEN_PIPEWIRE_REMOTE_REPLY_SIGNATURE: &str = "h";
 /// name what actually failed, never the last state the machine was in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NegotiateError {
-    /// The lifecycle stage that failed: `"consent pending"` for the
-    /// consent-gated calls, `"remote-fd"` for the `OpenPipeWireRemote`
-    /// reply (which only runs *after* consent is granted).
+    /// The lifecycle stage that failed: `"pipewire"` for the up-front
+    /// symbol preflight (before any portal dialog), `"consent pending"`
+    /// for the consent-gated calls, `"remote-fd"` for the
+    /// `OpenPipeWireRemote` reply (which only runs *after* consent is
+    /// granted).
     pub stage: &'static str,
     /// The verbatim portal/D-Bus error, surfaced as-is.
     pub message: String,
 }
 
 impl NegotiateError {
+    /// A failure resolving the capture FFI before the portal flow starts
+    /// (item 60b). Every missing symbol is named in one message.
+    pub fn pipewire(message: impl Into<String>) -> Self {
+        Self {
+            stage: "pipewire",
+            message: message.into(),
+        }
+    }
+
     /// A failure in a consent-gated call: `CreateSession`, `SelectSources`
     /// or `Start` (each waits on the user's dialog).
     pub fn consent(message: impl Into<String>) -> Self {
@@ -818,18 +829,24 @@ impl PwApi {
                     .to_owned(),
             );
         }
-        // Resolve EXACTLY the manifest symbols, once, keyed by name. A
-        // name that is not in the headers fails here (never at connect
-        // time on a real desktop), and the manifest test keeps this list
-        // and the field wiring below in lockstep.
+        // Resolve EXACTLY the manifest symbols, once, keyed by name. Item
+        // 60b: collect EVERY missing name and report them in one error, so
+        // a live run can never discover a second missing symbol after the
+        // first one is fixed. The manifest test keeps this list and the
+        // field wiring below in lockstep.
         let mut resolved: HashMap<&'static str, *mut c_void> = HashMap::new();
+        let mut missing: Vec<&'static str> = Vec::new();
         for name in REQUIRED_SYMBOLS {
             let cname = CString::new(*name).unwrap();
             let p = unsafe { libc::dlsym(handle, cname.as_ptr()) };
             if p.is_null() {
-                return Err(format!("libpipewire missing symbol {}", name));
+                missing.push(name);
+            } else {
+                resolved.insert(name, p);
             }
-            resolved.insert(name, p);
+        }
+        if !missing.is_empty() {
+            return Err(missing_symbols_error(&missing));
         }
         let get = |name: &'static str| -> *mut c_void {
             *resolved
@@ -900,6 +917,14 @@ impl PwApi {
         };
         Ok(api)
     }
+}
+
+/// Resolve every capture symbol before the portal flow starts (item 60b).
+/// On failure the message names **all** missing names in one line; the
+/// caller surfaces it as a `pipewire` stage error, so no consent dialog is
+/// ever shown for a run that cannot possibly connect.
+pub fn preflight_pipewire() -> Result<(), String> {
+    PwApi::load().map(|_| ())
 }
 
 /// One error naming every missing `libpipewire` symbol (item 60b).
@@ -1769,6 +1794,8 @@ mod tests {
         let fd = NegotiateError::remote_fd("ScreenCast remote fd: mismatched signature");
         assert_eq!(fd.stage, "remote-fd");
         assert_eq!(fd.message, "ScreenCast remote fd: mismatched signature");
+        let sym = NegotiateError::pipewire("libpipewire missing 1 required symbol(s): x");
+        assert_eq!(sym.stage, "pipewire");
     }
 
     /// Item 47: the checked-in manifest is the dlsym list, so a future

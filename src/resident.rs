@@ -523,6 +523,13 @@ async fn start_capture(
     status: &Arc<Mutex<TrayStatus>>,
     log: &CaptureLog,
 ) -> Result<CaptureRun, screencast::NegotiateError> {
+    // Item 60b: resolve every capture symbol before the portal flow
+    // begins. One error names every missing name, so a live run can never
+    // discover them one consent dialog at a time.
+    if let Err(e) = screencast::preflight_pipewire() {
+        log.record("pipewire", &e);
+        return Err(screencast::NegotiateError::pipewire(e));
+    }
     let token = screencast::load_restore_token(&opts.state_dir);
     match token.as_ref() {
         Some(_) => log.record("consent pending", "using saved restore token"),
