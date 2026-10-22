@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Utc};
 
 use crate::model::{
-    OwnedEquipment, Refinement, RelicStock, RelicTables, Roster, WorldState,
+    OwnedEquipment, Refinement, RelicEntry, RelicStock, RelicTables, Roster, WorldState,
 };
 use crate::tuning::{MissionTuning, PlannerTuning, Tuning};
 
@@ -52,6 +52,166 @@ pub enum PartState {
     Unknown,
 }
 
+/// Where a relic's copies can come from, in the order the planner
+/// prefers them (addendum #68): held stock first, then relics still in
+/// the drop tables, then vaulted relics carried by the live Varzia
+/// rotation, and finally relics with no current source at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SourceTier {
+    Owned = 0,
+    Unvaulted = 1,
+    Varzia = 2,
+    Unobtainable = 3,
+}
+
+impl SourceTier {
+    pub fn is_unobtainable(self) -> bool {
+        self == Self::Unobtainable
+    }
+}
+
+/// Live Varzia availability (addendum #68), derived from the world
+/// state's `PrimeVaultTraders` manifest only.
+///
+/// A vaulted relic is available when either:
+/// * the manifest directly names that relic, or
+/// * the manifest's gear tokens cover the parent gear of the relic's
+///   rarest roster-identified reward (lowest Intact chance; ties combine
+///   parent gears and any match counts).
+///
+/// The second clause mirrors how Varzia sells relics: the rotation
+/// advertises gear, and buying that gear's relics is the path to the
+/// listed rewards. Anchoring on the *rarest* reward avoids treating every
+/// mixed legacy relic that happens to contain a rotation frame's common
+/// part as available.
+#[derive(Debug, Clone, Default)]
+pub struct VarziaAvailability {
+    available: HashSet<String>,
+}
+
+impl VarziaAvailability {
+    pub fn from_world(
+        world: &WorldState,
+        roster: &Roster,
+        relics: &RelicTables,
+    ) -> Self {
+        let Some(vt) = world.vault_trader.as_ref() else {
+            return Self::default();
+        };
+        let gear_tokens = vt.gear_tokens();
+        let manifest_names: Vec<String> = vt
+            .inventory
+            .iter()
+            .flat_map(|item| {
+                [
+                    crate::model::normalize_gear_token(&item.unique_name),
+                    crate::model::normalize_gear_token(&item.item),
+                ]
+            })
+            .filter(|s| !s.is_empty())
+            .collect();
+        let parentage = roster.parentage();
+        let mut available = HashSet::new();
+        for (name, relic) in &relics.relics {
+            // Unvaulted relics are already tier 2; only vaulted relics
+            // need the Varzia question answered.
+            if !relic.vaulted {
+                continue;
+            }
+            let direct = relic_name_token(name);
+            if !direct.is_empty()
+                && manifest_names
+                    .iter()
+                    .any(|m| token_contains(m, &direct))
+            {
+                available.insert(name.clone());
+                continue;
+            }
+            // Rarest roster-identified reward: ignore Forma and other
+            // rewards with no prime parent when choosing the anchor.
+            let mut rarest = f64::INFINITY;
+            let mut parents: Vec<&str> = Vec::new();
+            for reward in &relic.rewards {
+                let chance = reward.chance_at(Refinement::Intact);
+                if chance <= 0.0 {
+                    continue;
+                }
+                let Some(ps) = parentage.get(&reward.name) else {
+                    continue;
+                };
+                if chance < rarest - 1e-9 {
+                    rarest = chance;
+                    parents.clear();
+                }
+                if (chance - rarest).abs() < 1e-9 {
+                    parents.extend(ps.iter().map(String::as_str));
+                }
+            }
+            if parents
+                .iter()
+                .any(|p| gear_in_tokens(p, &gear_tokens))
+            {
+                available.insert(name.clone());
+            }
+        }
+        Self { available }
+    }
+
+    pub fn is_available(&self, relic: &str) -> bool {
+        self.available.contains(relic)
+    }
+
+    /// Source tier for a relic with the captured stock, if any.
+    pub fn source_tier(&self, relic: &RelicEntry, stock: &RelicStock) -> SourceTier {
+        if stock.count(&relic.name).unwrap_or(0) > 0 {
+            SourceTier::Owned
+        } else if !relic.vaulted {
+            SourceTier::Unvaulted
+        } else if self.is_available(&relic.name) {
+            SourceTier::Varzia
+        } else {
+            SourceTier::Unobtainable
+        }
+    }
+
+    /// A part's relics in source-priority order, rarity/chance as the
+    /// tiebreak inside a tier (addendum #68).
+    pub fn relics_for_part_ranked<'a>(
+        &self,
+        relics: &'a RelicTables,
+        part: &str,
+        stock: &RelicStock,
+    ) -> Vec<(&'a RelicEntry, f64)> {
+        let mut out = relics.relics_for_part(part);
+        out.sort_by(|a, b| {
+            self.source_tier(a.0, stock)
+                .cmp(&self.source_tier(b.0, stock))
+                .then_with(|| {
+                    b.1.partial_cmp(&a.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| a.0.name.cmp(&b.0.name))
+        });
+        out
+    }
+}
+
+/// "Axi P10" -> "axi p10", for direct manifest-name matching.
+fn relic_name_token(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Token-boundary containment ("axi p10" matches "axi p10 relic", not
+/// "axi p100").
+fn token_contains(haystack: &str, needle: &str) -> bool {
+    format!(" {haystack} ").contains(&format!(" {needle} "))
+}
+
 #[derive(Debug, Clone)]
 pub struct RelicOption {
     pub relic: String,
@@ -60,6 +220,7 @@ pub struct RelicOption {
     pub chance_radiant: f64,
     /// Owned count; None = "?" (stock unknown).
     pub owned: Option<u32>,
+    pub source_tier: SourceTier,
 }
 
 #[derive(Debug, Clone)]
@@ -87,17 +248,24 @@ pub struct PartDeal {
     pub owned: Option<u32>,
     /// Copies already at Radiant (eighth pass §1: crack these first).
     pub radiant: Option<u32>,
+    /// Source priority of the chosen relic (addendum #68).
+    pub source_tier: SourceTier,
 }
 
-/// Best-relic deal for `part`: highest-Intact relic, stock-aware
-/// refinement tier, table chance at that tier (ladder fallback).
+/// Best-relic deal for `part`: source tier first, then highest-Intact
+/// relic within it, stock-aware refinement tier, table chance at that
+/// tier (ladder fallback).
 pub fn best_deal_for_part(
     part: &str,
     relics: &RelicTables,
     stock: &RelicStock,
+    varzia: &VarziaAvailability,
     tuning: &Tuning,
 ) -> Option<PartDeal> {
-    let (relic, intact) = relics.relics_for_part(part).into_iter().next()?;
+    let (relic, intact) = varzia
+        .relics_for_part_ranked(relics, part, stock)
+        .into_iter()
+        .next()?;
     let owned = stock.count(&relic.name);
     let radiant = stock.radiant_count(&relic.name);
     // Radiant stock is cracked as-is: no traces spent, best odds. Only
@@ -118,6 +286,7 @@ pub fn best_deal_for_part(
         expected: expected_cracks(chance),
         owned,
         radiant,
+        source_tier: varzia.source_tier(relic, stock),
     })
 }
 
@@ -152,6 +321,10 @@ pub struct GoalCard {
     pub parts_have: usize,
     pub parts_total: usize,
     pub parts: Vec<PartRow>,
+    /// At least one needed part has a tier-4 relic among its viable
+    /// sources (addendum #68): the card is downranked in target and
+    /// backlog ordering.
+    pub partially_unobtainable: bool,
     pub action: GoalAction,
 }
 
@@ -195,6 +368,8 @@ pub struct CrackInfo {
     pub fissure_mission: String,
     pub steel_path: bool,
     pub vaulted: bool,
+    /// The chosen relic has no current source (tier 4): the row strikes.
+    pub unobtainable: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -277,6 +452,8 @@ pub struct FocusPart {
 pub fn pick_focus(
     cards: &[GoalCard],
     relics: &RelicTables,
+    stock: &RelicStock,
+    varzia: &VarziaAvailability,
     tuning: &Tuning,
 ) -> Vec<FocusPart> {
     // Bottleneck (rarest) needed part per card, in card priority order.
@@ -294,7 +471,11 @@ pub fn pick_focus(
                 .then_with(|| a.name.cmp(&b.name))
         });
         for part in needed {
-            if let Some((relic, _)) = relics.relics_for_part(&part.name).into_iter().next() {
+            if let Some((relic, _)) = varzia
+                .relics_for_part_ranked(relics, &part.name, stock)
+                .into_iter()
+                .next()
+            {
                 cands.push((
                     part.name.clone(),
                     card.gear.clone(),
@@ -497,6 +678,8 @@ pub struct CrackCandidate {
     pub relic: String,
     pub era: String,
     pub vaulted: bool,
+    /// Source priority of this relic (addendum #68).
+    pub source_tier: SourceTier,
     /// Chance (%) of the target part in THIS relic at chosen refinement.
     pub chance: f64,
     pub refinement: Refinement,
@@ -517,6 +700,7 @@ pub fn best_crack_for_part(
     part: &str,
     relics: &RelicTables,
     stock: &RelicStock,
+    varzia: &VarziaAvailability,
     other_wants: &HashSet<String>,
     fissures: &[crate::model::Fissure],
     now: DateTime<Utc>,
@@ -524,7 +708,8 @@ pub fn best_crack_for_part(
     tuning: &Tuning,
 ) -> Option<(CrackCandidate, FissurePick)> {
     let mut best: Option<(CrackCandidate, FissurePick)> = None;
-    for (relic, _intact) in relics.relics_for_part(part) {
+    for (relic, _intact) in varzia.relics_for_part_ranked(relics, part, stock) {
+        let source_tier = varzia.source_tier(relic, stock);
         let intact = relic.chance_for(part, Refinement::Intact);
         let owned = stock.count(&relic.name);
         if owned == Some(0) {
@@ -572,6 +757,7 @@ pub fn best_crack_for_part(
             relic: relic.name.clone(),
             era: relic.era().to_owned(),
             vaulted: relic.vaulted,
+            source_tier,
             chance,
             refinement,
             batch,
@@ -584,7 +770,14 @@ pub fn best_crack_for_part(
         };
         let better = match &best {
             None => true,
-            Some((b, _)) => cand.score > b.score,
+            Some((b, _)) => source_tier
+                .cmp(&b.source_tier)
+                .then_with(|| {
+                    cand.score
+                        .partial_cmp(&b.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .is_gt(),
         };
         if better {
             best = Some((cand, pick));
@@ -668,6 +861,7 @@ fn part_rows_for_gear(
     roster: &Roster,
     relics: &RelicTables,
     stock: &RelicStock,
+    varzia: &VarziaAvailability,
     want_set: &HashSet<String>,
     tuning: &Tuning,
 ) -> Vec<PartRow> {
@@ -689,8 +883,8 @@ fn part_rows_for_gear(
             } else {
                 PartState::Unknown
             };
-            let mut opts: Vec<RelicOption> = relics
-                .relics_for_part(&part)
+            let opts: Vec<RelicOption> = varzia
+                .relics_for_part_ranked(relics, &part, stock)
                 .into_iter()
                 .map(|(r, intact)| RelicOption {
                     relic: r.name.clone(),
@@ -698,13 +892,9 @@ fn part_rows_for_gear(
                     chance_intact: intact,
                     chance_radiant: r.chance_for(&part, Refinement::Radiant),
                     owned: stock.count(&r.name),
+                    source_tier: varzia.source_tier(r, stock),
                 })
                 .collect();
-            opts.sort_by(|a, b| {
-                b.chance_intact
-                    .partial_cmp(&a.chance_intact)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
             let best = opts.first();
             let rarity = tuning
                 .refinement
@@ -718,7 +908,7 @@ fn part_rows_for_gear(
                 ),
                 None => "no relic source".to_owned(),
             };
-            let deal = best_deal_for_part(&part, relics, stock, tuning);
+            let deal = best_deal_for_part(&part, relics, stock, varzia, tuning);
             PartRow {
                 name: part,
                 state,
@@ -760,7 +950,11 @@ pub fn prune_wants(
 }
 
 /// Rank-ordered goal cards for the surviving wants.
-fn goal_cards(input: &PlanInput<'_>, active: &[String]) -> Vec<GoalCard> {
+fn goal_cards(
+    input: &PlanInput<'_>,
+    active: &[String],
+    varzia: &VarziaAvailability,
+) -> Vec<GoalCard> {
     let want_set: HashSet<String> = active.iter().cloned().collect();
     // Group wants by parent gear (first parent, deterministic).
     let mut by_gear: HashMap<String, Vec<String>> = HashMap::new();
@@ -788,6 +982,7 @@ fn goal_cards(input: &PlanInput<'_>, active: &[String]) -> Vec<GoalCard> {
                 input.roster,
                 input.relics,
                 input.stock,
+                varzia,
                 &want_set,
                 input.tuning,
             );
@@ -796,6 +991,12 @@ fn goal_cards(input: &PlanInput<'_>, active: &[String]) -> Vec<GoalCard> {
                 .iter()
                 .filter(|p| p.state == PartState::Have)
                 .count();
+            let partially_unobtainable = parts.iter().any(|p| {
+                p.state == PartState::Need
+                    && p.relics
+                        .iter()
+                        .any(|r| r.source_tier == SourceTier::Unobtainable)
+            });
             let resurgence_live =
                 !resurgence_tokens.is_empty() && gear_in_tokens(&gear, &resurgence_tokens);
             let action = derive_action(
@@ -805,6 +1006,7 @@ fn goal_cards(input: &PlanInput<'_>, active: &[String]) -> Vec<GoalCard> {
                 &parts,
                 vaulted,
                 resurgence_live,
+                varzia,
                 &want_set,
             );
             GoalCard {
@@ -816,6 +1018,7 @@ fn goal_cards(input: &PlanInput<'_>, active: &[String]) -> Vec<GoalCard> {
                 parts_have,
                 parts_total,
                 parts,
+                partially_unobtainable,
                 action,
             }
         })
@@ -823,7 +1026,8 @@ fn goal_cards(input: &PlanInput<'_>, active: &[String]) -> Vec<GoalCard> {
     // Ordering: pins first, then CURRENT (unvaulted, or vaulted but
     // un-parked by the live Resurgence rotation) before vaulted
     // (addendum #10), frames before weapons within a tier (BRIEF §10),
-    // then fewest parts remaining.
+    // then fully-obtainable before partially-unobtainable cards
+    // (addendum #68), then fewest parts remaining.
     cards.sort_by(|a, b| {
         let pin_a = input.pins.iter().position(|p| a.wants.contains(p));
         let pin_b = input.pins.iter().position(|p| b.wants.contains(p));
@@ -838,6 +1042,10 @@ fn goal_cards(input: &PlanInput<'_>, active: &[String]) -> Vec<GoalCard> {
         pin_ord
             .then_with(|| current_b.cmp(&current_a))
             .then_with(|| b.is_warframe.cmp(&a.is_warframe))
+            .then_with(|| {
+                a.partially_unobtainable
+                    .cmp(&b.partially_unobtainable)
+            })
             .then_with(|| {
                 (a.parts_total - a.parts_have).cmp(&(b.parts_total - b.parts_have))
             })
@@ -858,6 +1066,7 @@ fn derive_action(
     parts: &[PartRow],
     vaulted: bool,
     resurgence_live: bool,
+    varzia: &VarziaAvailability,
     want_set: &HashSet<String>,
 ) -> GoalAction {
     // Needed parts, bottleneck (rarest) first.
@@ -904,6 +1113,7 @@ fn derive_action(
             &part.name,
             input.relics,
             input.stock,
+            varzia,
             &others,
             &input.world.fissures,
             input.now,
@@ -912,7 +1122,15 @@ fn derive_action(
         ) {
             let better = match &best_crack {
                 None => true,
-                Some((b, _, _)) => cand.score > b.score,
+                Some((b, _, _)) => cand
+                    .source_tier
+                    .cmp(&b.source_tier)
+                    .then_with(|| {
+                        cand.score
+                            .partial_cmp(&b.score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .is_gt(),
             };
             if better {
                 best_crack = Some((cand, pick, part.name.clone()));
@@ -1135,7 +1353,13 @@ fn chunk_minutes_label(minutes: f64, endless: bool, batch: u32) -> String {
     }
 }
 
-fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String], focus: &[FocusPart]) -> (Vec<Chunk>, Vec<FarmHint>, Vec<String>) {
+fn build_chunks(
+    input: &PlanInput<'_>,
+    cards: &[GoalCard],
+    pruned: &[String],
+    focus: &[FocusPart],
+    varzia: &VarziaAvailability,
+) -> (Vec<Chunk>, Vec<FarmHint>, Vec<String>) {
     let mut chunks: Vec<Chunk> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
     let _ = pruned;
@@ -1265,6 +1489,7 @@ fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String], fo
                 &part.name,
                 input.relics,
                 input.stock,
+                varzia,
                 &others,
                 &input.world.fissures,
                 input.now,
@@ -1283,9 +1508,14 @@ fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String], fo
         }
     }
     ranked.sort_by(|a, b| {
-        b.1.score
-            .partial_cmp(&a.1.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        a.1.source_tier
+            .cmp(&b.1.source_tier)
+            .then_with(|| {
+                b.1.score
+                    .partial_cmp(&a.1.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.1.relic.cmp(&b.1.relic))
     });
     // Expiring (<60 min) crack matches join tier 1; rest tier 2.
     let mut seen_relics: HashSet<String> = HashSet::new();
@@ -1352,6 +1582,7 @@ fn build_chunks(input: &PlanInput<'_>, cards: &[GoalCard], pruned: &[String], fo
                 fissure_mission: pick.fissure.mission_type.clone(),
                 steel_path: pick.fissure.is_hard,
                 vaulted: cand.vaulted,
+                unobtainable: cand.source_tier.is_unobtainable(),
             }),
         });
         if chunks
@@ -1556,9 +1787,11 @@ fn sanitize_id(s: &str) -> String {
 /// The planner: pure function of (world, profile, targets, drops, now).
 pub fn plan(input: &PlanInput<'_>) -> Plan {
     let (active, pruned) = prune_wants(input.owned, input.wants, input.roster);
-    let cards = goal_cards_for(input, &active);
-    let focus = pick_focus(&cards, input.relics, input.tuning);
-    let (chunks, farms, notes) = build_chunks(input, &cards, &pruned, &focus);
+    let varzia = VarziaAvailability::from_world(input.world, input.roster, input.relics);
+    let cards = goal_cards_for(input, &active, &varzia);
+    let focus = pick_focus(&cards, input.relics, input.stock, &varzia, input.tuning);
+    let (chunks, farms, notes) =
+        build_chunks(input, &cards, &pruned, &focus, &varzia);
     let (event_alerts, lotus_alerts) = donow_alerts(input);
     let resurgence = donow_resurgence(input, &cards);
     let baro = donow_baro(input);
@@ -1658,8 +1891,12 @@ fn mins_left_label(now: DateTime<Utc>, expiry: DateTime<Utc>) -> String {
     }
 }
 
-fn goal_cards_for(input: &PlanInput<'_>, active: &[String]) -> Vec<GoalCard> {
-    goal_cards(input, active)
+fn goal_cards_for(
+    input: &PlanInput<'_>,
+    active: &[String],
+    varzia: &VarziaAvailability,
+) -> Vec<GoalCard> {
+    goal_cards(input, active, varzia)
 }
 
 #[cfg(test)]
@@ -2039,6 +2276,192 @@ mod tests {
         assert_eq!(p.goals[0].gear, "Zakti Prime");
     }
 
+    fn varzia_world(unique_name: &str) -> WorldState {
+        WorldState {
+            vault_trader: Some(crate::model::VaultTrader {
+                inventory: vec![crate::model::VaultTraderItem {
+                    unique_name: unique_name.to_owned(),
+                    item: String::new(),
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn varzia_uses_the_rarest_roster_identified_reward() {
+        // Addendum #68: the manifest advertises gear. A vaulted relic is
+        // available only when the rotation covers the parent of its
+        // rarest prime reward, so mixed legacy relics do not all qualify.
+        let roster = Roster::from_json(
+            r#"[{"name": "Protea Prime", "vaulted": true, "type": "warframe",
+                  "parts": [{"name": "Protea Prime Blueprint"}, {"name": "Protea Prime Chassis Blueprint"}]},
+                 {"name": "Mesa Prime", "vaulted": true, "type": "warframe",
+                  "parts": [{"name": "Mesa Prime Blueprint"}, {"name": "Mesa Prime Neuroptics Blueprint"}]}]"#,
+        )
+        .unwrap();
+        let text = r#"{
+            "relics": {
+                "Axi P1": {"name": "Axi P1", "vaulted": true, "sources": {},
+                    "rewards": [
+                        {"name": "Protea Prime Blueprint", "chance": {"Intact": 2}},
+                        {"name": "Mesa Prime Blueprint", "chance": {"Intact": 11}},
+                        {"name": "Forma Blueprint", "chance": {"Intact": 25.33}}
+                    ]},
+                "Axi P2": {"name": "Axi P2", "vaulted": true, "sources": {},
+                    "rewards": [
+                        {"name": "Mesa Prime Neuroptics Blueprint", "chance": {"Intact": 2}},
+                        {"name": "Protea Prime Chassis Blueprint", "chance": {"Intact": 11}}
+                    ]},
+                "Axi P3": {"name": "Axi P3", "vaulted": true, "sources": {},
+                    "rewards": [
+                        {"name": "Mesa Prime Neuroptics Blueprint", "chance": {"Intact": 2}},
+                        {"name": "Protea Prime Chassis Blueprint", "chance": {"Intact": 11}}
+                    ]},
+                "Axi P4": {"name": "Axi P4", "vaulted": true, "sources": {},
+                    "rewards": [
+                        {"name": "Protea Prime Blueprint", "chance": {"Intact": 2}}
+                    ]}
+            },
+            "sources": {}
+        }"#;
+        let relics = RelicTables::from_json(text).unwrap();
+        let world = varzia_world(
+            "/Lotus/Types/StoreItems/Packages/MegaPrimeVault/MPVProteaPrimeSinglePack",
+        );
+        let varzia = VarziaAvailability::from_world(&world, &roster, &relics);
+        assert!(
+            varzia.is_available("Axi P1"),
+            "Protea is the rarest identified reward"
+        );
+        assert!(
+            !varzia.is_available("Axi P2"),
+            "Mesa is the rarest; a Protea common part does not qualify"
+        );
+        assert!(
+            varzia.is_available("Axi P4"),
+            "Forma has no parent, so the rarest *roster-identified* reward is still Protea"
+        );
+        // Direct manifest naming still wins even when the rarest reward
+        // is not in the rotation.
+        let direct = varzia_world(
+            "/Lotus/StoreItems/Types/Game/Projections/T4VoidProjectionAxiP3Bronze",
+        );
+        assert!(
+            VarziaAvailability::from_world(&direct, &roster, &relics)
+                .is_available("Axi P3"),
+            "the manifest's projection names Axi P3"
+        );
+    }
+
+    #[test]
+    fn source_tier_orders_before_chance() {
+        // Addendum #68: owned > unvaulted > Varzia > unobtainable, with
+        // chance as the within-tier tiebreak. The 25.33% vaulted relic
+        // must not beat the 11% unvaulted one on raw odds.
+        let text = r#"{
+            "relics": {
+                "Lith U1": {"name": "Lith U1", "vaulted": false, "sources": {},
+                    "rewards": [{"name": "Caliban Prime Blueprint", "chance": {"Intact": 11}}]},
+                "Axi V1": {"name": "Axi V1", "vaulted": true, "sources": {},
+                    "rewards": [{"name": "Caliban Prime Blueprint", "chance": {"Intact": 25.33}}]}
+            },
+            "sources": {}
+        }"#;
+        let relics = RelicTables::from_json(text).unwrap();
+        let t = tuning();
+        let varzia = VarziaAvailability::default();
+        let unknown = RelicStock::Unknown;
+        let deal = best_deal_for_part(
+            "Caliban Prime Blueprint",
+            &relics,
+            &unknown,
+            &varzia,
+            &t,
+        )
+        .unwrap();
+        assert_eq!(deal.relic, "Lith U1");
+        assert_eq!(deal.source_tier, SourceTier::Unvaulted);
+
+        let known = RelicStock::Known(crate::model::KnownStock::from_totals(
+            [("Axi V1".to_owned(), 5)].into_iter().collect(),
+        ));
+        let dealt = best_deal_for_part(
+            "Caliban Prime Blueprint",
+            &relics,
+            &known,
+            &varzia,
+            &t,
+        )
+        .unwrap();
+        assert_eq!(dealt.relic, "Axi V1", "captured stock outranks drop status");
+        assert_eq!(dealt.source_tier, SourceTier::Owned);
+
+        let ranked = varzia.relics_for_part_ranked(
+            &relics,
+            "Caliban Prime Blueprint",
+            &unknown,
+        );
+        assert_eq!(ranked[0].0.name, "Lith U1");
+        assert_eq!(ranked[1].0.name, "Axi V1");
+    }
+
+    #[test]
+    fn partially_unobtainable_cards_downrank() {
+        // Addendum #68: a card with any needed tier-4 source sorts after
+        // an otherwise-equal fully-obtainable card.
+        let roster = Roster::from_json(
+            r#"[{"name": "A Prime", "vaulted": false, "type": "warframe",
+                  "parts": [{"name": "A Prime Blueprint"}]},
+                 {"name": "Z Prime", "vaulted": false, "type": "warframe",
+                  "parts": [{"name": "Z Prime Blueprint"}]}]"#,
+        )
+        .unwrap();
+        let text = r#"{
+            "relics": {
+                "Axi D1": {"name": "Axi D1", "vaulted": true, "sources": {},
+                    "rewards": [{"name": "A Prime Blueprint", "chance": {"Intact": 25.33}}]},
+                "Lith Z1": {"name": "Lith Z1", "vaulted": false, "sources": {},
+                    "rewards": [{"name": "Z Prime Blueprint", "chance": {"Intact": 11}}]}
+            },
+            "sources": {}
+        }"#;
+        let relics = RelicTables::from_json(text).unwrap();
+        let world = WorldState::default();
+        let owned = OwnedEquipment::empty();
+        let stock = RelicStock::Unknown;
+        let wants = vec![
+            "A Prime Blueprint".to_owned(),
+            "Z Prime Blueprint".to_owned(),
+        ];
+        let recent: HashSet<String> = HashSet::new();
+        let now: DateTime<Utc> = "2026-10-15T21:00:00Z".parse().unwrap();
+        let varzia = VarziaAvailability::from_world(&world, &roster, &relics);
+        let cards = goal_cards(
+            &PlanInput {
+                now,
+                world: &world,
+                owned: &owned,
+                wants: &wants,
+                roster: &roster,
+                relics: &relics,
+                stock: &stock,
+                pins: &[],
+                recent_gear: &recent,
+                steel_path_tiebreak: true,
+                completed_missions: &[],
+                tuning: &tuning(),
+            },
+            &wants,
+            &varzia,
+        );
+        let order: Vec<&str> = cards.iter().map(|c| c.gear.as_str()).collect();
+        assert_eq!(order, vec!["Z Prime", "A Prime"]);
+        assert!(!cards[0].partially_unobtainable);
+        assert!(cards[1].partially_unobtainable);
+    }
+
     #[test]
     fn scored_matching_beats_blind_names() {
         // Same part, two relics: 11% vs 2% Intact. The 11% relic must win.
@@ -2052,10 +2475,12 @@ mod tests {
         )];
         let now: DateTime<Utc> = "2026-10-15T21:00:00Z".parse().unwrap();
         let others: HashSet<String> = HashSet::new();
+        let varzia = VarziaAvailability::default();
         let (cand, _) = best_crack_for_part(
             "Khora Prime Blueprint",
             &tables,
             &stock,
+            &varzia,
             &others,
             &fiss,
             now,

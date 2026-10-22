@@ -477,8 +477,15 @@ pub async fn fetch_relic_tables(
     let (text, status) =
         fetch_static(client, cache_dir, "relictables.json", XUERIAN_RELICTABLES_URL, seed_path)
             .await?;
+    // Bake the legacy era alias into the on-disk cache as well as the
+    // parsed value, so a future upstream pull is corrected at the source
+    // and never re-seeds a "Vanguard" era (addendum #66).
+    let baked = crate::model::bake_relic_tables(&text)?;
+    if baked != text {
+        write_cache(cache_dir, "relictables.json", &baked);
+    }
     Ok(Fetched {
-        value: RelicTables::from_json(&text)?,
+        value: RelicTables::from_json(&baked)?,
         status,
     })
 }

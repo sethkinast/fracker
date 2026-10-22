@@ -190,9 +190,82 @@ pub struct RelicTables {
     pub sources: HashMap<String, Vec<FarmNode>>,
 }
 
+/// Bake-time era corrections for the relic tables (addendum #66).
+///
+/// The upstream WFCD/Xuerian cache still labels four Perita Rebellion
+/// relics `Vanguard C1/E1/M1/P1` even though "Vanguard" is not a fissure
+/// era. Seth established they are legacy Axi relics. The corrected names
+/// keep the qualifier so they stay distinct from the existing Axi
+/// C1/E1/M1/P1 entries in the same table.
+pub const LEGACY_RELIC_ERA_REMAP: [(&str, &str); 4] = [
+    ("Vanguard C1", "Axi Vanguard C1"),
+    ("Vanguard E1", "Axi Vanguard E1"),
+    ("Vanguard M1", "Axi Vanguard M1"),
+    ("Vanguard P1", "Axi Vanguard P1"),
+];
+
+/// Apply [`LEGACY_RELIC_ERA_REMAP`] to a relic-tables payload in place.
+/// Renames the top-level relic key and its `name`, plus the per-item
+/// relic map keys, so every consumer sees the corrected era token.
+/// Returns the number of relic entries renamed.
+pub fn remap_legacy_relic_names(root: &mut serde_json::Value) -> usize {
+    let mut renamed = 0;
+    for (from, to) in LEGACY_RELIC_ERA_REMAP {
+        if let Some(relics) = root.get_mut("relics").and_then(|v| v.as_object_mut()) {
+            if let Some(mut entry) = relics.remove(from) {
+                if let Some(obj) = entry.as_object_mut() {
+                    obj.insert("name".to_owned(), serde_json::Value::String(to.to_owned()));
+                }
+                relics.insert(to.to_owned(), entry);
+                renamed += 1;
+            }
+        }
+        if let Some(items) = root.get_mut("items").and_then(|v| v.as_object_mut()) {
+            for item in items.values_mut() {
+                if let Some(relics) =
+                    item.get_mut("relics").and_then(|v| v.as_object_mut())
+                {
+                    if let Some(value) = relics.remove(from) {
+                        relics.insert(to.to_owned(), value);
+                    }
+                }
+            }
+        }
+    }
+    renamed
+}
+
+/// Bake a relic-tables payload: apply the era remap and return the
+/// normalized cache. This is the one maintenance path that rewrites the
+/// committed seed (`fracker --bake-relics`), so the artifact is never
+/// hand-edited.
+///
+/// The rename is a token-preserving replacement rather than a
+/// parse/serialize round-trip: the upstream file's key order and
+/// formatting stay intact, so regenerating the cache yields a minimal,
+/// reviewable diff.
+pub fn bake_relic_tables(text: &str) -> Result<String, String> {
+    let mut out = text.to_owned();
+    for (from, to) in LEGACY_RELIC_ERA_REMAP {
+        out = out.replace(
+            &format!("\"{from}\""),
+            &format!("\"{to}\""),
+        );
+    }
+    // Validate that the rewrite is still a well-formed relic payload.
+    serde_json::from_str::<serde_json::Value>(&out)
+        .map_err(|e| format!("relictables: {e}"))?;
+    Ok(out)
+}
+
 impl RelicTables {
     pub fn from_json(text: &str) -> Result<Self, String> {
-        serde_json::from_str(text).map_err(|e| format!("relictables: {e}"))
+        // Normalize the legacy era alias on every load, including a fresh
+        // upstream pull that still carries the pseudo-era.
+        let mut root: serde_json::Value =
+            serde_json::from_str(text).map_err(|e| format!("relictables: {e}"))?;
+        remap_legacy_relic_names(&mut root);
+        serde_json::from_value(root).map_err(|e| format!("relictables: {e}"))
     }
 
     /// All relics containing `part`, with the per-(part, relic) Intact chance.
@@ -2293,6 +2366,59 @@ mod tests {
             assert!(!act.title.is_empty());
             assert!(!act.desc.is_empty(), "missing description: {}", act.id);
             assert!(act.standing > 0, "standing from the baked decode: {}", act.id);
+        }
+    }
+
+    #[test]
+    fn legacy_vanguard_relics_bake_to_axi() {
+        // Addendum #66: the four pseudo-era relics are legacy Axi. The
+        // bake renames both the top-level relic keys and the per-item
+        // relic maps, and stays idempotent on a second pass.
+        let text = r#"{
+            "relics": {
+                "Vanguard C1": {"name": "Vanguard C1", "vaulted": true, "sources": {},
+                    "rewards": [{"name": "Caliban Prime Blueprint", "chance": {"Intact": 25.33}}]}
+            },
+            "items": {
+                "Caliban Prime Blueprint": {"name": "Caliban Prime Blueprint",
+                    "relics": {"Vanguard C1": {"Intact": 25.33}}}
+            },
+            "sources": {}
+        }"#;
+        let baked = bake_relic_tables(text).unwrap();
+        let root: serde_json::Value = serde_json::from_str(&baked).unwrap();
+        assert!(root["relics"].get("Vanguard C1").is_none());
+        assert_eq!(root["relics"]["Axi Vanguard C1"]["name"], "Axi Vanguard C1");
+        assert!(
+            root["items"]["Caliban Prime Blueprint"]["relics"]
+                .get("Axi Vanguard C1")
+                .is_some(),
+            "per-item relic keys follow the rename"
+        );
+        let tables = RelicTables::from_json(&baked).unwrap();
+        let relic = &tables.relics["Axi Vanguard C1"];
+        assert_eq!(relic.era(), "Axi");
+        assert_eq!(bake_relic_tables(&baked).unwrap(), baked, "idempotent bake");
+    }
+
+    #[test]
+    fn committed_relic_cache_has_no_vanguard_era() {
+        // The artifact itself must be baked, not just normalized on load.
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("data/cache/relictables.json");
+        let text = std::fs::read_to_string(path).unwrap();
+        let root: serde_json::Value = serde_json::from_str(&text).unwrap();
+        for name in ["Vanguard C1", "Vanguard E1", "Vanguard M1", "Vanguard P1"] {
+            assert!(
+                root["relics"].get(name).is_none(),
+                "unbaked pseudo-era key in the committed cache: {name}"
+            );
+        }
+        for (key, relic) in root["relics"].as_object().unwrap() {
+            assert!(
+                !relic["name"].as_str().unwrap_or(key).starts_with("Vanguard "),
+                "pseudo-era survives in relic {key}"
+            );
         }
     }
 
