@@ -345,7 +345,7 @@ fn handle(
             &tick_ok(),
         ),
         ("GET", "/ws") => match ws_key.as_deref() {
-            Some(key) => ws_upgrade(&mut stream, key, hub, stop),
+            Some(key) => ws_upgrade(&mut stream, key, report_path, hub, stop),
             None => respond(
                 &mut stream,
                 "400 Bad Request",
@@ -456,22 +456,35 @@ fn body_day(html: &str) -> Option<String> {
 }
 
 /// Splice `data-fracker-ticks` (base64 JSON) onto the opening `<body>`
-/// tag, keeping any attributes the renderer already emitted.
+/// tag, keeping every attribute the renderer already emitted.
+///
+/// Hotfix 19 §1: this used to rebuild the tag from `data-day` alone, which
+/// silently dropped `data-generation` from every SERVED page. The page's
+/// WebSocket predicate then saw `""` against the hello's real token and
+/// reloaded forever (the v0.5.4 reload storm). Preserve the renderer's
+/// attributes verbatim; only add the tick payload (and a day when the
+/// renderer had none).
 fn inject_ticks(html: &str, ticks_b64: &str, day: &str) -> String {
-    let attr = format!("data-fracker-ticks=\"{ticks_b64}\" data-day=\"{day}\"");
-    if let Some(start) = html.find("<body") {
-        if let Some(end_rel) = html[start..].find('>') {
-            let end = start + end_rel;
-            let mut out = String::with_capacity(html.len() + attr.len());
-            out.push_str(&html[..start]);
-            out.push_str("<body ");
-            out.push_str(&attr);
-            out.push('>');
-            out.push_str(&html[end + 1..]);
-            return out;
-        }
+    let Some(start) = html.find("<body") else {
+        return html.to_owned();
+    };
+    let Some(end_rel) = html[start..].find('>') else {
+        return html.to_owned();
+    };
+    let end = start + end_rel;
+    let attrs = &html[start + "<body".len()..end];
+    let mut injected = format!("data-fracker-ticks=\"{ticks_b64}\"");
+    if !attrs.contains("data-day=") {
+        injected.push_str(&format!(" data-day=\"{day}\""));
     }
-    html.to_owned()
+    let mut out = String::with_capacity(html.len() + injected.len() + 1);
+    out.push_str(&html[..start]);
+    out.push_str("<body ");
+    out.push_str(&injected);
+    out.push_str(attrs);
+    out.push('>');
+    out.push_str(&html[end + 1..]);
+    out
 }
 
 /// Mark the remembered tab's radio `checked`, clearing the renderer's
@@ -610,6 +623,7 @@ fn ws_accept(key: &str) -> String {
 fn ws_upgrade(
     stream: &mut TcpStream,
     key: &str,
+    report_path: &std::path::Path,
     hub: &GenerationHub,
     stop: &AtomicBool,
 ) -> std::io::Result<()> {
@@ -625,7 +639,14 @@ fn ws_upgrade(
 
     let (current, pushes) = hub.subscribe();
     // Catch a page up after a dropped socket: its first frame names the
-    // generation already on disk; the page reloads only on a mismatch.
+    // generation `/` actually serves. Hotfix 19 §1: prefer the report on
+    // disk over the hub's cached token, so a page can never be told it is
+    // stale when it loaded exactly what `/` handed it. An empty disk
+    // generation (no report yet) falls back to the hub.
+    let disk = report_generation(report_path);
+    let current = if disk.is_empty() { current } else { disk };
+    // Equal generation is a no-op in the page predicate; only a genuinely
+    // different one reloads.
     stream.write_all(&ws_text_frame(&generation_message(&current)))?;
     stream.flush()?;
 
@@ -793,10 +814,18 @@ mod tests {
 
     #[test]
     fn inject_ticks_preserves_renderer_attributes() {
-        let html = "<html><body data-day=\"2026-10-18\"><p>x</p></body></html>";
+        let html = "<html><body data-day=\"2026-10-18\" data-generation=\"gen-7\"><p>x</p></body></html>";
         let out = inject_ticks(html, "QUJD", "2026-10-18");
-        assert!(out.contains("<body data-fracker-ticks=\"QUJD\" data-day=\"2026-10-18\">"));
+        assert!(
+            out.contains(
+                "<body data-fracker-ticks=\"QUJD\" data-day=\"2026-10-18\" data-generation=\"gen-7\">"
+            ),
+            "{out}"
+        );
         assert!(out.ends_with("<p>x</p></body></html>"));
+        // Hotfix 19 §1: the generation MUST survive injection — dropping it
+        // is what made the served page reload against its own hello.
+        assert_eq!(body_generation(&out).as_deref(), Some("gen-7"));
         // A bare `<body>` still gets the attributes.
         let bare = inject_ticks("<body><p>y</p></body>", "QQ==", "2026-10-18");
         assert!(bare.starts_with("<body data-fracker-ticks=\"QQ==\" data-day=\"2026-10-18\">"));
@@ -1198,6 +1227,17 @@ mod tests {
         )
         .expect("server binds");
 
+        // Hotfix 19 §1 regression: the SERVED page must carry the same
+        // generation the hello names. v0.5.4's tick injection rebuilt the
+        // <body> tag without data-generation, so the page read "" and
+        // reloaded against every hello — a permanent storm.
+        let served = http_get(server.port(), "/");
+        assert_eq!(
+            body_generation(&served).as_deref(),
+            Some("gen-1"),
+            "served page keeps the renderer's generation: {served}"
+        );
+
         let mut s = TcpStream::connect(("127.0.0.1", server.port())).unwrap();
         s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         write!(
@@ -1232,6 +1272,60 @@ mod tests {
         let (opcode, payload) = read_ws_frame_e2e(&mut s);
         assert_eq!(opcode, 0x8, "close is acknowledged");
         assert!(payload.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Hotfix 19 §1: the hello names the generation `/` serves, even when
+    /// the hub's cached token is older (an external writer, e.g. a CLI
+    /// run, published to the same report path without the hub). If the
+    /// hello named the stale token, the page would reload against it
+    /// forever.
+    #[test]
+    fn websocket_hello_matches_the_served_page_not_a_stale_hub() {
+        let dir = std::env::temp_dir().join(format!(
+            "fracker-ws-hello-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let report = dir.join("plan.html");
+        let page = |generation: &str| {
+            format!(
+                "<!DOCTYPE html><html><body data-day=\"2026-10-21\" data-generation=\"{generation}\"></body></html>"
+            )
+        };
+        std::fs::write(&report, page("gen-1")).unwrap();
+        let server = serve(
+            0,
+            report.clone(),
+            TickStore::file(&dir),
+            TabStore::file(&dir),
+            Arc::new(Mutex::new(TickStore::default())),
+        )
+        .expect("server binds");
+
+        // A second writer replaces the report without going through the
+        // hub, leaving the hub's cached generation at gen-1.
+        std::fs::write(&report, page("gen-2")).unwrap();
+        let served = http_get(server.port(), "/");
+        assert_eq!(body_generation(&served).as_deref(), Some("gen-2"));
+
+        let mut s = TcpStream::connect(("127.0.0.1", server.port())).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        write!(
+            s,
+            "GET /ws HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\n\
+             Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+        )
+        .unwrap();
+        let _head = read_http_head(&mut s);
+        let (_opcode, payload) = read_ws_frame_e2e(&mut s);
+        assert_eq!(
+            generation_of(&payload),
+            "gen-2",
+            "hello names the generation / actually serves"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
