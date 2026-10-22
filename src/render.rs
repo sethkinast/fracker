@@ -366,7 +366,11 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     // of record; localStorage remains a progressive cache for file://.
     h.push_str("<script>\n");
     h.push_str(JS);
-    h.push_str("\n</script>\n</div>\n</body>\n</html>\n");
+    h.push('\n');
+    // Nineteenth pass §1/§2: the reload predicate + loop failsafe live in
+    // one testable module so the page script cannot drift from the policy.
+    h.push_str(&crate::push::client_script());
+    h.push_str("</script>\n</div>\n</body>\n</html>\n");
     h
 }
 
@@ -1318,37 +1322,6 @@ const JS: &str = r#"
   });
   try { filt(sessionStorage.getItem('fracker:f') || 'all'); } catch (e) {}
 })();
-// Live plan push (item 58): the loopback server pushes the current
-// generation over WebSocket the moment a regeneration lands; a mismatch
-// reloads the page onto the fresh plan. Ticks are server-side and tab
-// scope is generation-aware, so a pushed reload lands on First Crack like
-// a manual regen. The 60s meta-refresh stays as the backstop, and a
-// dropped socket reconnects — on connect the server names the current
-// generation, which catches up a page that missed a push.
-(function () {
-  if (!window.WebSocket || location.protocol !== 'http:') { return; }
-  var gen = document.body.getAttribute('data-generation') || '';
-  var timer = null;
-  function reconnect() {
-    if (timer) { return; }
-    timer = setTimeout(function () { timer = null; connect(); }, 2000);
-  }
-  function connect() {
-    var ws;
-    try { ws = new WebSocket('ws://' + location.host + '/ws'); }
-    catch (e) { reconnect(); return; }
-    ws.onmessage = function (ev) {
-      var msg;
-      try { msg = JSON.parse(ev.data); } catch (e) { return; }
-      if (msg && msg.generation && msg.generation !== gen) {
-        location.reload();
-      }
-    };
-    ws.onclose = reconnect;
-    ws.onerror = function () { try { ws.close(); } catch (e) {} };
-  }
-  connect();
-})();
 "#;
 
 // ---------------------------------------------------------------------------
@@ -1448,7 +1421,19 @@ mod tests {
             html.contains("/ws") && html.contains("WebSocket"),
             "the page subscribes to generation pushes (§2 item 58)"
         );
+        assert!(
+            html.contains("msg.generation !== gen"),
+            "the predicate compares the push against the loaded page's token"
+        );
+        assert!(
+            html.contains("fracker:push-off") && html.contains("sessionStorage"),
+            "the breaker is session-scoped (§2 hotfix 19)"
+        );
         assert!(html.contains("location.reload()"), "a push reloads the page");
+        assert!(
+            html.contains("var MIN_MS = 5000;"),
+            "push reloads have a multi-second floor (§2 hotfix 19)"
+        );
         assert!(html.contains("localStorage"), "checkbox persistence");
         assert!(
             html.contains("data-day=\""),

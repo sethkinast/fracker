@@ -2591,30 +2591,72 @@ label.row{cursor:pointer}
   });
   try { filt(sessionStorage.getItem('fracker:f') || 'all'); } catch (e) {}
 })();
-// Live plan push (item 58): the loopback server pushes the current
-// generation over WebSocket the moment a regeneration lands; a mismatch
-// reloads the page onto the fresh plan. Ticks are server-side and tab
-// scope is generation-aware, so a pushed reload lands on First Crack like
-// a manual regen. The 60s meta-refresh stays as the backstop, and a
-// dropped socket reconnects — on connect the server names the current
-// generation, which catches up a page that missed a push.
+// Live plan push (item 58, hotfix 19 §1/§2): the loopback server
+// pushes the current generation over WebSocket the moment a regeneration
+// lands. Reload ONLY when that generation differs from the one this page
+// was loaded with; the connect-time hello naming an equal generation is a
+// no-op. Even a misbehaving server cannot storm: reloads are at least
+// MIN_MS apart, and BREAKER_MAX inside BREAKER_WINDOW_MS disables WS
+// reloading for the session (sessionStorage), leaving the 60s meta-refresh
+// as the only path. A dropped socket reconnects; the next hello catches a
+// page up after a missed push.
 (function () {
   if (!window.WebSocket || location.protocol !== 'http:') { return; }
+  var MIN_MS = 5000;
+  var WINDOW_MS = 30000;
+  var BREAKER_MAX = 3;
+  var OFF = 'fracker:push-off';
+  var LAST = 'fracker:push-last';
+  var TIMES = 'fracker:push-times';
   var gen = document.body.getAttribute('data-generation') || '';
   var timer = null;
+  var ws = null;
+  function read(k) {
+    try { return sessionStorage.getItem(k) || ''; } catch (e) { return ''; }
+  }
+  function write(k, v) {
+    try { sessionStorage.setItem(k, v); } catch (e) {}
+  }
+  function broken() { return read(OFF) === '1'; }
+  function disable() {
+    write(OFF, '1');
+    if (timer) { clearTimeout(timer); timer = null; }
+    if (ws) { try { ws.close(); } catch (e) {} }
+  }
+  function recent(now) {
+    var a;
+    try { a = JSON.parse(read(TIMES) || '[]'); } catch (e) { a = []; }
+    if (!Array.isArray(a)) { a = []; }
+    return a.filter(function (t) {
+      return typeof t === 'number' && now - t < WINDOW_MS;
+    });
+  }
+  // The predicate: equal is a no-op; differing is suppressed when it
+  // arrives inside the minimum interval or after the breaker cap.
+  function shouldReload(incoming, now) {
+    if (incoming === gen || broken()) { return false; }
+    var last = Number(read(LAST) || '0');
+    if (last && now - last < MIN_MS) { return false; }
+    var times = recent(now);
+    if (times.length >= BREAKER_MAX) { disable(); return false; }
+    times.push(now);
+    write(TIMES, JSON.stringify(times));
+    write(LAST, String(now));
+    return true;
+  }
   function reconnect() {
-    if (timer) { return; }
+    if (timer || broken()) { return; }
     timer = setTimeout(function () { timer = null; connect(); }, 2000);
   }
   function connect() {
-    var ws;
+    if (broken()) { return; }
     try { ws = new WebSocket('ws://' + location.host + '/ws'); }
     catch (e) { reconnect(); return; }
     ws.onmessage = function (ev) {
       var msg;
       try { msg = JSON.parse(ev.data); } catch (e) { return; }
-      if (msg && msg.generation && msg.generation !== gen) {
-        location.reload();
+      if (msg && typeof msg.generation === 'string' && msg.generation !== gen) {
+        if (shouldReload(msg.generation, Date.now())) { location.reload(); }
       }
     };
     ws.onclose = reconnect;
