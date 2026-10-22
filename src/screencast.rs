@@ -525,7 +525,8 @@ pub fn save_restore_token(data_dir: &Path, token: &str) -> Result<(), String> {
 /// `static inline` in the C headers and therefore absent from the shared
 /// library, so we lay the bytes out ourselves.
 mod pod {
-    // SPA pod types (spa/utils/type.h).
+    // SPA pod types (`spa/include/spa/utils/type.h:34-53`; the enum is
+    // zero-based from `SPA_TYPE_START = 0`, so `SPA_TYPE_None` is 1).
     /// `SPA_TYPE_None`: a valid pod with no body (`size = 0`). Used by
     /// PipeWire to say "no value"; it must never be read as a format.
     pub const SPA_TYPE_NONE: u32 = 1;
@@ -535,31 +536,44 @@ mod pod {
     pub const SPA_TYPE_STRUCT: u32 = 14;
     pub const SPA_TYPE_OBJECT: u32 = 15;
     pub const SPA_TYPE_CHOICE: u32 = 19;
-    // Choice kinds.
-    pub const SPA_CHOICE_ENUM: u32 = 1;
-    pub const SPA_CHOICE_RANGE: u32 = 2;
+    // Choice kinds (`spa/include/spa/pod/pod.h:132-137`: None=0,
+    // Range=1, Step=2, Enum=3, Flags=4).
+    pub const SPA_CHOICE_ENUM: u32 = 3;
+    pub const SPA_CHOICE_RANGE: u32 = 1;
 
-    /// The `Format` object type (`SPA_TYPE_OBJECT_Format`).
+    /// The `Format` object type (`SPA_TYPE_OBJECT_Format`), the third
+    /// object after `SPA_TYPE_OBJECT_START = 0x40000`
+    /// (`spa/include/spa/utils/type.h:77-80`).
     pub const SPA_TYPE_OBJECT_FORMAT: u32 = 0x40003;
-    /// `SPA_PARAM_EnumFormat`.
+    /// `SPA_PARAM_EnumFormat` (`spa/include/spa/param/param.h:24-28`;
+    /// `SPA_PARAM_Invalid` is 0).
     pub const SPA_PARAM_ENUM_FORMAT: u32 = 3;
-    /// `SPA_PARAM_Format` (the negotiated one, delivered to `param_changed`).
+    /// `SPA_PARAM_Format` (the negotiated one, delivered to `param_changed`;
+    /// `spa/include/spa/param/param.h:29`).
     pub const SPA_PARAM_FORMAT: u32 = 4;
 
-    /// Format property keys (`spa/param/format.h`).
+    /// Format property keys (`spa/include/spa/param/format.h:91-95`).
     pub const SPA_FORMAT_MEDIA_TYPE: u32 = 1;
     pub const SPA_FORMAT_MEDIA_SUBTYPE: u32 = 2;
+    /// `SPA_MEDIA_TYPE_video` and `SPA_MEDIA_SUBTYPE_raw`
+    /// (`spa/include/spa/param/format.h:20-33`; both enums are zero-based).
     pub const SPA_MEDIA_TYPE_VIDEO: u32 = 2;
     pub const SPA_MEDIA_SUBTYPE_RAW: u32 = 1;
 
-    /// Video format keys and the packed 4-byte formats we accept.
+    /// Video format keys and the packed 4-byte formats we accept
+    /// (`spa/include/spa/param/format.h:124-129`).
     pub const SPA_FORMAT_VIDEO_FORMAT: u32 = 0x20001;
     pub const SPA_FORMAT_VIDEO_SIZE: u32 = 0x20003;
     pub const SPA_FORMAT_VIDEO_FRAMERATE: u32 = 0x20004;
-    pub const SPA_VIDEO_FORMAT_RGBX: u32 = 6;
-    pub const SPA_VIDEO_FORMAT_BGRX: u32 = 7;
-    pub const SPA_VIDEO_FORMAT_RGBA: u32 = 10;
-    pub const SPA_VIDEO_FORMAT_BGRA: u32 = 11;
+    /// `enum spa_video_format` is zero-based from
+    /// `SPA_VIDEO_FORMAT_UNKNOWN = 0`
+    /// (`spa/include/spa/param/video/raw.h:36-50`): RGBx=7, BGRx=8,
+    /// RGBA=11, BGRA=12. The previous 6/7/10/11 values were off by one
+    /// (they named AYUV/RGBx/xBGR/RGBA upstream).
+    pub const SPA_VIDEO_FORMAT_RGBX: u32 = 7;
+    pub const SPA_VIDEO_FORMAT_BGRX: u32 = 8;
+    pub const SPA_VIDEO_FORMAT_RGBA: u32 = 11;
+    pub const SPA_VIDEO_FORMAT_BGRA: u32 = 12;
 
     fn header(out: &mut Vec<u8>, size: u32, ty: u32) {
         out.extend_from_slice(&size.to_le_bytes());
@@ -572,7 +586,8 @@ mod pod {
         }
     }
 
-    /// A bare `Id` pod (`size = 4`).
+    /// A bare `Id` pod (`size = 4`; `SPA_POD_INIT_Id` uses
+    /// `sizeof(uint32_t)` — `spa/include/spa/pod/builder.h:269`).
     pub fn id(value: u32) -> Vec<u8> {
         let mut o = Vec::new();
         header(&mut o, 4, SPA_TYPE_ID);
@@ -580,16 +595,20 @@ mod pod {
         o
     }
 
-    /// A `Rectangle` pod (`size = 16`).
+    /// A `Rectangle` pod (`size = 8`: `struct spa_rectangle` is two
+    /// `uint32_t`s — `spa/include/spa/pod/builder.h:370`,
+    /// `spa/include/spa/utils/defs.h:102-105`).
     pub fn rect(w: u32, h: u32) -> Vec<u8> {
         let mut o = Vec::new();
-        header(&mut o, 16, SPA_TYPE_RECTANGLE);
+        header(&mut o, 8, SPA_TYPE_RECTANGLE);
         o.extend_from_slice(&w.to_le_bytes());
         o.extend_from_slice(&h.to_le_bytes());
         o
     }
 
-    /// A `Fraction` pod (`size = 8`).
+    /// A `Fraction` pod (`size = 8`: `struct spa_fraction` is two
+    /// `uint32_t`s — `spa/include/spa/pod/builder.h:379`,
+    /// `spa/include/spa/utils/defs.h:119-123`).
     pub fn fraction(num: u32, den: u32) -> Vec<u8> {
         let mut o = Vec::new();
         header(&mut o, 8, SPA_TYPE_FRACTION);
@@ -1026,36 +1045,42 @@ fn missing_symbols_error(missing: &[&str]) -> String {
     )
 }
 
-/// `PW_DIRECTION_INPUT` (we consume frames).
-const PW_DIRECTION_INPUT: c_int = 1;
-/// `PW_ID_ANY`.
+/// `PW_DIRECTION_INPUT` — a stream that **consumes** frames (we are the
+/// consumer of the portal's source node). `port.h` aliases
+/// `PW_DIRECTION_INPUT` to `SPA_DIRECTION_INPUT` (`src/pipewire/port.h:43`),
+/// whose value is **0** (`spa/include/spa/utils/defs.h:95`).
+/// `SPA_DIRECTION_OUTPUT` is 1 (`defs.h:96`).
+const PW_DIRECTION_INPUT: c_int = 0;
+/// `PW_ID_ANY` (`src/pipewire/core.h:60`).
 const PW_ID_ANY: u32 = 0xffff_ffff;
 /// `PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS |
-/// PW_STREAM_FLAG_DONT_RECONNECT`.
+/// PW_STREAM_FLAG_DONT_RECONNECT` (`src/pipewire/stream.h:465,470,479`).
 ///
-/// **AUTOCONNECT is required for a portal screencast** (ninth pass §1 root
-/// cause): `OpenPipeWireRemote` hands back a private PipeWire core whose
-/// single node is the screen being cast. Without AUTOCONNECT the input
-/// stream is created on the core but never linked to that node, so
-/// `pw_stream_connect` returns 0 while the stream sits idle forever:
-/// `process` never fires, no error state is entered, and the UI would
-/// block with no signal.
+/// **AUTOCONNECT links the stream to the node named in the `Start`
+/// reply's `streams`** (item 49). With the connect target supplied, the
+/// session manager makes the link to the portal's source node; without
+/// AUTOCONNECT the stream would be created and never linked.
 ///
-/// The connect target is the node id the portal selected in the `Start`
-/// reply's `streams` (item 49): a targetless connect errors "target not
-/// found". AUTOCONNECT still applies once the target is known.
+/// **Pass-9 record correction (pass 20).** This block used to blame a
+/// "private remote" whose node was not yet published, and the retry loop
+/// below was added to rationalize "target not found". That theory is
+/// wrong. `OpenPipeWireRemote` returns an ordinary remote and the portal's
+/// source node is present. The failure was `PW_DIRECTION_INPUT` being
+/// hand-defined as 1 — which is `SPA_DIRECTION_OUTPUT`
+/// (`spa/include/spa/utils/defs.h:95-96`). We were connecting an OUTPUT
+/// (producer) stream and asking the session manager to link that producer
+/// *into* the portal's source node, which has no input ports. "target not
+/// found" was deterministic, not a registration race.
 ///
-/// **Item 60a.** The remote's node is published asynchronously, so the
-/// first connect can race its global even when the portal already named
-/// it. Without the registry (see [`REQUIRED_SYMBOLS`]) the race is closed
-/// by retrying the connect itself for a few seconds while the stream
-/// reports "target not found".
+/// The retry/settle code is retained only as a guard for a genuinely late
+/// node; it was never the fix for the direction defect.
 const PW_STREAM_FLAGS: u32 = (1 << 0) | (1 << 2) | (1 << 7);
-/// `PW_STREAM_STATE_ERROR`.
+/// `PW_STREAM_STATE_ERROR` (`src/pipewire/stream.h:247`).
 const PW_STREAM_STATE_ERROR: i32 = -1;
-/// How long a "target not found" connect may be retried (item 60a). The
-/// private remote normally publishes the node within milliseconds; the
-/// bound keeps a genuinely absent target a visible failure, not a hang.
+/// How long a "target not found" connect may be retried (item 60a), as a
+/// guard against a genuinely late node publication. The pass-20 direction
+/// fix is what makes a healthy connect succeed; this bound keeps an absent
+/// target a visible failure, not a hang.
 const CONNECT_RETRY_WINDOW: Duration = Duration::from_secs(5);
 /// Pause between connect attempts while the target is not there yet.
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
@@ -1071,8 +1096,8 @@ const CONNECT_SETTLE: Duration = Duration::from_millis(200);
 /// forever.
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Whether a PipeWire stream error is the target-not-found race that a
-/// connect retry can close (item 60a).
+/// Whether a PipeWire stream error is "target not found": a node that is
+/// genuinely absent, or genuinely not published yet.
 fn is_target_not_found(message: &str) -> bool {
     message.to_ascii_lowercase().contains("target not found")
 }
@@ -1619,16 +1644,226 @@ fn to_aligned_words(bytes: &[u8]) -> Vec<u64> {
 mod tests {
     use super::*;
 
+    /// Every hand-defined numeric in the capture FFI surface, pinned to the
+    /// value in the upstream header named beside it (pass 20 §2).
+    ///
+    /// The pass-9/19 audits checked symbol names and pod shapes; enum and
+    /// flag *values* were checked by nothing, which is how the direction
+    /// constant survived. This test exists so a value can never drift
+    /// silently again — update it only with a header citation.
     #[test]
-    fn pod_ids_and_rects_have_the_c_abi_layout() {
-        assert_eq!(pod::read_header(&pod::id(11)), Some((4, pod::SPA_TYPE_ID)));
+    fn hand_defined_ffi_values_match_upstream_headers() {
+        // (name, our value, header value, header citation)
+        let values: &[(&str, u32, u32, &str)] = &[
+            (
+                "PW_DIRECTION_INPUT",
+                PW_DIRECTION_INPUT as u32,
+                0,
+                "SPA_DIRECTION_INPUT, spa/include/spa/utils/defs.h:95 (port.h:43)",
+            ),
+            (
+                "PW_ID_ANY",
+                PW_ID_ANY,
+                0xffff_ffff,
+                "src/pipewire/core.h:60",
+            ),
+            (
+                "PW_STREAM_FLAGS",
+                PW_STREAM_FLAGS,
+                (1 << 0) | (1 << 2) | (1 << 7),
+                "AUTOCONNECT|MAP_BUFFERS|DONT_RECONNECT, src/pipewire/stream.h:465,470,479",
+            ),
+            (
+                "SPA_TYPE_NONE",
+                pod::SPA_TYPE_NONE,
+                1,
+                "spa/include/spa/utils/type.h:34-35",
+            ),
+            (
+                "SPA_TYPE_ID",
+                pod::SPA_TYPE_ID,
+                3,
+                "spa/include/spa/utils/type.h:37",
+            ),
+            (
+                "SPA_TYPE_RECTANGLE",
+                pod::SPA_TYPE_RECTANGLE,
+                10,
+                "spa/include/spa/utils/type.h:44",
+            ),
+            (
+                "SPA_TYPE_FRACTION",
+                pod::SPA_TYPE_FRACTION,
+                11,
+                "spa/include/spa/utils/type.h:45",
+            ),
+            (
+                "SPA_TYPE_STRUCT",
+                pod::SPA_TYPE_STRUCT,
+                14,
+                "spa/include/spa/utils/type.h:48",
+            ),
+            (
+                "SPA_TYPE_OBJECT",
+                pod::SPA_TYPE_OBJECT,
+                15,
+                "spa/include/spa/utils/type.h:49",
+            ),
+            (
+                "SPA_TYPE_CHOICE",
+                pod::SPA_TYPE_CHOICE,
+                19,
+                "spa/include/spa/utils/type.h:53",
+            ),
+            (
+                "SPA_TYPE_OBJECT_FORMAT",
+                pod::SPA_TYPE_OBJECT_FORMAT,
+                0x40003,
+                "spa/include/spa/utils/type.h:77-80",
+            ),
+            (
+                "SPA_CHOICE_RANGE",
+                pod::SPA_CHOICE_RANGE,
+                1,
+                "spa/include/spa/pod/pod.h:132-137",
+            ),
+            (
+                "SPA_CHOICE_ENUM",
+                pod::SPA_CHOICE_ENUM,
+                3,
+                "spa/include/spa/pod/pod.h:132-137",
+            ),
+            (
+                "SPA_PARAM_ENUM_FORMAT",
+                pod::SPA_PARAM_ENUM_FORMAT,
+                3,
+                "spa/include/spa/param/param.h:24-28",
+            ),
+            (
+                "SPA_PARAM_FORMAT",
+                pod::SPA_PARAM_FORMAT,
+                4,
+                "spa/include/spa/param/param.h:29",
+            ),
+            (
+                "SPA_FORMAT_MEDIA_TYPE",
+                pod::SPA_FORMAT_MEDIA_TYPE,
+                1,
+                "spa/include/spa/param/format.h:91-94",
+            ),
+            (
+                "SPA_FORMAT_MEDIA_SUBTYPE",
+                pod::SPA_FORMAT_MEDIA_SUBTYPE,
+                2,
+                "spa/include/spa/param/format.h:92-95",
+            ),
+            (
+                "SPA_MEDIA_TYPE_VIDEO",
+                pod::SPA_MEDIA_TYPE_VIDEO,
+                2,
+                "spa/include/spa/param/format.h:20-23",
+            ),
+            (
+                "SPA_MEDIA_SUBTYPE_RAW",
+                pod::SPA_MEDIA_SUBTYPE_RAW,
+                1,
+                "spa/include/spa/param/format.h:31-33",
+            ),
+            (
+                "SPA_FORMAT_VIDEO_FORMAT",
+                pod::SPA_FORMAT_VIDEO_FORMAT,
+                0x20001,
+                "spa/include/spa/param/format.h:124-125",
+            ),
+            (
+                "SPA_FORMAT_VIDEO_SIZE",
+                pod::SPA_FORMAT_VIDEO_SIZE,
+                0x20003,
+                "spa/include/spa/param/format.h:124,128",
+            ),
+            (
+                "SPA_FORMAT_VIDEO_FRAMERATE",
+                pod::SPA_FORMAT_VIDEO_FRAMERATE,
+                0x20004,
+                "spa/include/spa/param/format.h:124,129",
+            ),
+            (
+                "SPA_VIDEO_FORMAT_RGBX",
+                pod::SPA_VIDEO_FORMAT_RGBX,
+                7,
+                "SPA_VIDEO_FORMAT_RGBx, spa/include/spa/param/video/raw.h:36-45",
+            ),
+            (
+                "SPA_VIDEO_FORMAT_BGRX",
+                pod::SPA_VIDEO_FORMAT_BGRX,
+                8,
+                "SPA_VIDEO_FORMAT_BGRx, spa/include/spa/param/video/raw.h:36-46",
+            ),
+            (
+                "SPA_VIDEO_FORMAT_RGBA",
+                pod::SPA_VIDEO_FORMAT_RGBA,
+                11,
+                "spa/include/spa/param/video/raw.h:36-49",
+            ),
+            (
+                "SPA_VIDEO_FORMAT_BGRA",
+                pod::SPA_VIDEO_FORMAT_BGRA,
+                12,
+                "spa/include/spa/param/video/raw.h:36-50",
+            ),
+        ];
+        for &(name, ours, header, citation) in values {
+            assert_eq!(ours, header, "{name} must match {citation}");
+        }
         assert_eq!(
-            pod::read_header(&pod::rect(1920, 1080)),
-            Some((16, pod::SPA_TYPE_RECTANGLE))
+            PW_STREAM_STATE_ERROR, -1,
+            "PW_STREAM_STATE_ERROR must match src/pipewire/stream.h:247"
         );
+
+        // Portal (D-Bus) values — hand-defined here too, and part of the
+        // same capture surface.
+        assert_eq!(
+            RESPONSE_SUCCESS, 0,
+            "Request::Response 0 = success (org.freedesktop.portal.Request.xml:68)"
+        );
+        assert_eq!(
+            SOURCE_TYPE_MONITOR, 1,
+            "AvailableSourceTypes 1 = MONITOR (ScreenCast.xml:337)"
+        );
+        assert_eq!(
+            SOURCE_TYPE_WINDOW, 2,
+            "AvailableSourceTypes 2 = WINDOW (ScreenCast.xml:338)"
+        );
+        assert_eq!(
+            CURSOR_HIDDEN, 1,
+            "AvailableCursorModes 1 = Hidden (ScreenCast.xml:349)"
+        );
+        assert_eq!(
+            PERSIST_INDEFINITELY, 2,
+            "persist_mode 2 = persist until revoked (ScreenCast.xml:174)"
+        );
+    }
+
+    /// Pod body sizes are the C struct sizes, not the aligned struct size:
+    /// Id = 4 (`SPA_POD_INIT_Id`, `spa/include/spa/pod/builder.h:269`),
+    /// Rectangle = 8 (`SPA_POD_INIT_Rectangle`, `builder.h:370`),
+    /// Fraction = 8 (`SPA_POD_INIT_Fraction`, `builder.h:379`), with
+    /// `struct spa_rectangle`/`spa_fraction` in `spa/utils/defs.h:102-123`.
+    #[test]
+    fn pod_bodies_have_the_c_abi_layout() {
+        let id = pod::id(11);
+        assert_eq!(pod::read_header(&id), Some((4, pod::SPA_TYPE_ID)));
+        assert_eq!(id.len(), 12, "header + u32 id");
+
         let r = pod::rect(2560, 1440);
+        assert_eq!(pod::read_header(&r), Some((8, pod::SPA_TYPE_RECTANGLE)));
+        assert_eq!(r.len(), 16, "header + struct spa_rectangle");
         assert_eq!(u32::from_le_bytes(r[8..12].try_into().unwrap()), 2560);
         assert_eq!(u32::from_le_bytes(r[12..16].try_into().unwrap()), 1440);
+
+        let f = pod::fraction(30, 1);
+        assert_eq!(pod::read_header(&f), Some((8, pod::SPA_TYPE_FRACTION)));
+        assert_eq!(f.len(), 16, "header + struct spa_fraction");
     }
 
     #[test]
