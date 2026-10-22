@@ -302,11 +302,11 @@ serve_port = 9123
             paths.tail,
             "steamapps/compatdata/230410/pfx/drive_c/users/steamuser/AppData/Local/Warframe/EE.log"
         );
-        assert_eq!(paths.steam_roots[0], ".local/share/Steam");
+        assert_eq!(paths.steam_roots[0], "/run/media/system/Games/SteamLibrary");
         // The containing folder the sandbox must grant (item 35).
         assert_eq!(
             paths.primary_containing_folder().unwrap(),
-            ".local/share/Steam/steamapps/compatdata/230410/pfx/drive_c/users/steamuser/AppData/Local/Warframe"
+            "/run/media/system/Games/SteamLibrary/steamapps/compatdata/230410/pfx/drive_c/users/steamuser/AppData/Local/Warframe"
         );
     }
 

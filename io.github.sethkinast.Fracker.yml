@@ -26,9 +26,12 @@ finish-args:
   - --talk-name=org.kde.StatusNotifierWatcher
   # Open the generated page via the OpenURI portal when present.
   - --talk-name=org.freedesktop.portal.Desktop
-  # EE.log CONTAINING FOLDER grant (item 35: the folder grant is primary).
-  # Mirrors data/paths.toml [ee_log] primary root+tail; a config/--log
+  # EE.log CONTAINING FOLDER grants (item 35: the folder grant is
+  # primary). Mirrors data/paths.toml [ee_log] roots+tail — the
+  # media-drive library is primary since 2026-10-22, the home-Steam
+  # folder stays granted for the fallback roots; a config/--log
   # override still needs its own grant.
+  - --filesystem=/run/media/system/Games/SteamLibrary/steamapps/compatdata/230410/pfx/drive_c/users/steamuser/AppData/Local/Warframe
   - --filesystem=~/.local/share/Steam/steamapps/compatdata/230410/pfx/drive_c/users/steamuser/AppData/Local/Warframe
 
 modules:

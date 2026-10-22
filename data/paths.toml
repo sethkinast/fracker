@@ -5,8 +5,14 @@
 #
 # The log path is configurable in-app; this is the default. `tail` is
 # appended to each root in `steam_roots` (priority order — the first
-# existing candidate wins).
+# existing candidate wins). Roots may be absolute: discovery joins each
+# root onto the home dir, and joining an absolute path replaces the
+# home prefix, so an external Steam library is expressed directly.
+#
+# Seth's Warframe install lives in the media-drive library (moved
+# 2026-10-22), so that root is primary; the home-Steam roots remain as
+# fallbacks for other installs.
 
 [ee_log]
 tail = "steamapps/compatdata/230410/pfx/drive_c/users/steamuser/AppData/Local/Warframe/EE.log"
-steam_roots = [".local/share/Steam", ".steam/steam", ".steam/root"]
+steam_roots = ["/run/media/system/Games/SteamLibrary", ".local/share/Steam", ".steam/steam", ".steam/root"]

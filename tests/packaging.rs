@@ -134,9 +134,16 @@ fn manifest_grants_the_ee_log_containing_folder() {
         EeLogPaths::load(&root().join("data/paths.toml")).expect("data/paths.toml");
     let folder = paths.primary_containing_folder().expect("primary folder");
     let manifest = read("io.github.sethkinast.Fracker.yml");
+    // Absolute roots (an external Steam library) are granted as-is;
+    // home-relative roots take the ~/ form.
+    let grant = if folder.starts_with('/') {
+        format!("--filesystem={folder}")
+    } else {
+        format!("--filesystem=~/{folder}")
+    };
     assert!(
-        manifest.contains(&format!("--filesystem=~/{folder}")),
-        "manifest must grant the EE.log containing folder ~/{folder}"
+        manifest.contains(&grant),
+        "manifest must grant the EE.log containing folder {grant}"
     );
     assert!(manifest.contains("--talk-name=org.kde.StatusNotifierWatcher"));
     assert!(manifest.contains("--share=network"));
