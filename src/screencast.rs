@@ -1026,36 +1026,42 @@ fn missing_symbols_error(missing: &[&str]) -> String {
     )
 }
 
-/// `PW_DIRECTION_INPUT` (we consume frames).
-const PW_DIRECTION_INPUT: c_int = 1;
-/// `PW_ID_ANY`.
+/// `PW_DIRECTION_INPUT` — a stream that **consumes** frames (we are the
+/// consumer of the portal's source node). `port.h` aliases
+/// `PW_DIRECTION_INPUT` to `SPA_DIRECTION_INPUT` (`src/pipewire/port.h:43`),
+/// whose value is **0** (`spa/include/spa/utils/defs.h:95`).
+/// `SPA_DIRECTION_OUTPUT` is 1 (`defs.h:96`).
+const PW_DIRECTION_INPUT: c_int = 0;
+/// `PW_ID_ANY` (`src/pipewire/core.h:60`).
 const PW_ID_ANY: u32 = 0xffff_ffff;
 /// `PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS |
-/// PW_STREAM_FLAG_DONT_RECONNECT`.
+/// PW_STREAM_FLAG_DONT_RECONNECT` (`src/pipewire/stream.h:465,470,479`).
 ///
-/// **AUTOCONNECT is required for a portal screencast** (ninth pass §1 root
-/// cause): `OpenPipeWireRemote` hands back a private PipeWire core whose
-/// single node is the screen being cast. Without AUTOCONNECT the input
-/// stream is created on the core but never linked to that node, so
-/// `pw_stream_connect` returns 0 while the stream sits idle forever:
-/// `process` never fires, no error state is entered, and the UI would
-/// block with no signal.
+/// **AUTOCONNECT links the stream to the node named in the `Start`
+/// reply's `streams`** (item 49). With the connect target supplied, the
+/// session manager makes the link to the portal's source node; without
+/// AUTOCONNECT the stream would be created and never linked.
 ///
-/// The connect target is the node id the portal selected in the `Start`
-/// reply's `streams` (item 49): a targetless connect errors "target not
-/// found". AUTOCONNECT still applies once the target is known.
+/// **Pass-9 record correction (pass 20).** This block used to blame a
+/// "private remote" whose node was not yet published, and the retry loop
+/// below was added to rationalize "target not found". That theory is
+/// wrong. `OpenPipeWireRemote` returns an ordinary remote and the portal's
+/// source node is present. The failure was `PW_DIRECTION_INPUT` being
+/// hand-defined as 1 — which is `SPA_DIRECTION_OUTPUT`
+/// (`spa/include/spa/utils/defs.h:95-96`). We were connecting an OUTPUT
+/// (producer) stream and asking the session manager to link that producer
+/// *into* the portal's source node, which has no input ports. "target not
+/// found" was deterministic, not a registration race.
 ///
-/// **Item 60a.** The remote's node is published asynchronously, so the
-/// first connect can race its global even when the portal already named
-/// it. Without the registry (see [`REQUIRED_SYMBOLS`]) the race is closed
-/// by retrying the connect itself for a few seconds while the stream
-/// reports "target not found".
+/// The retry/settle code is retained only as a guard for a genuinely late
+/// node; it was never the fix for the direction defect.
 const PW_STREAM_FLAGS: u32 = (1 << 0) | (1 << 2) | (1 << 7);
-/// `PW_STREAM_STATE_ERROR`.
+/// `PW_STREAM_STATE_ERROR` (`src/pipewire/stream.h:247`).
 const PW_STREAM_STATE_ERROR: i32 = -1;
-/// How long a "target not found" connect may be retried (item 60a). The
-/// private remote normally publishes the node within milliseconds; the
-/// bound keeps a genuinely absent target a visible failure, not a hang.
+/// How long a "target not found" connect may be retried (item 60a), as a
+/// guard against a genuinely late node publication. The pass-20 direction
+/// fix is what makes a healthy connect succeed; this bound keeps an absent
+/// target a visible failure, not a hang.
 const CONNECT_RETRY_WINDOW: Duration = Duration::from_secs(5);
 /// Pause between connect attempts while the target is not there yet.
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
@@ -1071,8 +1077,8 @@ const CONNECT_SETTLE: Duration = Duration::from_millis(200);
 /// forever.
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Whether a PipeWire stream error is the target-not-found race that a
-/// connect retry can close (item 60a).
+/// Whether a PipeWire stream error is "target not found": a node that is
+/// genuinely absent, or genuinely not published yet.
 fn is_target_not_found(message: &str) -> bool {
     message.to_ascii_lowercase().contains("target not found")
 }
