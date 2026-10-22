@@ -56,6 +56,8 @@ const PORTAL_DEST: &str = "org.freedesktop.portal.Desktop";
 const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
 const SCREENCAST_IFACE: &str = "org.freedesktop.portal.ScreenCast";
 const REQUEST_IFACE: &str = "org.freedesktop.portal.Request";
+const SESSION_IFACE: &str = "org.freedesktop.portal.Session";
+const SESSION_CLOSE_METHOD: &str = "Close";
 
 /// Portal response code for "the user agreed" (0); everything else is a
 /// refusal and is surfaced, never swallowed.
@@ -144,14 +146,135 @@ const CURSOR_HIDDEN: u32 = 1;
 /// `persist_mode`: persist the restore token indefinitely (2).
 const PERSIST_INDEFINITELY: u32 = 2;
 
+/// How long `Session.Close` may take at teardown. Closing is best-effort:
+/// the stream is already gone by then, so a wedged portal must not hold
+/// capture shutdown open.
+const SESSION_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// A completed negotiation: the PipeWire remote fd, the ScreenCast node
 /// the portal selected (the stream must connect to THIS node — a targetless
-/// connect errors "target not found"), and the (optionally refreshed)
-/// restore token.
+/// connect errors "target not found"), the (optionally refreshed) restore
+/// token, and the **live portal session**.
+///
+/// **Addendum #69b.** The session lives on the session-bus connection that
+/// negotiated it. Dropping that connection at the end of `negotiate()`
+/// orphaned the session: the portal had tied it to the caller's unique name,
+/// so `Session.Close` could never be sent and the session lingered until the
+/// portal reaped it. [`PortalSession`] carries both the connection and the
+/// object path through the capture and closes the session at teardown.
 pub struct Negotiated {
     pub fd: OwnedFd,
     pub node_id: u32,
     pub restore_token: Option<String>,
+    pub session: PortalSession,
+}
+
+/// The portal session + its dedicated D-Bus connection, kept alive for as
+/// long as the capture owns the PipeWire remote and closed on drop.
+///
+/// `zbus::Connection` is a shared handle; dropping it closes the bus
+/// connection (and thereby the portal session's identity) even though the
+/// object is reference-counted. Holding one clone here is what keeps the
+/// unique name alive.
+pub struct PortalSession {
+    /// `None` once the session has been closed, so `Drop` is idempotent.
+    connection: Option<zbus::Connection>,
+    path: ObjectPath<'static>,
+    log: CaptureLog,
+}
+
+impl PortalSession {
+    fn new(connection: zbus::Connection, path: ObjectPath<'static>, log: CaptureLog) -> Self {
+        Self {
+            connection: Some(connection),
+            path,
+            log,
+        }
+    }
+
+    /// The object path of the portal session (`/org/freedesktop/portal/
+    /// desktop/session/...`).
+    pub fn path(&self) -> &ObjectPath<'static> {
+        &self.path
+    }
+
+    /// Send `org.freedesktop.portal.Session.Close` on the connection that
+    /// owns the session, then drop that connection. Safe to call more than
+    /// once (drop calls it when the owner did not).
+    ///
+    /// This runs at capture teardown on the blocking worker thread, which
+    /// has no Tokio runtime of its own, so the async zbus call gets a
+    /// short-lived current-thread runtime in a helper thread. The join is
+    /// bounded by [`SESSION_CLOSE_TIMEOUT`]; a failed close is logged, never
+    /// swallowed.
+    pub fn close(&mut self) {
+        let Some(conn) = self.connection.take() else {
+            return;
+        };
+        let path = self.path.to_string();
+        let log = self.log.clone();
+        let spawned = std::thread::Builder::new()
+            .name("fracker-portal-close".to_owned())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        log.record(
+                            "finalizing",
+                            &format!("could not close ScreenCast session: runtime: {e}"),
+                        );
+                        return;
+                    }
+                };
+                let result = runtime.block_on(async {
+                    tokio::time::timeout(
+                        SESSION_CLOSE_TIMEOUT,
+                        conn.call_method(
+                            Some(PORTAL_DEST),
+                            path.as_str(),
+                            Some(SESSION_IFACE),
+                            SESSION_CLOSE_METHOD,
+                            &(),
+                        ),
+                    )
+                    .await
+                });
+                match result {
+                    Ok(Ok(_)) => log.record(
+                        "finalizing",
+                        &format!("ScreenCast session closed ({path})"),
+                    ),
+                    Ok(Err(e)) => log.record(
+                        "finalizing",
+                        &format!("ScreenCast Session.Close failed: {e}"),
+                    ),
+                    Err(_) => log.record(
+                        "finalizing",
+                        &format!(
+                            "ScreenCast Session.Close timed out after {}s",
+                            SESSION_CLOSE_TIMEOUT.as_secs()
+                        ),
+                    ),
+                }
+            });
+        match spawned {
+            Ok(handle) => {
+                let _ = handle.join();
+            }
+            Err(e) => self
+                .log
+                .record("finalizing", &format!("could not close ScreenCast session: {e}")),
+        }
+    }
+}
+
+impl Drop for PortalSession {
+    fn drop(&mut self) {
+        self.close();
+    }
 }
 
 /// Drive the full ScreenCast portal handshake and return the PipeWire
@@ -189,9 +312,15 @@ pub async fn negotiate(
     let session_path: String = <&str>::try_from(session)
         .map_err(|e| NegotiateError::consent(format!("ScreenCast session handle: {e}")))?
         .to_owned();
-    let session = ObjectPath::try_from(session_path.as_str()).map_err(|e| {
-        NegotiateError::consent(format!("ScreenCast session path {session_path:?}: {e}"))
-    })?;
+    let session = ObjectPath::try_from(session_path.as_str())
+        .map_err(|e| {
+            NegotiateError::consent(format!("ScreenCast session path {session_path:?}: {e}"))
+        })?
+        .into_owned();
+    // Item 69b: from here on every exit path owns the session and closes it
+    // — including a refusal or a failed remote-fd call, not just a
+    // completed capture.
+    let portal_session = PortalSession::new(conn.clone(), session.clone(), log.clone());
 
     // 2. SelectSources — monitors + windows, hidden cursor, persistent.
     // Item 55: constrain the picker and steer the choice. Window frames are
@@ -313,6 +442,9 @@ pub async fn negotiate(
         fd,
         node_id,
         restore_token: issued_token,
+        // Item 69b: this keeps the session (and its connection) alive until
+        // the capture source is dropped, which closes it.
+        session: portal_session,
     })
 }
 
@@ -1350,6 +1482,9 @@ pub struct ScreenCastSource {
     /// instead of stalling the capture forever.
     first_frame_deadline: Instant,
     got_first: bool,
+    /// Item 69b: the portal session the remote belongs to. Dropped (and
+    /// therefore `Session.Close`d) after the PipeWire teardown in `Drop`.
+    session: PortalSession,
     log: CaptureLog,
 }
 
@@ -1368,6 +1503,15 @@ impl ScreenCastSource {
         log: CaptureLog,
     ) -> Result<Self, String> {
         let api = PwApi::load()?;
+        // Item 69b: keep the portal session (connection + object path) alive
+        // for the whole stream. Every early return below drops `session`,
+        // which sends Session.Close instead of orphaning it.
+        let Negotiated {
+            fd,
+            node_id,
+            restore_token: _,
+            session,
+        } = negotiated;
         unsafe {
             // pw_init is idempotent-ish; passing null keeps argv untouched.
             (api.pw_init)(std::ptr::null_mut(), std::ptr::null_mut());
@@ -1385,7 +1529,6 @@ impl ScreenCastSource {
 
         let (tx, rx) = channel::<GrayImage>();
         let err = Arc::new(Mutex::new(None));
-        let node_id = negotiated.node_id;
         let ctx = Box::new(StreamCtx {
             api,
             stream: std::ptr::null_mut(),
@@ -1424,7 +1567,7 @@ impl ScreenCastSource {
             if context.is_null() {
                 return Err("PipeWire: pw_context_new failed".to_owned());
             }
-            let fd = negotiated.fd.as_raw_fd();
+            let fd = fd.as_raw_fd();
             let core = unsafe { (api.pw_context_connect_fd)(context, fd, std::ptr::null_mut(), 0) };
             if core.is_null() {
                 unsafe { (api.pw_context_destroy)(context) };
@@ -1569,7 +1712,7 @@ impl ScreenCastSource {
         };
         // The negotiated fd is now owned by PipeWire; leak the OwnedFd so
         // it is not double-closed (pw_context_connect_fd dup'd it).
-        std::mem::forget(negotiated.fd);
+        std::mem::forget(fd);
 
         Ok(Self {
             api,
@@ -1586,6 +1729,7 @@ impl ScreenCastSource {
             connected: true,
             first_frame_deadline: Instant::now() + FIRST_FRAME_TIMEOUT,
             got_first: false,
+            session,
             log,
         })
     }
@@ -2577,6 +2721,15 @@ mod tests {
             OPEN_PIPEWIRE_REMOTE_REPLY_SIGNATURE,
             "the OpenPipeWireRemote reply must be typed as an fd, not a variant"
         );
+    }
+
+    #[test]
+    fn portal_session_close_targets_the_standard_session_interface() {
+        // org.freedesktop.portal.Session.xml: `Close` is a no-argument
+        // method on the session handle returned by CreateSession. The
+        // session lives on the connection that created it (item 69b).
+        assert_eq!(SESSION_IFACE, "org.freedesktop.portal.Session");
+        assert_eq!(SESSION_CLOSE_METHOD, "Close");
     }
 
     #[test]
