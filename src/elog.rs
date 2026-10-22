@@ -274,25 +274,26 @@ const ACTIVATION_EPSILON_SECS: i64 = 120;
 impl MissionCompletion {
     /// A positive identity match against a worldstate alert — never
     /// inferred. Matches when the alert ids are equal, or when the event
-    /// tag agrees AND the identity evidence corroborates it.
+    /// tag agrees AND every piece of identity evidence corroborates it.
     ///
-    /// **Addendum #59 (node gates corroboration).** When both the
-    /// completion and the alert carry a SolNode, the node is the ONLY
-    /// corroboration allowed; a shared mission type or payout resource is
-    /// not identity evidence in that case. This is what stops one
-    /// completion from striking every same-tag sibling that happens to pay
-    /// the same event currency (Seth's four Road To Tau alerts all paid
-    /// 50 Moonflesh). Type/reward fallbacks apply only when node data is
-    /// absent on either side (legacy feeds), and are never consulted when
-    /// both nodes disagree.
+    /// **Addendum #64 (full instance predicate).** A non-id match is the
+    /// conjunction of:
     ///
-    /// Twelfth-pass §4 (instance-strict): every corroboration path
-    /// (tag+node, tag+type, tag+reward) additionally requires the
-    /// completion's observed time to fall at/after the alert's activation
-    /// (minus a small clock-skew epsilon). A same-tag completion from a
-    /// *previous* alert instance can therefore never strike today's alert.
-    /// The exact `alertId` path is instance identity already and stays
-    /// as-is.
+    /// - the same event tag;
+    /// - the same SolNode, when both sides carry one;
+    /// - the same mission type, when both sides carry one (the node-only
+    ///   fallback applies only when a type is absent on a side);
+    /// - the pass-12 activation guard: the completion must be observed
+    ///   at/after the alert's activation (an unparseable activation stays
+    ///   fail-closed).
+    ///
+    /// Node+type alone is not instance identity across *repeated*
+    /// instances — event alerts rerun on the same handful of nodes all
+    /// day — so the activation window supplies the time dimension. A
+    /// shared payout resource is deliberately not identity evidence: it is
+    /// common to every same-tag sibling (Seth's four Road To Tau alerts
+    /// all paid 50 Moonflesh). The exact `alertId` path is instance
+    /// identity already and stays as-is.
     pub fn matches_alert(&self, alert: &crate::model::Alert) -> bool {
         let info = &self.info;
         if !info.alert_id.is_empty() && !alert.id.is_empty() && info.alert_id == alert.id {
@@ -306,28 +307,23 @@ impl MissionCompletion {
         if !tag_eq {
             return false;
         }
-        // Addendum #59: with node data on BOTH sides, only the node (or
-        // the exact id above) can corroborate. Returning here also stops
-        // the type/reward fallbacks from striking same-tag siblings that
-        // share a mission type or event currency.
-        if !info.location.is_empty() && !alert.mission.sol_node.is_empty() {
-            return info
-                .location
-                .eq_ignore_ascii_case(&alert.mission.sol_node);
+        // Both sides carrying a node makes the node a required conjunct.
+        let node_both = !info.location.is_empty() && !alert.mission.sol_node.is_empty();
+        if node_both && !info.location.eq_ignore_ascii_case(&alert.mission.sol_node) {
+            return false;
         }
-        // Legacy fallbacks for node-less data only.
+        // Both sides carrying a type makes the type a required conjunct.
         let mine = mission_type_key(&info.mission_type);
         let theirs = mission_type_key(&alert.mission.mission_type);
-        if !mine.is_empty() && mine == theirs {
-            return true;
+        let type_both = !mine.is_empty() && !theirs.is_empty();
+        if type_both && mine != theirs {
+            return false;
         }
-        alert.mission.counted_items().iter().any(|c| {
-            !c.unique_name.is_empty()
-                && info
-                    .reward_items
-                    .iter()
-                    .any(|r| r.eq_ignore_ascii_case(&c.unique_name))
-        })
+        // At least one positive identity clue beyond the tag must exist:
+        // the node on both sides, or the type on both sides. When a type
+        // is absent on a side, a same-node pair is the documented
+        // fallback; a bare tag alone is not identity.
+        node_both || type_both
     }
 
     /// The §4 activation guard for corroboration paths. An alert with no
@@ -955,7 +951,8 @@ mod tests {
         assert!(completion.matches_alert(&alert("6ad0d7360dfe89c5d82290a2", "Other", "Survival")));
         // Tag + normalized mission type (`MT_HIVE` == `Hive`).
         assert!(completion.matches_alert(&alert("", "RoadToTauEvent", "Hive")));
-        // Tag + shared payout resource when the type strings differ.
+        // A shared payout resource is NOT identity: every same-tag
+        // sibling pays the same event currency (addendum #64).
         assert!(info.is_alert());
         info.mission_type = "MT_SOMETHING_NEW".to_owned();
         let c2 = MissionCompletion {
@@ -963,7 +960,7 @@ mod tests {
             day: "d".to_owned(),
             observed_at: "2026-10-17T12:00:00Z".to_owned(),
         };
-        assert!(c2.matches_alert(&alert("", "RoadToTauEvent", "Mobile Defense")));
+        assert!(!c2.matches_alert(&alert("", "RoadToTauEvent", "Mobile Defense")));
         // A different tag with no id or type match never strikes.
         assert!(!completion.matches_alert(&alert("", "SomeOtherEvent", "Survival")));
     }
@@ -973,32 +970,40 @@ mod tests {
         // Addendum #51 bonus: EE.log and DE both speak SolNode keys, so an
         // exact internal-node match corroborates the alert instance (the
         // activation guard still applies); a different SolNode does not.
+        // Addendum #64 adds the type conjunct: when a type is present on
+        // both sides it must agree, so same-node/different-type siblings
+        // are distinct instances. A type-absent side keeps the node-only
+        // fallback.
         use crate::model::{Alert, AlertMission};
         let completion = MissionCompletion {
             info: MissionInfo {
                 alert_tag: "RoadToTauEvent".to_owned(),
                 location: "SolNode175".to_owned(),
-                mission_type: "MT_SOMETHING".to_owned(),
+                mission_type: "MT_HIVE".to_owned(),
                 ..Default::default()
             },
             day: "2026-10-17".to_owned(),
             observed_at: "2026-10-17T12:00:00Z".to_owned(),
         };
-        let alert = |sol_node: &str| Alert {
+        let alert = |sol_node: &str, mission_type: &str| Alert {
             tag: "RoadToTauEvent".to_owned(),
             activation: "2026-10-17T11:00:00Z".to_owned(),
             mission: AlertMission {
                 node: "Naeglar (Eris)".to_owned(),
                 sol_node: sol_node.to_owned(),
-                mission_type: "MT_HIVE".to_owned(),
+                mission_type: mission_type.to_owned(),
                 ..Default::default()
             },
             ..Default::default()
         };
-        assert!(completion.matches_alert(&alert("SolNode175")));
-        assert!(!completion.matches_alert(&alert("SolNode999")));
+        assert!(completion.matches_alert(&alert("SolNode175", "MT_HIVE")));
+        assert!(!completion.matches_alert(&alert("SolNode999", "MT_HIVE")));
+        // Same node, different present type: not the same instance.
+        assert!(!completion.matches_alert(&alert("SolNode175", "MT_MOBILE_DEFENSE")));
+        // Type absent on the alert side: node-only fallback still holds.
+        assert!(completion.matches_alert(&alert("SolNode175", "")));
         // The activation guard still gates the node path.
-        let mut early = alert("SolNode175");
+        let mut early = alert("SolNode175", "MT_HIVE");
         early.activation = "2026-10-18T00:00:00Z".to_owned();
         assert!(!completion.matches_alert(&early));
     }
@@ -1059,6 +1064,91 @@ mod tests {
         // Even a same-tag sibling with the same mission type (but a
         // different node) must not corroborate once both nodes are present.
         assert!(!completion.matches_alert(&sibling("SolNode176", "Hive")));
+    }
+
+    /// Brief #21 §1 regression: same tag and same node, different mission
+    /// types. Node-only corroboration used to strike both siblings; the
+    /// type conjunct leaves exactly one.
+    #[test]
+    fn same_node_different_type_siblings_strike_exactly_one() {
+        use crate::model::{Alert, AlertMission, AlertReward, CountedItem};
+        let shared_reward = "/Lotus/Types/Gameplay/Events/RoadToTauEvent/RoadToTauEventResource";
+        let completion = MissionCompletion {
+            info: MissionInfo {
+                alert_tag: "RoadToTauEvent".to_owned(),
+                mission_type: "MT_HIVE".to_owned(),
+                location: "SolNode175".to_owned(),
+                reward_items: vec![shared_reward.to_owned()],
+                ..Default::default()
+            },
+            day: "2026-10-21".to_owned(),
+            observed_at: "2026-10-21T12:00:00Z".to_owned(),
+        };
+        let sibling = |mtype: &str| Alert {
+            tag: "RoadToTauEvent".to_owned(),
+            activation: "2026-10-21T11:00:00Z".to_owned(),
+            mission: AlertMission {
+                node: "Nimus (Eris)".to_owned(),
+                sol_node: "SolNode175".to_owned(),
+                mission_type: mtype.to_owned(),
+                reward: AlertReward {
+                    counted_items: vec![CountedItem {
+                        unique_name: shared_reward.to_owned(),
+                        kind: "Tau Resource".to_owned(),
+                        count: 50,
+                    }],
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let siblings = [
+            sibling("Hive"),
+            sibling("Mobile Defense"),
+            sibling("Extermination"),
+        ];
+        let struck: Vec<usize> = siblings
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| completion.matches_alert(a))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(struck, vec![0], "only the matching mission type is struck");
+    }
+
+    /// Brief #21 §1 regression: the activation window is part of identity.
+    /// Same node and type as an earlier completion, but the alert belongs
+    /// to a rerun instance that only activated afterwards, so it must not
+    /// be struck.
+    #[test]
+    fn rerun_completion_before_activation_is_not_struck() {
+        use crate::model::{Alert, AlertMission};
+        let completion = MissionCompletion {
+            info: MissionInfo {
+                alert_tag: "RoadToTauEvent".to_owned(),
+                mission_type: "MT_HIVE".to_owned(),
+                location: "SolNode175".to_owned(),
+                ..Default::default()
+            },
+            day: "2026-10-21".to_owned(),
+            observed_at: "2026-10-21T12:00:00Z".to_owned(),
+        };
+        let rerun = Alert {
+            tag: "RoadToTauEvent".to_owned(),
+            activation: "2026-10-21T13:00:00Z".to_owned(),
+            mission: AlertMission {
+                node: "Nimus (Eris)".to_owned(),
+                sol_node: "SolNode175".to_owned(),
+                mission_type: "MT_HIVE".to_owned(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(!completion.matches_alert(&rerun));
+        // The same instance, once live, is struck.
+        let mut live = rerun.clone();
+        live.activation = "2026-10-21T11:00:00Z".to_owned();
+        assert!(completion.matches_alert(&live));
     }
 
     /// Twelfth-pass §4 (instance-strict): a corroboration-only match must
