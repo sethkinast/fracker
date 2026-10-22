@@ -12,6 +12,7 @@ pub mod ocr;
 pub mod pack;
 pub mod plan;
 pub mod portal;
+pub mod push;
 pub mod render;
 pub mod report;
 pub mod resident;
