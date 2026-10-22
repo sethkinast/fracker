@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use clap::Parser;
 use tokio::sync::mpsc;
 
-use fracker::{capture, config, instance, ocr, report, resident, tray, tuning};
+use fracker::{capture, config, instance, model, ocr, report, resident, tray, tuning};
 
 /// Repo/install data file path. `$FRACKER_DATA_DIR`-aware (see
 /// `tuning::data_dir`), so the Flatpak install resolves data from
@@ -43,6 +43,10 @@ struct Args {
     /// Explicit config file (default: XDG config).
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Re-bake the committed relic-tables cache in place (legacy era
+    /// aliases, addendum #66) and exit.
+    #[arg(long, hide = true)]
+    bake_relics: bool,
     /// OCR bootstrap: ingest a folder of inventory-grid screenshots and exit.
     #[arg(long)]
     ocr_ingest: Option<PathBuf>,
@@ -76,6 +80,13 @@ struct Args {
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
+    if args.bake_relics {
+        if let Err(e) = run_bake_relics() {
+            eprintln!("fracker --bake-relics: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if let Some(dir) = args.ocr_ingest.clone() {
         if let Err(e) = run_ocr_ingest(&args, &dir) {
             eprintln!("fracker --ocr-ingest: {e}");
@@ -101,6 +112,18 @@ async fn main() {
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
     std::process::exit(0);
+}
+
+/// `--bake-relics`: rewrite the committed relic-tables cache through the
+/// bake pipeline (legacy "Vanguard" aliases -> Axi, addendum #66).
+fn run_bake_relics() -> Result<(), String> {
+    let path = data_file("cache/relictables.json");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    let baked = model::bake_relic_tables(&text)?;
+    std::fs::write(&path, baked).map_err(|e| format!("write {}: {e}", path.display()))?;
+    println!("bake-relics: {}", path.display());
+    Ok(())
 }
 
 /// `--demo`: self-contained review export (embedded ≤128px icons,
