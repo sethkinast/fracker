@@ -183,14 +183,6 @@ fn part_state_class(state: &crate::plan::PartState) -> &'static str {
     }
 }
 
-fn fmt_terse_pct(p: f64) -> String {
-    if (p - p.round()).abs() < 1e-9 {
-        format!("{}", p.round() as u32)
-    } else {
-        format!("{p:.2}")
-    }
-}
-
 fn fmt_int(n: u32) -> String {
     let s = n.to_string();
     let mut out = String::new();
@@ -550,9 +542,9 @@ fn alert_rows(alerts: &[crate::plan::AlertView], ctx: &RenderContext<'_>) -> Str
 }
 
 /// The crack queue: the mock's `.row.ch` cards — NEXT badge, parent icon,
-/// part/short-name mid-column, relic + refinement/chance/traces right,
-/// the run time last. Tickable (label + checkbox) so a crack can be
-/// marked done; done rows strike.
+/// part/short-name mid-column, relic + refinement/traces right, the run
+/// time last. Tickable (label + checkbox) so a crack can be marked done;
+/// done rows strike.
 fn crack_queue_panel(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     let cracks: Vec<&crate::plan::Chunk> =
         plan.chunks.iter().filter(|c| c.crack.is_some()).collect();
@@ -594,7 +586,7 @@ fn crack_queue_panel(plan: &Plan, ctx: &RenderContext<'_>) -> String {
                 class.push_str(" done");
             }
             h.push_str(&format!(
-                "<label class=\"{class}\">\n<input type=\"checkbox\" data-id=\"{id}\"{checked}>\n{icon}\n<div><b>{gear}</b>{next}<br><span class=\"mut sm\">{part}{extra}</span></div>\n<div class=\"rl\"><b class=\"cy\">{relic}</b><br><span class=\"mut sm\">{refine} &middot; {chance}% &middot; {traces} tr</span></div>\n<span class=\"mut\">{time}</span>\n</label>\n",
+                "<label class=\"{class}\">\n<input type=\"checkbox\" data-id=\"{id}\"{checked}>\n{icon}\n<div><b>{gear}</b>{next}<br><span class=\"mut sm\">{part}{extra}</span></div>\n<div class=\"rl\"><b class=\"cy\">{relic}</b><br><span class=\"mut sm\">{refine} &middot; {traces} tr</span></div>\n<span class=\"mut\">{time}</span>\n</label>\n",
                 class = class,
                 id = esc(&c.id),
                 checked = if proven { " checked" } else { "" },
@@ -605,7 +597,6 @@ fn crack_queue_panel(plan: &Plan, ctx: &RenderContext<'_>) -> String {
                 extra = extra,
                 relic = esc(&ci.relic),
                 refine = esc(&ci.refinement),
-                chance = fmt_terse_pct(ci.chance),
                 traces = ci.traces,
                 time = esc(&c.minutes_label),
             ));
@@ -719,12 +710,12 @@ fn hunt_html(plan: &Plan, ctx: &RenderContext<'_>) -> String {
                 String::new()
             };
             format!(
-                "Row: part &middot; relic &middot; chance at refine &middot; ~cracks to drop &middot; all cracks: {} ({}){steel}",
+                "Row: part &middot; relic &middot; refinement &middot; all cracks: {} ({}){steel}",
                 esc(&ci.fissure_node),
                 esc(&ci.fissure_mission),
             )
         }
-        None => "Row: part &middot; relic &middot; chance at refine &middot; ~cracks to drop".to_owned(),
+        None => "Row: part &middot; relic &middot; refinement".to_owned(),
     };
     let mut h = String::new();
     h.push_str("<div class=\"page\" id=\"p2\">\n<div class=\"tool\">\n");
@@ -781,12 +772,10 @@ fn hunt_card_html(
     for p in &g.parts {
         let part = short_part(&p.name, &g.gear);
         let rarity = rarity_css(p.rarity);
-        let (relic, refine, chance, expected, vaulted) = match &p.deal {
+        let (relic, refine, vaulted) = match &p.deal {
             Some(d) => (
                 d.relic.clone(),
                 refinement_abbrev(&d.refinement),
-                d.chance,
-                d.expected.round() as u32,
                 d.vaulted,
             ),
             None => (
@@ -795,25 +784,17 @@ fn hunt_card_html(
                     .map(|r| r.relic.clone())
                     .unwrap_or_default(),
                 String::new(),
-                0.0,
-                0,
                 p.relics.first().map(|r| r.vaulted).unwrap_or(false),
             ),
         };
         let vault_class = if vaulted { " v" } else { "" };
-        let pc = if chance > 0.0 {
-            format!("{} {chance}%", if refine.is_empty() { String::new() } else { refine })
-        } else {
-            String::new()
-        };
         h.push_str(&format!(
-            "<div class=\"r\">\n<span class=\"pn\">{part}</span>\n<span class=\"rc {rarity}{vault_class}\">{relic}</span>\n<span class=\"pc {rarity}\">{pc}</span>\n<span class=\"cr\">~{expected}</span>\n</div>\n",
+            "<div class=\"r\">\n<span class=\"pn\">{part}</span>\n<span class=\"rc {rarity}{vault_class}\">{relic}</span>\n<span class=\"pc {rarity}\">{refine}</span>\n</div>\n",
             part = esc(&part),
             rarity = rarity,
             vault_class = vault_class,
             relic = esc(&relic),
-            pc = esc(&pc),
-            expected = expected,
+            refine = esc(&refine),
         ));
     }
     // Footer: the recommendation line (mock `.gf`).
@@ -837,10 +818,9 @@ fn hunt_card_html(
         .next()
     {
         h.push_str(&format!(
-            "<div class=\"gf\"><span class=\"fa\">▸ <b>{relic}</b> · {refine} · {exp} cracks</span></div>\n",
+            "<div class=\"gf\"><span class=\"fa\">▸ <b>{relic}</b> · {refine}</span></div>\n",
             relic = esc(&d.relic),
             refine = esc(&d.refinement),
-            exp = fmt_terse_pct(d.expected),
         ));
     }
     h.push_str("</article>\n");
@@ -1200,9 +1180,9 @@ h3{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--mut)
 .bd{font-style:normal;font-size:10px;letter-spacing:.1em;padding:0 5px;border:1px solid var(--mut);color:var(--mut)}.bd.z{color:var(--gold);border-color:var(--gold)}
 .gc{margin-left:auto;display:flex;align-items:center;gap:8px;color:var(--mut);font-size:12px}.gc i,.bc i{font-style:normal}
 .segs{display:inline-flex;gap:2px}.seg{width:13px;height:5px;background:#252e3d}.seg.have{background:var(--gold)}.seg.unk{height:3px;background:none;border:1px dashed var(--mut)}
-.r{display:grid;grid-template-columns:1fr auto 62px 26px;gap:8px;align-items:center;padding:4px 0;border-top:1px solid #1c2330;font-size:13px}
+.r{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:center;padding:4px 0;border-top:1px solid #1c2330;font-size:13px}
 .pn{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pn em{font-style:normal;color:var(--gold)}
-.rc{border:1px solid;padding:0 7px;font-size:12px;white-space:nowrap}.rc.v{opacity:.7}.pc{font-size:12px;text-align:right;font-variant-numeric:tabular-nums}.cr{text-align:right;color:var(--mut);font-size:12px}
+.rc{border:1px solid;padding:0 7px;font-size:12px;white-space:nowrap}.rc.v{opacity:.7}.pc{font-size:12px;text-align:right;font-variant-numeric:tabular-nums}
 .common{color:#b08d4f}.uncommon{color:#c0c8d4}.rare{color:#e3c878}.rc.common,.rc.uncommon,.rc.rare{border-color:currentColor;background:#0d1117}
 .gf{display:flex;justify-content:space-between;gap:8px;margin-top:8px;padding:6px 9px;background:#0d1420;border-left:3px solid var(--cy);font-size:12px}.gf b{color:var(--cy)}.fa{color:var(--tx)}.fa.vz{color:var(--gold)}.gf:has(.vz){border-color:var(--gold)}
 .bg{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:6px}.bc{display:flex;align-items:center;gap:8px;background:var(--cell);border:1px solid #1f2735;padding:4px 10px 4px 4px;font-size:13px}.bn{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.bc i{color:var(--mut);font-size:11px}
@@ -1883,16 +1863,20 @@ mod tests {
         assert!(p1.contains("class=\"row ch tick next\""), "first crack is NEXT + tickable");
         assert!(p1.contains("<em class=nx>NEXT</em>"));
         assert!(p1.contains("<b class=\"cy\">Neo C8</b>"));
-        assert!(p1.contains("Radiant &middot; 10% &middot; 400 tr"));
+        assert!(p1.contains("Radiant &middot; 400 tr"));
+        assert!(
+            !p1.contains("Radiant &middot; 10%"),
+            "per-crack chance is dead weight in the queue (addendum #67)"
+        );
         assert!(p1.contains("Systems &middot; +2 also"), "short part + coverage");
         assert!(p1.contains("stay for 4"));
         assert!(!p1.contains("long human title"), "mock phrasing replaces prose");
     }
 
     #[test]
-    fn via_deal_part_row_renders_refinement_and_chance() {
-        // The Hunt `.r` line is the mock's `Radiant · 10%` shape, not a
-        // sentence. Uses the stock-aware deal from the planner.
+    fn via_deal_part_row_renders_refinement_alone() {
+        // The Hunt `.r` line keeps the refinement label only; rarity is
+        // carried by color (addendum #67). Uses the stock-aware deal.
         let mut g = goal("Gyre Prime", "Gyre Prime Neuroptics Blueprint", false, false);
         g.parts_total = 4;
         g.parts[0].rarity = Rarity::Rare;
@@ -1920,7 +1904,11 @@ mod tests {
             &ctx,
         );
         assert!(html.contains("<span class=\"rc rare\">Lith G14</span>"));
-        assert!(html.contains("<span class=\"pc rare\">Rad 10%</span>"));
-        assert!(html.contains("<span class=\"cr\">~10</span>"));
+        assert!(html.contains("<span class=\"pc rare\">Rad</span>"));
+        assert!(!html.contains("<span class=\"cr\">"));
+        assert!(
+            !html.contains("Rad 10%"),
+            "chance/expected figures leave the row (addendum #67)"
+        );
     }
 }
