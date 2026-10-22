@@ -663,3 +663,28 @@ it refines the brief where they disagree. For the next worker pass.
     in-game names/eras for these four (DE drop tables /
     Seth's inventory), then remap or drop the pseudo-era
     where the cache is baked.
+    RESOLVED by Seth (2026-10-22): they are legacy AXI
+    relics that do not currently drop (a Varzia return
+    is possible later). Fix: map the four to Axi in the
+    data pipeline — era, fissure matching and display
+    all become Axi; their unobtainable status is item
+    68's concern, not the era label's.
+67. **Chance text is dead weight in relic reward rows
+    (Seth, 2026-10-22).** Within a rarity band every
+    item carries the same chance (commons 25.33% Intact,
+    etc.), so per-item strings like "Int 25.33% ~4" are
+    noise repeated down the slate. Slim the display to
+    the refinement label alone (Int / Rad / etc.) — the
+    item's rarity is already carried by its color.
+68. **Relic source priority + unobtainable treatment
+    (Seth, 2026-10-22).** The part->relic pick already
+    chooses the lowest rarity across relics (correct,
+    keep). Verify end-to-end — and extend where missing —
+    this source priority: (1) owned relics, (2)
+    unvaulted (currently dropping), (3) vaulted but
+    available (Varzia / Prime Resurgence), (4) currently
+    unobtainable (not dropping, not at Varzia) — tier 4
+    gets a NEW visual treatment (likely strikethrough).
+    Downrank items that are even partially unobtainable
+    (their viable sources include tier-4 relics) in
+    target/backlog ordering.
