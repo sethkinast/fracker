@@ -1620,9 +1620,9 @@ impl ScreenCastSource {
             destroy: None,
             state_changed: Some(on_state_changed),
             control_info: None,
-            io_changed: None,
+            io_changed: Some(on_io_changed),
             param_changed: Some(on_param_changed),
-            add_buffer: None,
+            add_buffer: Some(on_add_buffer),
             remove_buffer: Some(on_remove_buffer),
             process: Some(on_process),
             drained: None,
@@ -1728,6 +1728,14 @@ impl ScreenCastSource {
             }
             // Keep the format pod 8-byte aligned while PipeWire reads it.
             let format = pod::enum_format_video();
+            log.record(
+                "connecting",
+                &format!(
+                    "PipeWire EnumFormat offer ({} bytes): {}",
+                    format.len(),
+                    hex_dump(&format)
+                ),
+            );
             let words = to_aligned_words(&format);
             let params: [*const c_void; 1] = [words.as_ptr() as *const c_void];
             let rc = unsafe {
@@ -1980,21 +1988,62 @@ unsafe extern "C" fn on_state_changed(
     }
 }
 
+/// Lowercase hex, for capture-log evidence dumps of pod bytes.
+fn hex_dump(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
 unsafe extern "C" fn on_param_changed(data: *mut c_void, id: u32, param: *const c_void) {
-    if data.is_null() || param.is_null() || id != pod::SPA_PARAM_FORMAT {
+    if data.is_null() {
         return;
     }
     let ctx = &mut *(data as *mut StreamCtx);
+    // Capture diagnostics: EVERY param change is logged while format
+    // negotiation is the open question — which ids arrive at all, and the
+    // raw bytes of any Format pod we cannot parse. (Earlier revisions
+    // bailed silently on both, which made "never negotiated" and
+    // "negotiated but unparseable" indistinguishable from the log.)
+    if param.is_null() {
+        ctx.log
+            .record("connecting", &format!("PipeWire param_changed id={id} (null pod)"));
+        return;
+    }
     // The pod's own `size` header bounds the read. Probe pods are often
     // ≥256B, but the SPA ABI lets a format pod be much smaller (and a
     // `SPA_TYPE_None` pod has no body at all); a fixed 256-byte slice
     // would read past the object in both cases.
     let header = std::slice::from_raw_parts(param as *const u8, 8);
     let Some(len) = pod::pod_total_len(header) else {
+        let raw = std::slice::from_raw_parts(param as *const u8, 64);
+        ctx.log.record(
+            "connecting",
+            &format!(
+                "PipeWire param_changed id={id}: unreadable pod header; first 64B: {}",
+                hex_dump(raw)
+            ),
+        );
         return;
     };
     let bytes = std::slice::from_raw_parts(param as *const u8, len);
+    if id != pod::SPA_PARAM_FORMAT {
+        ctx.log.record(
+            "connecting",
+            &format!("PipeWire param_changed id={id} ({len} bytes, not Format)"),
+        );
+        return;
+    }
     let Some(info) = pod::parse_video_info(bytes) else {
+        ctx.log.record(
+            "connecting",
+            &format!(
+                "PipeWire Format pod FAILED to parse ({len} bytes): {}",
+                hex_dump(&bytes[..bytes.len().min(768)])
+            ),
+        );
         return;
     };
     // Item 69d: no Format echo. A consumer does not accept a format by
@@ -2039,6 +2088,27 @@ unsafe extern "C" fn on_param_changed(data: *mut c_void, id: u32, param: *const 
             modifier
         ),
     );
+}
+
+/// `io_changed`: an IO area was assigned — negotiation evidence.
+unsafe extern "C" fn on_io_changed(data: *mut c_void, id: u32, _area: *mut c_void, _size: u32) {
+    if data.is_null() {
+        return;
+    }
+    let ctx = &mut *(data as *mut StreamCtx);
+    ctx.log
+        .record("connecting", &format!("PipeWire io_changed id={id}"));
+}
+
+/// `add_buffer`: the node allocated a buffer — negotiation evidence; the
+/// mapping itself happens lazily in `buffer_bytes`.
+unsafe extern "C" fn on_add_buffer(data: *mut c_void, _buffer: *mut c_void) {
+    if data.is_null() {
+        return;
+    }
+    let ctx = &mut *(data as *mut StreamCtx);
+    ctx.log
+        .record("connecting", "PipeWire add_buffer: node allocated a buffer");
 }
 
 /// `remove_buffer`: the node is done with a buffer, so unmap any memory we
