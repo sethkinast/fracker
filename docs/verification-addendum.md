@@ -643,3 +643,23 @@ it refines the brief where they disagree. For the next worker pass.
     rerun regression test (same node+type, completion
     observed before activation -> NOT struck) rides
     with the sibling test.
+66. **"Vanguard" relics (Seth, 2026-10-22 — QUEUED, not
+    this session).** Some relics display with the era
+    label "Vanguard", which does not exist. Seth's
+    taxonomy: the relic eras are Lith / Meso / Neo / Axi
+    (plus Requiem/Omnia tiers; Kuva relics exist but
+    carry no prime parts). Source found by Graf: the
+    baked relic-tables cache (data/cache/relictables.
+    json, WFCD-derived) names four relics "Vanguard C1 /
+    E1 / M1 / P1" — mixed pools of Caliban / Protea /
+    Ember / Mesa / Ash / Volt Prime parts, flagged
+    vaulted, no sources. They appear tied to The Perita
+    Rebellion activity drops (whose mission set includes
+    "Recall: Vanguard"). Impact beyond the label: era is
+    the relic name's first token, so "Vanguard" stock
+    can never match a fissure era or a crack plan, and
+    the names will never match OCR text from a real
+    inventory screen. Future session: establish the true
+    in-game names/eras for these four (DE drop tables /
+    Seth's inventory), then remap or drop the pseudo-era
+    where the cache is baked.
