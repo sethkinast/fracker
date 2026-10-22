@@ -575,3 +575,27 @@ it refines the brief where they disagree. For the next worker pass.
     scroll position and avoiding the reload flash. Small
     scope; Seth explicitly deferred it — do not build
     until released.
+63. **CAPTURE ROOT CAUSE FOUND (Graf, 2026-10-21, from
+    Seth's v0.5.4 log).** The token and symbol fixes both
+    verified live (token issued/redacted/persisted; no
+    symbol died). The connect then failed "target not
+    found" deterministically across all 20 retries —
+    killing the registration-race theory for good. The
+    defect is in src/screencast.rs: `PW_DIRECTION_INPUT`
+    is hand-defined as **1**, but PipeWire's headers say
+    SPA_DIRECTION_INPUT = **0** and OUTPUT = 1
+    (spa/utils/defs.h:95-96; pw_stream_connect takes
+    enum pw_direction, stream.h:547 — verified against
+    the upstream repo). Every capture since pass 9 has
+    connected an OUTPUT (producer) stream and asked the
+    session manager to link it INTO the portal's source
+    node, which has no input ports — "target not found",
+    instantly and forever. It survived every audit
+    because audits verified symbol NAMES and pod shapes;
+    an enum VALUE in our own source was tested by
+    nothing. Fix = the constant (1 -> 0), plus a full
+    audit of every hand-defined FFI enum/flag value in
+    the capture module against the real headers, and
+    correcting the pass-9 doc comment whose private-
+    remote theory rationalized the failure. Ships as
+    pass 20 (v0.5.6) right behind the WS hotfix.
