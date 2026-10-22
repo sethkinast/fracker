@@ -586,7 +586,8 @@ mod pod {
         }
     }
 
-    /// A bare `Id` pod (`size = 4`).
+    /// A bare `Id` pod (`size = 4`; `SPA_POD_INIT_Id` uses
+    /// `sizeof(uint32_t)` — `spa/include/spa/pod/builder.h:269`).
     pub fn id(value: u32) -> Vec<u8> {
         let mut o = Vec::new();
         header(&mut o, 4, SPA_TYPE_ID);
@@ -594,16 +595,20 @@ mod pod {
         o
     }
 
-    /// A `Rectangle` pod (`size = 16`).
+    /// A `Rectangle` pod (`size = 8`: `struct spa_rectangle` is two
+    /// `uint32_t`s — `spa/include/spa/pod/builder.h:370`,
+    /// `spa/include/spa/utils/defs.h:102-105`).
     pub fn rect(w: u32, h: u32) -> Vec<u8> {
         let mut o = Vec::new();
-        header(&mut o, 16, SPA_TYPE_RECTANGLE);
+        header(&mut o, 8, SPA_TYPE_RECTANGLE);
         o.extend_from_slice(&w.to_le_bytes());
         o.extend_from_slice(&h.to_le_bytes());
         o
     }
 
-    /// A `Fraction` pod (`size = 8`).
+    /// A `Fraction` pod (`size = 8`: `struct spa_fraction` is two
+    /// `uint32_t`s — `spa/include/spa/pod/builder.h:379`,
+    /// `spa/include/spa/utils/defs.h:119-123`).
     pub fn fraction(num: u32, den: u32) -> Vec<u8> {
         let mut o = Vec::new();
         header(&mut o, 8, SPA_TYPE_FRACTION);
@@ -1839,16 +1844,26 @@ mod tests {
         );
     }
 
+    /// Pod body sizes are the C struct sizes, not the aligned struct size:
+    /// Id = 4 (`SPA_POD_INIT_Id`, `spa/include/spa/pod/builder.h:269`),
+    /// Rectangle = 8 (`SPA_POD_INIT_Rectangle`, `builder.h:370`),
+    /// Fraction = 8 (`SPA_POD_INIT_Fraction`, `builder.h:379`), with
+    /// `struct spa_rectangle`/`spa_fraction` in `spa/utils/defs.h:102-123`.
     #[test]
-    fn pod_ids_and_rects_have_the_c_abi_layout() {
-        assert_eq!(pod::read_header(&pod::id(11)), Some((4, pod::SPA_TYPE_ID)));
-        assert_eq!(
-            pod::read_header(&pod::rect(1920, 1080)),
-            Some((16, pod::SPA_TYPE_RECTANGLE))
-        );
+    fn pod_bodies_have_the_c_abi_layout() {
+        let id = pod::id(11);
+        assert_eq!(pod::read_header(&id), Some((4, pod::SPA_TYPE_ID)));
+        assert_eq!(id.len(), 12, "header + u32 id");
+
         let r = pod::rect(2560, 1440);
+        assert_eq!(pod::read_header(&r), Some((8, pod::SPA_TYPE_RECTANGLE)));
+        assert_eq!(r.len(), 16, "header + struct spa_rectangle");
         assert_eq!(u32::from_le_bytes(r[8..12].try_into().unwrap()), 2560);
         assert_eq!(u32::from_le_bytes(r[12..16].try_into().unwrap()), 1440);
+
+        let f = pod::fraction(30, 1);
+        assert_eq!(pod::read_header(&f), Some((8, pod::SPA_TYPE_FRACTION)));
+        assert_eq!(f.len(), 16, "header + struct spa_fraction");
     }
 
     #[test]
