@@ -283,8 +283,9 @@ serve_port = 9123
         let paths = paths_fixture();
         let home = std::path::Path::new("/home/seth");
         let c = ee_log_candidates(home, &paths);
-        assert_eq!(c.len(), 3);
-        assert!(c[0].to_string_lossy().contains(".local/share/Steam"));
+        assert_eq!(c.len(), 4);
+        assert!(c[0].to_string_lossy().contains("Games/SteamLibrary"));
+        assert!(c[1].to_string_lossy().contains(".local/share/Steam"));
         assert!(c.iter().all(|p| p.to_string_lossy().ends_with("Warframe/EE.log")));
     }
 

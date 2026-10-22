@@ -531,6 +531,9 @@ mod pod {
     /// PipeWire to say "no value"; it must never be read as a format.
     pub const SPA_TYPE_NONE: u32 = 1;
     pub const SPA_TYPE_ID: u32 = 3;
+    /// `SPA_TYPE_Long` (zero-based enum: None=1, Bool=2, Id=3, Int=4,
+    /// Long=5 — `spa/include/spa/utils/type.h:35-39`).
+    pub const SPA_TYPE_LONG: u32 = 5;
     pub const SPA_TYPE_RECTANGLE: u32 = 10;
     pub const SPA_TYPE_FRACTION: u32 = 11;
     pub const SPA_TYPE_STRUCT: u32 = 14;
@@ -563,8 +566,20 @@ mod pod {
     /// Video format keys and the packed 4-byte formats we accept
     /// (`spa/include/spa/param/format.h:124-129`).
     pub const SPA_FORMAT_VIDEO_FORMAT: u32 = 0x20001;
+    /// `SPA_FORMAT_VIDEO_modifier` is a **Long** property, and the header
+    /// says to use it only with DMA-BUF (`format.h:126-127`; the enum
+    /// starts at `SPA_FORMAT_START_Video = 0x20000`, so format=0x20001,
+    /// modifier=0x20002). The 64-bit payloads are DRM format modifiers
+    /// (`include/uapi/drm/drm_fourcc.h`), not SPA enums.
+    pub const SPA_FORMAT_VIDEO_MODIFIER: u32 = 0x20002;
     pub const SPA_FORMAT_VIDEO_SIZE: u32 = 0x20003;
     pub const SPA_FORMAT_VIDEO_FRAMERATE: u32 = 0x20004;
+    /// `DRM_FORMAT_MOD_LINEAR` = `fourcc_mod_code(NONE, 0)` = 0
+    /// (`include/uapi/drm/drm_fourcc.h:554`) and
+    /// `DRM_FORMAT_MOD_INVALID` = `fourcc_mod_code(NONE, (1ULL<<56)-1)`
+    /// (`drm_fourcc.h:493,544`) = 0x00ff_ffff_ffff_ffff.
+    pub const DRM_FORMAT_MOD_LINEAR: u64 = 0;
+    pub const DRM_FORMAT_MOD_INVALID: u64 = (1u64 << 56) - 1;
     /// `enum spa_video_format` is zero-based from
     /// `SPA_VIDEO_FORMAT_UNKNOWN = 0`
     /// (`spa/include/spa/param/video/raw.h:36-50`): RGBx=7, BGRx=8,
@@ -592,6 +607,18 @@ mod pod {
         let mut o = Vec::new();
         header(&mut o, 4, SPA_TYPE_ID);
         o.extend_from_slice(&value.to_le_bytes());
+        o
+    }
+
+    /// A bare `Long` pod (`size = 8`: `struct spa_pod_long` wraps an
+    /// `int64_t` — `spa/include/spa/pod/pod.h:73-76`; `SPA_POD_INIT_Long`,
+    /// `spa/include/spa/pod/builder.h:285`). SPA carries DMA-BUF modifiers
+    /// as Long values (`format.h:126-127`), so their 64 bits are written
+    /// verbatim.
+    pub fn long(value: u64) -> Vec<u8> {
+        let mut o = Vec::new();
+        header(&mut o, 8, SPA_TYPE_LONG);
+        o.extend_from_slice(&(value as i64).to_le_bytes());
         o
     }
 
@@ -670,7 +697,15 @@ mod pod {
     }
 
     /// The single `EnumFormat` param we offer: raw video, one of the
-    /// packed 4-byte formats, any size in `[1x1 .. 8192x8192]`, 30 fps.
+    /// packed 4-byte formats, any size in `[1x1 .. 8192x8192]`, 30 fps,
+    /// and the DRM modifiers we can accept.
+    ///
+    /// **Addendum #65b.** The modifier property was absent, so KWin's
+    /// screencast node (KPipeWire) had no modifier to intersect for its
+    /// DMA-BUF format. It is a `Choice(Enum(Long))` — default first, as
+    /// `spa_pod_builder` emits for an Enum choice — carrying
+    /// `DRM_FORMAT_MOD_LINEAR` (mappable) and the modifier-less sentinel
+    /// `DRM_FORMAT_MOD_INVALID` last.
     pub fn enum_format_video() -> Vec<u8> {
         let formats = choice(
             SPA_CHOICE_ENUM,
@@ -685,6 +720,10 @@ mod pod {
             SPA_CHOICE_RANGE,
             &[rect(1920, 1080), rect(1, 1), rect(8192, 8192)],
         );
+        let modifiers = choice(
+            SPA_CHOICE_ENUM,
+            &[long(DRM_FORMAT_MOD_LINEAR), long(DRM_FORMAT_MOD_INVALID)],
+        );
         object(
             SPA_TYPE_OBJECT_FORMAT,
             SPA_PARAM_ENUM_FORMAT,
@@ -692,10 +731,45 @@ mod pod {
                 prop(SPA_FORMAT_MEDIA_TYPE, id(SPA_MEDIA_TYPE_VIDEO)),
                 prop(SPA_FORMAT_MEDIA_SUBTYPE, id(SPA_MEDIA_SUBTYPE_RAW)),
                 prop(SPA_FORMAT_VIDEO_FORMAT, formats),
+                prop(SPA_FORMAT_VIDEO_MODIFIER, modifiers),
                 prop(SPA_FORMAT_VIDEO_SIZE, sizes),
                 prop(SPA_FORMAT_VIDEO_FRAMERATE, fraction(30, 1)),
             ],
         )
+    }
+
+    /// The fixed `Format` param confirmed back to PipeWire after the node
+    /// proposes one in `param_changed` (addendum #65a). A consumer
+    /// completes negotiation with `pw_stream_update_params`; this pod
+    /// carries the values the node actually chose, not our offer.
+    pub fn format_video(info: &VideoInfo) -> Vec<u8> {
+        let (num, denom) = if info.framerate_denom == 0 {
+            (0, 1)
+        } else {
+            (info.framerate_num, info.framerate_denom)
+        };
+        let mut props = vec![
+            prop(SPA_FORMAT_MEDIA_TYPE, id(SPA_MEDIA_TYPE_VIDEO)),
+            prop(SPA_FORMAT_MEDIA_SUBTYPE, id(SPA_MEDIA_SUBTYPE_RAW)),
+            prop(SPA_FORMAT_VIDEO_FORMAT, id(info.format)),
+            prop(SPA_FORMAT_VIDEO_SIZE, rect(info.width, info.height)),
+            prop(SPA_FORMAT_VIDEO_FRAMERATE, fraction(num, denom)),
+        ];
+        if let Some(modifier) = info.modifier {
+            props.push(prop(SPA_FORMAT_VIDEO_MODIFIER, long(modifier)));
+        }
+        object(SPA_TYPE_OBJECT_FORMAT, SPA_PARAM_FORMAT, &props)
+    }
+
+    /// A negotiated video format, parsed from the node's `Format` pod.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct VideoInfo {
+        pub format: u32,
+        pub width: u32,
+        pub height: u32,
+        pub framerate_num: u32,
+        pub framerate_denom: u32,
+        pub modifier: Option<u64>,
     }
 
     /// Read a pod header: `(size, type)`.
@@ -722,11 +796,26 @@ mod pod {
         (size as usize).checked_add(8)
     }
 
-    /// Find `SPA_FORMAT_VIDEO_format` in a negotiated `Format` object pod
-    /// (delivered to `param_changed`). Best-effort: `None` on anything we
-    /// do not recognise, so a malformed pod degrades to the BGRA default
-    /// rather than a panic.
-    pub fn parse_video_format(bytes: &[u8]) -> Option<u32> {
+    /// One `spa_pod_prop` inside an object: `(key, value_type,
+    /// value_pod_offset, next_prop_offset)`. `spa_pod_prop` is `key`,
+    /// `flags`, then the value pod inline (`spa/include/spa/pod/pod.h:115-130`).
+    fn prop_at(bytes: &[u8], off: usize) -> Option<(u32, u32, usize, usize)> {
+        if off + 16 > bytes.len() {
+            return None;
+        }
+        let key = u32::from_le_bytes(bytes[off..off + 4].try_into().ok()?);
+        let value_off = off + 8;
+        let (vsize, vtype) = read_header(&bytes[value_off..])?;
+        let value_len = 8usize.checked_add(vsize as usize)?;
+        if value_off + value_len > bytes.len() {
+            return None;
+        }
+        let next = off + 8 + (value_len + 7) / 8 * 8;
+        Some((key, vtype, value_off, next))
+    }
+
+    /// Find an object property by key: `(value_type, value_pod_offset)`.
+    pub fn find_prop(bytes: &[u8], key: u32) -> Option<(u32, usize)> {
         let (_size, ty) = read_header(bytes)?;
         if ty != SPA_TYPE_OBJECT {
             return None;
@@ -734,23 +823,101 @@ mod pod {
         // Skip the object body (type + id).
         let mut off = 16usize;
         while off + 16 <= bytes.len() {
-            let key = u32::from_le_bytes(bytes[off..off + 4].try_into().ok()?);
-            let value_off = off + 8;
-            let (vsize, vtype) = read_header(&bytes[value_off..])?;
-            let value_len = 8usize.checked_add(vsize as usize)?;
-            if key == SPA_FORMAT_VIDEO_FORMAT && vtype == SPA_TYPE_ID {
-                // An Id body is 4 bytes; reject a truncated pod instead
-                // of reading past the slice the caller bounded.
-                if value_len < 12 || value_off + 12 > bytes.len() {
-                    return None;
-                }
-                return Some(u32::from_le_bytes(
-                    bytes[value_off + 8..value_off + 12].try_into().ok()?,
-                ));
+            let (k, vtype, value_off, next) = prop_at(bytes, off)?;
+            if k == key {
+                return Some((vtype, value_off));
             }
-            off = value_off + (value_len + 7) / 8 * 8;
+            off = next;
         }
         None
+    }
+
+    /// Parse the fixed video `Format` object delivered to `param_changed`.
+    /// Best-effort: `None` on anything we do not recognise, so a malformed
+    /// pod does not confirm a bogus format or panic in the callback.
+    pub fn parse_video_info(bytes: &[u8]) -> Option<VideoInfo> {
+        let (_size, ty) = read_header(bytes)?;
+        if ty != SPA_TYPE_OBJECT {
+            return None;
+        }
+        let mut info = VideoInfo::default();
+        let mut off = 16usize;
+        while off + 16 <= bytes.len() {
+            let (key, vtype, value_off, next) = prop_at(bytes, off)?;
+            let body = value_off + 8;
+            match key {
+                SPA_FORMAT_VIDEO_FORMAT if vtype == SPA_TYPE_ID && body + 4 <= bytes.len() => {
+                    info.format = u32::from_le_bytes(bytes[body..body + 4].try_into().ok()?);
+                }
+                SPA_FORMAT_VIDEO_SIZE if vtype == SPA_TYPE_RECTANGLE && body + 8 <= bytes.len() => {
+                    info.width = u32::from_le_bytes(bytes[body..body + 4].try_into().ok()?);
+                    info.height = u32::from_le_bytes(bytes[body + 4..body + 8].try_into().ok()?);
+                }
+                SPA_FORMAT_VIDEO_FRAMERATE
+                    if vtype == SPA_TYPE_FRACTION && body + 8 <= bytes.len() =>
+                {
+                    info.framerate_num = u32::from_le_bytes(bytes[body..body + 4].try_into().ok()?);
+                    info.framerate_denom =
+                        u32::from_le_bytes(bytes[body + 4..body + 8].try_into().ok()?);
+                }
+                SPA_FORMAT_VIDEO_MODIFIER if vtype == SPA_TYPE_LONG && body + 8 <= bytes.len() => {
+                    info.modifier =
+                        Some(u64::from_le_bytes(bytes[body..body + 8].try_into().ok()?));
+                }
+                _ => {}
+            }
+            off = next;
+        }
+        // Unknown (0) is not a negotiated format; size 0 cannot be
+        // confirmed back.
+        if info.format == 0 || info.width == 0 || info.height == 0 {
+            return None;
+        }
+        Some(info)
+    }
+
+    /// Find `SPA_FORMAT_VIDEO_format` in a negotiated `Format` object pod
+    /// (delivered to `param_changed`). Narrow accessor used by frame
+    /// conversion; `parse_video_info` is the full negotiation view.
+    pub fn parse_video_format(bytes: &[u8]) -> Option<u32> {
+        let (_size, ty) = read_header(bytes)?;
+        if ty != SPA_TYPE_OBJECT {
+            return None;
+        }
+        let (vtype, value_off) = find_prop(bytes, SPA_FORMAT_VIDEO_FORMAT)?;
+        if vtype != SPA_TYPE_ID {
+            return None;
+        }
+        let body = value_off + 8;
+        if body + 4 > bytes.len() {
+            return None;
+        }
+        Some(u32::from_le_bytes(bytes[body..body + 4].try_into().ok()?))
+    }
+
+    /// DRM fourcc for the packed formats we accept, for the negotiated-
+    /// format log line. KWin maps `SPA_VIDEO_FORMAT_BGRA` to
+    /// `DRM_FORMAT_ARGB8888` ("AR24") and so on (KWin
+    /// `src/plugins/screencast/screencaststream.cpp`, supportedFormats).
+    pub fn fourcc(format: u32) -> &'static str {
+        match format {
+            SPA_VIDEO_FORMAT_BGRA => "AR24",
+            SPA_VIDEO_FORMAT_BGRX => "XR24",
+            SPA_VIDEO_FORMAT_RGBA => "AB24",
+            SPA_VIDEO_FORMAT_RGBX => "XB24",
+            _ => "????",
+        }
+    }
+
+    /// Human name for the formats we accept (log evidence).
+    pub fn format_name(format: u32) -> &'static str {
+        match format {
+            SPA_VIDEO_FORMAT_BGRA => "BGRA",
+            SPA_VIDEO_FORMAT_BGRX => "BGRX",
+            SPA_VIDEO_FORMAT_RGBA => "RGBA",
+            SPA_VIDEO_FORMAT_RGBX => "RGBX",
+            _ => "unknown",
+        }
     }
 }
 
@@ -861,6 +1028,7 @@ pub const REQUIRED_SYMBOLS: &[&str] = &[
     "pw_stream_new",            // stream.h
     "pw_stream_add_listener",   // stream.h
     "pw_stream_connect",        // stream.h
+    "pw_stream_update_params",  // stream.h (confirm the negotiated format)
     "pw_stream_disconnect",     // stream.h
     "pw_stream_destroy",        // stream.h
     "pw_stream_dequeue_buffer", // stream.h
@@ -890,6 +1058,9 @@ struct PwApi {
         unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_void, *mut c_void),
     pw_stream_connect:
         unsafe extern "C" fn(*mut c_void, c_int, u32, u32, *const *const c_void, u32) -> c_int,
+    /// `stream.h`: complete format negotiation by confirming the chosen
+    /// param (and, for a consumer, the buffer params) back to PipeWire.
+    pw_stream_update_params: unsafe extern "C" fn(*mut c_void, *const *const c_void, u32) -> c_int,
     pw_stream_disconnect: unsafe extern "C" fn(*mut c_void) -> c_int,
     pw_stream_destroy: unsafe extern "C" fn(*mut c_void),
     pw_stream_dequeue_buffer: unsafe extern "C" fn(*mut c_void) -> *mut c_void,
@@ -1004,6 +1175,10 @@ impl PwApi {
             pw_stream_connect: sym!(
                 "pw_stream_connect",
                 unsafe extern "C" fn(*mut c_void, c_int, u32, u32, *const *const c_void, u32) -> c_int
+            ),
+            pw_stream_update_params: sym!(
+                "pw_stream_update_params",
+                unsafe extern "C" fn(*mut c_void, *const *const c_void, u32) -> c_int
             ),
             pw_stream_disconnect: sym!(
                 "pw_stream_disconnect",
@@ -1549,9 +1724,59 @@ unsafe extern "C" fn on_param_changed(data: *mut c_void, id: u32, param: *const 
         return;
     };
     let bytes = std::slice::from_raw_parts(param as *const u8, len);
-    if let Some(fmt) = pod::parse_video_format(bytes) {
-        ctx.format.store(fmt, Ordering::Relaxed);
+    let Some(info) = pod::parse_video_info(bytes) else {
+        return;
+    };
+    ctx.format.store(info.format, Ordering::Relaxed);
+
+    // Addendum #65a: a consumer never confirmed the chosen format, so the
+    // node sat in "no more input formats". Confirm the exact negotiated
+    // values back with a fixed Format pod; PipeWire reads it during the
+    // callback and the pod stays alive for the call.
+    let confirm = pod::format_video(&info);
+    let words = to_aligned_words(&confirm);
+    let params: [*const c_void; 1] = [words.as_ptr() as *const c_void];
+    let rc = (ctx.api.pw_stream_update_params)(ctx.stream, params.as_ptr(), 1);
+    if rc < 0 {
+        ctx.log.record(
+            "connecting",
+            &format!("PipeWire: pw_stream_update_params(Format) failed ({rc})"),
+        );
+        return;
     }
+
+    // Addendum #65: the negotiated size is also the practical evidence
+    // that the restored portal source is the expected window (a 2560x1440
+    // game surface, not the desktop monitor). Fourcc makes it comparable
+    // with KWin/KPipeWire logs.
+    let (num, denom) = if info.framerate_denom == 0 {
+        (0, 1)
+    } else {
+        (info.framerate_num, info.framerate_denom)
+    };
+    let modifier = match info.modifier {
+        Some(m) if m == pod::DRM_FORMAT_MOD_LINEAR => ", modifier linear (0x0)".to_owned(),
+        Some(m) if m == pod::DRM_FORMAT_MOD_INVALID => {
+            format!(", modifier invalid (0x{m:016x})")
+        }
+        Some(m) => format!(", modifier 0x{m:016x}"),
+        None => ", no modifier".to_owned(),
+    };
+    ctx.log.record(
+        "connecting",
+        &format!(
+            "PipeWire negotiated format: {} (fourcc {}, spa {:#x}) {}x{} @ {}/{} fps{}; \
+             confirmed via pw_stream_update_params",
+            pod::format_name(info.format),
+            pod::fourcc(info.format),
+            info.format,
+            info.width,
+            info.height,
+            num,
+            denom,
+            modifier
+        ),
+    );
 }
 
 unsafe extern "C" fn on_process(data: *mut c_void) {
@@ -1686,6 +1911,12 @@ mod tests {
                 "spa/include/spa/utils/type.h:37",
             ),
             (
+                "SPA_TYPE_LONG",
+                pod::SPA_TYPE_LONG,
+                5,
+                "spa/include/spa/utils/type.h:35-39",
+            ),
+            (
                 "SPA_TYPE_RECTANGLE",
                 pod::SPA_TYPE_RECTANGLE,
                 10,
@@ -1776,6 +2007,12 @@ mod tests {
                 "spa/include/spa/param/format.h:124-125",
             ),
             (
+                "SPA_FORMAT_VIDEO_MODIFIER",
+                pod::SPA_FORMAT_VIDEO_MODIFIER,
+                0x20002,
+                "spa/include/spa/param/format.h:124,126-127",
+            ),
+            (
                 "SPA_FORMAT_VIDEO_SIZE",
                 pod::SPA_FORMAT_VIDEO_SIZE,
                 0x20003,
@@ -1818,6 +2055,17 @@ mod tests {
         assert_eq!(
             PW_STREAM_STATE_ERROR, -1,
             "PW_STREAM_STATE_ERROR must match src/pipewire/stream.h:247"
+        );
+        // DMA-BUF modifiers are 64-bit DRM tokens carried as SPA Long.
+        // `DRM_FORMAT_MOD_LINEAR` = fourcc_mod_code(NONE, 0) = 0
+        // (`include/uapi/drm/drm_fourcc.h:554`);
+        // `DRM_FORMAT_MOD_INVALID` = fourcc_mod_code(NONE, (1ULL<<56)-1)
+        // (`drm_fourcc.h:493,544`).
+        assert_eq!(pod::DRM_FORMAT_MOD_LINEAR, 0, "drm_fourcc.h:554");
+        assert_eq!(
+            pod::DRM_FORMAT_MOD_INVALID,
+            0x00ff_ffff_ffff_ffff,
+            "drm_fourcc.h:493,544"
         );
 
         // Portal (D-Bus) values — hand-defined here too, and part of the
@@ -1892,6 +2140,69 @@ mod tests {
             u32::from_le_bytes(p[12..16].try_into().unwrap()),
             pod::SPA_PARAM_ENUM_FORMAT
         );
+        // Addendum #65b: the offer carries the modifier property as a
+        // Choice(Enum(Long)) with LINEAR first and INVALID last.
+        let (vtype, voff) = pod::find_prop(&p, pod::SPA_FORMAT_VIDEO_MODIFIER)
+            .expect("EnumFormat must advertise SPA_FORMAT_VIDEO_modifier");
+        assert_eq!(vtype, pod::SPA_TYPE_CHOICE);
+        assert_eq!(
+            u32::from_le_bytes(p[voff + 8..voff + 12].try_into().unwrap()),
+            pod::SPA_CHOICE_ENUM,
+            "the modifier list is an Enum choice"
+        );
+        assert_eq!(
+            pod::read_header(&p[voff + 16..]).unwrap().1,
+            pod::SPA_TYPE_STRUCT,
+            "choice children live in a Struct"
+        );
+        assert_eq!(
+            pod::read_header(&p[voff + 24..]).unwrap(),
+            (8, pod::SPA_TYPE_LONG),
+            "DRM modifiers are Long pods"
+        );
+        assert_eq!(
+            u64::from_le_bytes(p[voff + 32..voff + 40].try_into().unwrap()),
+            pod::DRM_FORMAT_MOD_LINEAR
+        );
+        assert_eq!(
+            u64::from_le_bytes(p[voff + 48..voff + 56].try_into().unwrap()),
+            pod::DRM_FORMAT_MOD_INVALID
+        );
+    }
+
+    /// Addendum #65a: the confirmation pod is built from the negotiated
+    /// values and must round-trip through the same parser used on the
+    /// node's Format pod (fourcc, size, framerate and modifier).
+    #[test]
+    fn confirmed_format_pod_round_trips_the_negotiated_values() {
+        let info = pod::VideoInfo {
+            format: pod::SPA_VIDEO_FORMAT_BGRA,
+            width: 2560,
+            height: 1440,
+            framerate_num: 60,
+            framerate_denom: 1,
+            modifier: Some(pod::DRM_FORMAT_MOD_LINEAR),
+        };
+        let pod_bytes = pod::format_video(&info);
+        assert_eq!(pod::parse_video_info(&pod_bytes), Some(info));
+        assert_eq!(
+            pod::find_prop(&pod_bytes, pod::SPA_FORMAT_VIDEO_MODIFIER)
+                .expect("negotiated modifier must be confirmed")
+                .0,
+            pod::SPA_TYPE_LONG
+        );
+        assert_eq!(pod::fourcc(info.format), "AR24");
+        assert_eq!(pod::format_name(info.format), "BGRA");
+
+        // A modifier-less format confirms without the property (the
+        // header says to omit it for non-DMA-BUF buffers).
+        let no_modifier = pod::VideoInfo {
+            modifier: None,
+            ..info
+        };
+        let plain = pod::format_video(&no_modifier);
+        assert!(pod::find_prop(&plain, pod::SPA_FORMAT_VIDEO_MODIFIER).is_none());
+        assert_eq!(pod::parse_video_info(&plain), Some(no_modifier));
     }
 
     #[test]
