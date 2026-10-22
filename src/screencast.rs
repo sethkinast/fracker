@@ -525,7 +525,8 @@ pub fn save_restore_token(data_dir: &Path, token: &str) -> Result<(), String> {
 /// `static inline` in the C headers and therefore absent from the shared
 /// library, so we lay the bytes out ourselves.
 mod pod {
-    // SPA pod types (spa/utils/type.h).
+    // SPA pod types (`spa/include/spa/utils/type.h:34-53`; the enum is
+    // zero-based from `SPA_TYPE_START = 0`, so `SPA_TYPE_None` is 1).
     /// `SPA_TYPE_None`: a valid pod with no body (`size = 0`). Used by
     /// PipeWire to say "no value"; it must never be read as a format.
     pub const SPA_TYPE_NONE: u32 = 1;
@@ -535,31 +536,44 @@ mod pod {
     pub const SPA_TYPE_STRUCT: u32 = 14;
     pub const SPA_TYPE_OBJECT: u32 = 15;
     pub const SPA_TYPE_CHOICE: u32 = 19;
-    // Choice kinds.
-    pub const SPA_CHOICE_ENUM: u32 = 1;
-    pub const SPA_CHOICE_RANGE: u32 = 2;
+    // Choice kinds (`spa/include/spa/pod/pod.h:132-137`: None=0,
+    // Range=1, Step=2, Enum=3, Flags=4).
+    pub const SPA_CHOICE_ENUM: u32 = 3;
+    pub const SPA_CHOICE_RANGE: u32 = 1;
 
-    /// The `Format` object type (`SPA_TYPE_OBJECT_Format`).
+    /// The `Format` object type (`SPA_TYPE_OBJECT_Format`), the third
+    /// object after `SPA_TYPE_OBJECT_START = 0x40000`
+    /// (`spa/include/spa/utils/type.h:77-80`).
     pub const SPA_TYPE_OBJECT_FORMAT: u32 = 0x40003;
-    /// `SPA_PARAM_EnumFormat`.
+    /// `SPA_PARAM_EnumFormat` (`spa/include/spa/param/param.h:24-28`;
+    /// `SPA_PARAM_Invalid` is 0).
     pub const SPA_PARAM_ENUM_FORMAT: u32 = 3;
-    /// `SPA_PARAM_Format` (the negotiated one, delivered to `param_changed`).
+    /// `SPA_PARAM_Format` (the negotiated one, delivered to `param_changed`;
+    /// `spa/include/spa/param/param.h:29`).
     pub const SPA_PARAM_FORMAT: u32 = 4;
 
-    /// Format property keys (`spa/param/format.h`).
+    /// Format property keys (`spa/include/spa/param/format.h:91-95`).
     pub const SPA_FORMAT_MEDIA_TYPE: u32 = 1;
     pub const SPA_FORMAT_MEDIA_SUBTYPE: u32 = 2;
+    /// `SPA_MEDIA_TYPE_video` and `SPA_MEDIA_SUBTYPE_raw`
+    /// (`spa/include/spa/param/format.h:20-33`; both enums are zero-based).
     pub const SPA_MEDIA_TYPE_VIDEO: u32 = 2;
     pub const SPA_MEDIA_SUBTYPE_RAW: u32 = 1;
 
-    /// Video format keys and the packed 4-byte formats we accept.
+    /// Video format keys and the packed 4-byte formats we accept
+    /// (`spa/include/spa/param/format.h:124-129`).
     pub const SPA_FORMAT_VIDEO_FORMAT: u32 = 0x20001;
     pub const SPA_FORMAT_VIDEO_SIZE: u32 = 0x20003;
     pub const SPA_FORMAT_VIDEO_FRAMERATE: u32 = 0x20004;
-    pub const SPA_VIDEO_FORMAT_RGBX: u32 = 6;
-    pub const SPA_VIDEO_FORMAT_BGRX: u32 = 7;
-    pub const SPA_VIDEO_FORMAT_RGBA: u32 = 10;
-    pub const SPA_VIDEO_FORMAT_BGRA: u32 = 11;
+    /// `enum spa_video_format` is zero-based from
+    /// `SPA_VIDEO_FORMAT_UNKNOWN = 0`
+    /// (`spa/include/spa/param/video/raw.h:36-50`): RGBx=7, BGRx=8,
+    /// RGBA=11, BGRA=12. The previous 6/7/10/11 values were off by one
+    /// (they named AYUV/RGBx/xBGR/RGBA upstream).
+    pub const SPA_VIDEO_FORMAT_RGBX: u32 = 7;
+    pub const SPA_VIDEO_FORMAT_BGRX: u32 = 8;
+    pub const SPA_VIDEO_FORMAT_RGBA: u32 = 11;
+    pub const SPA_VIDEO_FORMAT_BGRA: u32 = 12;
 
     fn header(out: &mut Vec<u8>, size: u32, ty: u32) {
         out.extend_from_slice(&size.to_le_bytes());
@@ -1624,6 +1638,206 @@ fn to_aligned_words(bytes: &[u8]) -> Vec<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every hand-defined numeric in the capture FFI surface, pinned to the
+    /// value in the upstream header named beside it (pass 20 §2).
+    ///
+    /// The pass-9/19 audits checked symbol names and pod shapes; enum and
+    /// flag *values* were checked by nothing, which is how the direction
+    /// constant survived. This test exists so a value can never drift
+    /// silently again — update it only with a header citation.
+    #[test]
+    fn hand_defined_ffi_values_match_upstream_headers() {
+        // (name, our value, header value, header citation)
+        let values: &[(&str, u32, u32, &str)] = &[
+            (
+                "PW_DIRECTION_INPUT",
+                PW_DIRECTION_INPUT as u32,
+                0,
+                "SPA_DIRECTION_INPUT, spa/include/spa/utils/defs.h:95 (port.h:43)",
+            ),
+            (
+                "PW_ID_ANY",
+                PW_ID_ANY,
+                0xffff_ffff,
+                "src/pipewire/core.h:60",
+            ),
+            (
+                "PW_STREAM_FLAGS",
+                PW_STREAM_FLAGS,
+                (1 << 0) | (1 << 2) | (1 << 7),
+                "AUTOCONNECT|MAP_BUFFERS|DONT_RECONNECT, src/pipewire/stream.h:465,470,479",
+            ),
+            (
+                "SPA_TYPE_NONE",
+                pod::SPA_TYPE_NONE,
+                1,
+                "spa/include/spa/utils/type.h:34-35",
+            ),
+            (
+                "SPA_TYPE_ID",
+                pod::SPA_TYPE_ID,
+                3,
+                "spa/include/spa/utils/type.h:37",
+            ),
+            (
+                "SPA_TYPE_RECTANGLE",
+                pod::SPA_TYPE_RECTANGLE,
+                10,
+                "spa/include/spa/utils/type.h:44",
+            ),
+            (
+                "SPA_TYPE_FRACTION",
+                pod::SPA_TYPE_FRACTION,
+                11,
+                "spa/include/spa/utils/type.h:45",
+            ),
+            (
+                "SPA_TYPE_STRUCT",
+                pod::SPA_TYPE_STRUCT,
+                14,
+                "spa/include/spa/utils/type.h:48",
+            ),
+            (
+                "SPA_TYPE_OBJECT",
+                pod::SPA_TYPE_OBJECT,
+                15,
+                "spa/include/spa/utils/type.h:49",
+            ),
+            (
+                "SPA_TYPE_CHOICE",
+                pod::SPA_TYPE_CHOICE,
+                19,
+                "spa/include/spa/utils/type.h:53",
+            ),
+            (
+                "SPA_TYPE_OBJECT_FORMAT",
+                pod::SPA_TYPE_OBJECT_FORMAT,
+                0x40003,
+                "spa/include/spa/utils/type.h:77-80",
+            ),
+            (
+                "SPA_CHOICE_RANGE",
+                pod::SPA_CHOICE_RANGE,
+                1,
+                "spa/include/spa/pod/pod.h:132-137",
+            ),
+            (
+                "SPA_CHOICE_ENUM",
+                pod::SPA_CHOICE_ENUM,
+                3,
+                "spa/include/spa/pod/pod.h:132-137",
+            ),
+            (
+                "SPA_PARAM_ENUM_FORMAT",
+                pod::SPA_PARAM_ENUM_FORMAT,
+                3,
+                "spa/include/spa/param/param.h:24-28",
+            ),
+            (
+                "SPA_PARAM_FORMAT",
+                pod::SPA_PARAM_FORMAT,
+                4,
+                "spa/include/spa/param/param.h:29",
+            ),
+            (
+                "SPA_FORMAT_MEDIA_TYPE",
+                pod::SPA_FORMAT_MEDIA_TYPE,
+                1,
+                "spa/include/spa/param/format.h:91-94",
+            ),
+            (
+                "SPA_FORMAT_MEDIA_SUBTYPE",
+                pod::SPA_FORMAT_MEDIA_SUBTYPE,
+                2,
+                "spa/include/spa/param/format.h:92-95",
+            ),
+            (
+                "SPA_MEDIA_TYPE_VIDEO",
+                pod::SPA_MEDIA_TYPE_VIDEO,
+                2,
+                "spa/include/spa/param/format.h:20-23",
+            ),
+            (
+                "SPA_MEDIA_SUBTYPE_RAW",
+                pod::SPA_MEDIA_SUBTYPE_RAW,
+                1,
+                "spa/include/spa/param/format.h:31-33",
+            ),
+            (
+                "SPA_FORMAT_VIDEO_FORMAT",
+                pod::SPA_FORMAT_VIDEO_FORMAT,
+                0x20001,
+                "spa/include/spa/param/format.h:124-125",
+            ),
+            (
+                "SPA_FORMAT_VIDEO_SIZE",
+                pod::SPA_FORMAT_VIDEO_SIZE,
+                0x20003,
+                "spa/include/spa/param/format.h:124,128",
+            ),
+            (
+                "SPA_FORMAT_VIDEO_FRAMERATE",
+                pod::SPA_FORMAT_VIDEO_FRAMERATE,
+                0x20004,
+                "spa/include/spa/param/format.h:124,129",
+            ),
+            (
+                "SPA_VIDEO_FORMAT_RGBX",
+                pod::SPA_VIDEO_FORMAT_RGBX,
+                7,
+                "SPA_VIDEO_FORMAT_RGBx, spa/include/spa/param/video/raw.h:36-45",
+            ),
+            (
+                "SPA_VIDEO_FORMAT_BGRX",
+                pod::SPA_VIDEO_FORMAT_BGRX,
+                8,
+                "SPA_VIDEO_FORMAT_BGRx, spa/include/spa/param/video/raw.h:36-46",
+            ),
+            (
+                "SPA_VIDEO_FORMAT_RGBA",
+                pod::SPA_VIDEO_FORMAT_RGBA,
+                11,
+                "spa/include/spa/param/video/raw.h:36-49",
+            ),
+            (
+                "SPA_VIDEO_FORMAT_BGRA",
+                pod::SPA_VIDEO_FORMAT_BGRA,
+                12,
+                "spa/include/spa/param/video/raw.h:36-50",
+            ),
+        ];
+        for &(name, ours, header, citation) in values {
+            assert_eq!(ours, header, "{name} must match {citation}");
+        }
+        assert_eq!(
+            PW_STREAM_STATE_ERROR, -1,
+            "PW_STREAM_STATE_ERROR must match src/pipewire/stream.h:247"
+        );
+
+        // Portal (D-Bus) values — hand-defined here too, and part of the
+        // same capture surface.
+        assert_eq!(
+            RESPONSE_SUCCESS, 0,
+            "Request::Response 0 = success (org.freedesktop.portal.Request.xml:68)"
+        );
+        assert_eq!(
+            SOURCE_TYPE_MONITOR, 1,
+            "AvailableSourceTypes 1 = MONITOR (ScreenCast.xml:337)"
+        );
+        assert_eq!(
+            SOURCE_TYPE_WINDOW, 2,
+            "AvailableSourceTypes 2 = WINDOW (ScreenCast.xml:338)"
+        );
+        assert_eq!(
+            CURSOR_HIDDEN, 1,
+            "AvailableCursorModes 1 = Hidden (ScreenCast.xml:349)"
+        );
+        assert_eq!(
+            PERSIST_INDEFINITELY, 2,
+            "persist_mode 2 = persist until revoked (ScreenCast.xml:174)"
+        );
+    }
 
     #[test]
     fn pod_ids_and_rects_have_the_c_abi_layout() {
