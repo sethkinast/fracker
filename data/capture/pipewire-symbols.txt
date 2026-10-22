@@ -22,6 +22,10 @@
 # the consumer drops the registry and retries pw_stream_connect on
 # target-not-found instead. The library's exported symbol table, not the
 # header, is the ground truth for this list.
+#
+# NOTE (item 69d): pw_stream_update_params is absent. The pass-21 Format
+# echo was not the canonical accept flow and was removed; this consumer
+# maps buffers and sends no buffer params.
 pw_init
 pw_thread_loop_new
 pw_thread_loop_start
@@ -31,10 +35,10 @@ pw_thread_loop_get_loop
 pw_context_new
 pw_context_destroy
 pw_context_connect_fd
+pw_properties_new_string
 pw_stream_new
 pw_stream_add_listener
 pw_stream_connect
-pw_stream_update_params
 pw_stream_disconnect
 pw_stream_destroy
 pw_stream_dequeue_buffer

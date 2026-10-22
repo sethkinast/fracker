@@ -36,8 +36,8 @@ use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -897,6 +897,12 @@ mod pod {
                 long(DRM_FORMAT_MOD_INVALID),
             ],
         );
+        // Item 69e: a range from 0/1 (any rate), not the pinned 30/1
+        // fraction this used to be — KWin may offer a variable rate.
+        let framerates = choice(
+            SPA_CHOICE_RANGE,
+            &[fraction(30, 1), fraction(0, 1), fraction(1000, 1)],
+        );
         object(
             SPA_TYPE_OBJECT_FORMAT,
             SPA_PARAM_ENUM_FORMAT,
@@ -906,35 +912,14 @@ mod pod {
                 prop(SPA_FORMAT_VIDEO_FORMAT, formats),
                 prop(SPA_FORMAT_VIDEO_MODIFIER, modifiers),
                 prop(SPA_FORMAT_VIDEO_SIZE, sizes),
-                prop(SPA_FORMAT_VIDEO_FRAMERATE, fraction(30, 1)),
+                prop(SPA_FORMAT_VIDEO_FRAMERATE, framerates),
             ],
         )
     }
 
-    /// The fixed `Format` param confirmed back to PipeWire after the node
-    /// proposes one in `param_changed` (addendum #65a). A consumer
-    /// completes negotiation with `pw_stream_update_params`; this pod
-    /// carries the values the node actually chose, not our offer.
-    pub fn format_video(info: &VideoInfo) -> Vec<u8> {
-        let (num, denom) = if info.framerate_denom == 0 {
-            (0, 1)
-        } else {
-            (info.framerate_num, info.framerate_denom)
-        };
-        let mut props = vec![
-            prop(SPA_FORMAT_MEDIA_TYPE, id(SPA_MEDIA_TYPE_VIDEO)),
-            prop(SPA_FORMAT_MEDIA_SUBTYPE, id(SPA_MEDIA_SUBTYPE_RAW)),
-            prop(SPA_FORMAT_VIDEO_FORMAT, id(info.format)),
-            prop(SPA_FORMAT_VIDEO_SIZE, rect(info.width, info.height)),
-            prop(SPA_FORMAT_VIDEO_FRAMERATE, fraction(num, denom)),
-        ];
-        if let Some(modifier) = info.modifier {
-            props.push(prop(SPA_FORMAT_VIDEO_MODIFIER, long(modifier)));
-        }
-        object(SPA_TYPE_OBJECT_FORMAT, SPA_PARAM_FORMAT, &props)
-    }
-
-    /// A negotiated video format, parsed from the node's `Format` pod.
+    /// The fixed `Format` param is parsed from the node's `Format` pod; no
+    /// `Format` echo is built (item 69d). Kept as the negotiated-format
+    /// view for frame shaping.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
     pub struct VideoInfo {
         pub format: u32,
@@ -1142,16 +1127,28 @@ struct SpaBuffer {
 }
 
 /// `struct spa_data`.
+///
+/// `fd` is `int64_t` in the SPA ABI (`struct spa_data` in
+/// `spa/include/spa/buffer/buffer.h`). It used to be hand-defined as `i32`
+/// here: on little-endian the low half happened to be read correctly and
+/// `mapoffset`/`maxsize` filled the same 8 bytes before `data`, so the
+/// pointer offsets survived — alignment luck, not correctness (item 69c).
 #[repr(C)]
 struct SpaData {
     ty: u32,
     flags: u32,
-    fd: i32,
+    fd: i64,
     mapoffset: u32,
     maxsize: u32,
     data: *mut c_void,
     chunk: *mut SpaChunk,
 }
+
+/// `enum spa_data_type` values we can map (`spa/include/spa/buffer/
+/// buffer.h`: Invalid 0, MemPtr 1, MemFd 2, DmaBuf 3, Mem 4). MemFd and
+/// DmaBuf carry a file descriptor; the rest cannot be mapped by us.
+const SPA_DATA_MEM_FD: u32 = 2;
+const SPA_DATA_DMA_BUF: u32 = 3;
 
 /// `struct spa_chunk`.
 #[repr(C)]
@@ -1160,6 +1157,73 @@ struct SpaChunk {
     size: u32,
     stride: i32,
     flags: i32,
+}
+
+/// A page-aligned mmap window: `mmap_offset = base`, the caller's data
+/// starts `delta` bytes into it, and `len` bytes are mapped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MapRange {
+    base: usize,
+    delta: usize,
+    len: usize,
+}
+
+/// Page-align an mmap window of `len` bytes starting at `start`.
+///
+/// `mmap(2)` requires a page-aligned file offset, while SPA's
+/// `mapoffset`/`chunk.offset` need not be. Pure and tested so the
+/// arithmetic (the part that can underflow) never depends on a live
+/// buffer.
+fn map_range(start: usize, len: usize, page: usize) -> Option<MapRange> {
+    if len == 0 || page == 0 {
+        return None;
+    }
+    let base = (start / page) * page;
+    let delta = start - base;
+    let len = delta.checked_add(len)?;
+    Some(MapRange { base, delta, len })
+}
+
+/// One live mmap of a portal buffer's memory.
+///
+/// `base` is the page-aligned mapping; the buffer's `spa_data.data` is
+/// `base + delta`. Dropping the mapping unmaps it — `remove_buffer` removes
+/// the entry, and `StreamCtx::clear_mappings` catches anything left at
+/// teardown.
+struct BufferMapping {
+    base: *mut c_void,
+    len: usize,
+    delta: usize,
+    /// Identity of what is mapped, so a reused `pw_buffer` pointer with a
+    /// different fd/range is remapped instead of reusing stale memory.
+    fd: i64,
+    mapoffset: u32,
+    maxsize: u32,
+}
+
+impl BufferMapping {
+    fn data(&self) -> *const u8 {
+        unsafe { (self.base as *const u8).add(self.delta) }
+    }
+}
+
+impl Drop for BufferMapping {
+    fn drop(&mut self) {
+        if !self.base.is_null() && self.len != 0 {
+            unsafe {
+                libc::munmap(self.base, self.len);
+            }
+        }
+    }
+}
+
+impl StreamCtx {
+    /// Unmap every buffer still held at teardown.
+    fn clear_mappings(&self) {
+        if let Ok(mut maps) = self.maps.lock() {
+            maps.clear();
+        }
+    }
 }
 
 /// Every `libpipewire` symbol the consumer resolves with `dlsym`, in the
@@ -1198,10 +1262,10 @@ pub const REQUIRED_SYMBOLS: &[&str] = &[
     "pw_context_new",           // context.h
     "pw_context_destroy",       // context.h
     "pw_context_connect_fd",    // core.h
+    "pw_properties_new_string", // properties.h (stream properties, item 69e)
     "pw_stream_new",            // stream.h
     "pw_stream_add_listener",   // stream.h
     "pw_stream_connect",        // stream.h
-    "pw_stream_update_params",  // stream.h (confirm the negotiated format)
     "pw_stream_disconnect",     // stream.h
     "pw_stream_destroy",        // stream.h
     "pw_stream_dequeue_buffer", // stream.h
@@ -1226,14 +1290,14 @@ struct PwApi {
     pw_context_destroy: unsafe extern "C" fn(*mut c_void),
     pw_context_connect_fd:
         unsafe extern "C" fn(*mut c_void, c_int, *mut c_void, usize) -> *mut c_void,
+    /// `properties.h`: build stream properties from a `key=value` string.
+    /// `pw_stream_new` takes ownership of the returned properties.
+    pw_properties_new_string: unsafe extern "C" fn(*const c_char) -> *mut c_void,
     pw_stream_new: unsafe extern "C" fn(*mut c_void, *const c_char, *mut c_void) -> *mut c_void,
     pw_stream_add_listener:
         unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_void, *mut c_void),
     pw_stream_connect:
         unsafe extern "C" fn(*mut c_void, c_int, u32, u32, *const *const c_void, u32) -> c_int,
-    /// `stream.h`: complete format negotiation by confirming the chosen
-    /// param (and, for a consumer, the buffer params) back to PipeWire.
-    pw_stream_update_params: unsafe extern "C" fn(*mut c_void, *const *const c_void, u32) -> c_int,
     pw_stream_disconnect: unsafe extern "C" fn(*mut c_void) -> c_int,
     pw_stream_destroy: unsafe extern "C" fn(*mut c_void),
     pw_stream_dequeue_buffer: unsafe extern "C" fn(*mut c_void) -> *mut c_void,
@@ -1337,6 +1401,10 @@ impl PwApi {
                 "pw_context_connect_fd",
                 unsafe extern "C" fn(*mut c_void, c_int, *mut c_void, usize) -> *mut c_void
             ),
+            pw_properties_new_string: sym!(
+                "pw_properties_new_string",
+                unsafe extern "C" fn(*const c_char) -> *mut c_void
+            ),
             pw_stream_new: sym!(
                 "pw_stream_new",
                 unsafe extern "C" fn(*mut c_void, *const c_char, *mut c_void) -> *mut c_void
@@ -1348,10 +1416,6 @@ impl PwApi {
             pw_stream_connect: sym!(
                 "pw_stream_connect",
                 unsafe extern "C" fn(*mut c_void, c_int, u32, u32, *const *const c_void, u32) -> c_int
-            ),
-            pw_stream_update_params: sym!(
-                "pw_stream_update_params",
-                unsafe extern "C" fn(*mut c_void, *const *const c_void, u32) -> c_int
             ),
             pw_stream_disconnect: sym!(
                 "pw_stream_disconnect",
@@ -1456,8 +1520,16 @@ fn is_target_not_found(message: &str) -> bool {
 struct StreamCtx {
     api: &'static PwApi,
     stream: *mut c_void,
-    tx: Sender<GrayImage>,
-    format: AtomicU32,
+    tx: SyncSender<GrayImage>,
+    /// The negotiated `Format` video info (item 69e: frames are shaped by
+    /// this, not by `stride / 4`). `None` until `param_changed` lands.
+    info: Mutex<Option<pod::VideoInfo>>,
+    /// mmap'd MemFd/DmaBuf buffers, keyed by `pw_buffer` pointer so
+    /// `remove_buffer` can unmap on release (item 69c).
+    maps: Mutex<HashMap<usize, BufferMapping>>,
+    /// One-shot evidence when a buffer cannot be mapped; per-frame logging
+    /// would flood the capture log.
+    map_failed_logged: AtomicBool,
     err: Arc<Mutex<Option<String>>>,
     /// Verbatim PipeWire stream-state + error log (ninth pass §1).
     log: CaptureLog,
@@ -1527,13 +1599,18 @@ impl ScreenCastSource {
             return Err("PipeWire: pw_thread_loop_start failed".to_owned());
         }
 
-        let (tx, rx) = channel::<GrayImage>();
+        // Item 69e: capacity 1. The PipeWire thread produces frames far
+        // faster than OCR drains them; at most one frame may ever queue,
+        // and a full queue drops the incoming frame at the producer.
+        let (tx, rx) = sync_channel::<GrayImage>(1);
         let err = Arc::new(Mutex::new(None));
         let ctx = Box::new(StreamCtx {
             api,
             stream: std::ptr::null_mut(),
             tx,
-            format: AtomicU32::new(pod::SPA_VIDEO_FORMAT_BGRA),
+            info: Mutex::new(None),
+            maps: Mutex::new(HashMap::new()),
+            map_failed_logged: AtomicBool::new(false),
             err: err.clone(),
             log: log.clone(),
         });
@@ -1546,7 +1623,7 @@ impl ScreenCastSource {
             io_changed: None,
             param_changed: Some(on_param_changed),
             add_buffer: None,
-            remove_buffer: None,
+            remove_buffer: Some(on_remove_buffer),
             process: Some(on_process),
             drained: None,
             command: None,
@@ -1620,7 +1697,14 @@ impl ScreenCastSource {
         let (stream, hook) = loop {
             attempt += 1;
             unsafe { (api.pw_thread_loop_lock)(thread_loop) };
-            let created = unsafe { (api.pw_stream_new)(core, name.as_ptr(), std::ptr::null_mut()) };
+            // Item 69e: name the stream's purpose for the session manager
+            // (OBS-style) instead of passing NULL properties. Advisory:
+            // if the properties cannot be built, fall back to NULL rather
+            // than failing the capture. pw_stream_new takes ownership.
+            let props = CString::new("media.type=Video media.category=Capture media.role=Screen")
+                .map(|s| unsafe { (api.pw_properties_new_string)(s.as_ptr()) })
+                .unwrap_or(std::ptr::null_mut());
+            let created = unsafe { (api.pw_stream_new)(core, name.as_ptr(), props) };
             if created.is_null() {
                 unsafe { (api.pw_thread_loop_unlock)(thread_loop) };
                 teardown(context);
@@ -1838,6 +1922,7 @@ impl Drop for ScreenCastSource {
             }
         }
         // Keep the boxes alive until after the teardown above.
+        self.ctx.clear_mappings();
         let _ = (&self.hook, &self.events, &self.ctx, self.core);
     }
 }
@@ -1912,22 +1997,14 @@ unsafe extern "C" fn on_param_changed(data: *mut c_void, id: u32, param: *const 
     let Some(info) = pod::parse_video_info(bytes) else {
         return;
     };
-    ctx.format.store(info.format, Ordering::Relaxed);
-
-    // Addendum #65a: a consumer never confirmed the chosen format, so the
-    // node sat in "no more input formats". Confirm the exact negotiated
-    // values back with a fixed Format pod; PipeWire reads it during the
-    // callback and the pod stays alive for the call.
-    let confirm = pod::format_video(&info);
-    let words = to_aligned_words(&confirm);
-    let params: [*const c_void; 1] = [words.as_ptr() as *const c_void];
-    let rc = (ctx.api.pw_stream_update_params)(ctx.stream, params.as_ptr(), 1);
-    if rc < 0 {
-        ctx.log.record(
-            "connecting",
-            &format!("PipeWire: pw_stream_update_params(Format) failed ({rc})"),
-        );
-        return;
+    // Item 69d: no Format echo. A consumer does not accept a format by
+    // pushing the same pod back with pw_stream_update_params — that was
+    // the pass-21 mechanism, and it is not the canonical flow. Buffer
+    // parameters (SPA_PARAM_Buffers/Meta) are not needed either: this
+    // consumer maps whatever the node allocates. So the callback only
+    // records the negotiated format for frame shaping.
+    if let Ok(mut slot) = ctx.info.lock() {
+        *slot = Some(info);
     }
 
     // Addendum #65: the negotiated size is also the practical evidence
@@ -1951,7 +2028,7 @@ unsafe extern "C" fn on_param_changed(data: *mut c_void, id: u32, param: *const 
         "connecting",
         &format!(
             "PipeWire negotiated format: {} (fourcc {}, spa {:#x}) {}x{} @ {}/{} fps{}; \
-             confirmed via pw_stream_update_params",
+             no Format echo (buffers are mapped on demand)",
             pod::format_name(info.format),
             pod::fourcc(info.format),
             info.format,
@@ -1962,6 +2039,19 @@ unsafe extern "C" fn on_param_changed(data: *mut c_void, id: u32, param: *const 
             modifier
         ),
     );
+}
+
+/// `remove_buffer`: the node is done with a buffer, so unmap any memory we
+/// mapped for it (item 69c).
+unsafe extern "C" fn on_remove_buffer(data: *mut c_void, buffer: *mut c_void) {
+    if data.is_null() {
+        return;
+    }
+    let ctx = &mut *(data as *mut StreamCtx);
+    if let Ok(mut maps) = ctx.maps.lock() {
+        // Dropping the entry munmaps it.
+        maps.remove(&(buffer as usize));
+    }
 }
 
 unsafe extern "C" fn on_process(data: *mut c_void) {
@@ -1977,9 +2067,130 @@ unsafe extern "C" fn on_process(data: *mut c_void) {
     if let Some(img) = convert_buffer(ctx, b) {
         // Unbounded: a slow consumer drops nothing but also never blocks
         // the PipeWire thread.
-        let _ = ctx.tx.send(img);
+        // Bounded queue (capacity 1): a full queue means OCR has not
+        // drained the previous frame yet — drop this one, never block
+        // the PipeWire thread and never let frames pile up.
+        match ctx.tx.try_send(img) {
+            Ok(()) | Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {}
+        }
     }
     (api.pw_stream_queue_buffer)(ctx.stream, b);
+}
+
+/// The page size used to align buffer mmaps (`sysconf` is the portable
+/// spelling; 4096 is the fallback).
+fn page_size() -> usize {
+    let p = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if p > 0 {
+        p as usize
+    } else {
+        4096
+    }
+}
+
+/// Shape one frame from the **negotiated format** (item 69e), never from
+/// `stride / 4`: a padded stride makes that width wrong. Returns
+/// `(width, height, stride)` when the chunk is fully inside `data_len`.
+fn frame_geometry(
+    info: pod::VideoInfo,
+    chunk: &SpaChunk,
+    data_len: usize,
+) -> Option<(usize, usize, usize)> {
+    let width = info.width as usize;
+    let height = info.height as usize;
+    if width == 0 || height == 0 || width * height > 16_000_000 {
+        return None;
+    }
+    if chunk.stride <= 0 {
+        return None;
+    }
+    let stride = chunk.stride as usize;
+    let row = width.checked_mul(4)?;
+    if stride < row {
+        return None;
+    }
+    let offset = chunk.offset as usize;
+    let size = if chunk.size == 0 {
+        data_len.checked_sub(offset)?
+    } else {
+        chunk.size as usize
+    };
+    let needed = (height - 1).checked_mul(stride)?.checked_add(row)?;
+    if needed > size || offset.checked_add(needed)? > data_len {
+        return None;
+    }
+    Some((width, height, stride))
+}
+
+/// Get a readable pointer + length for one `spa_data` (item 69c).
+///
+/// PipeWire may have mapped the buffer already (`PW_STREAM_FLAG_MAP_BUFFERS`
+/// — `data.data` non-null), in which case that pointer is used directly.
+/// When it has not, MemFd and DmaBuf datas are mmap'd from `data.fd` for
+/// the buffer's `maxsize` starting at `mapoffset`; the mapping is cached
+/// per `pw_buffer` and unmapped by `remove_buffer`.
+unsafe fn buffer_bytes(
+    ctx: &mut StreamCtx,
+    b: *mut c_void,
+    d: *mut SpaData,
+    data_len: usize,
+) -> Option<(*const u8, usize)> {
+    let data = &mut *d;
+    if !data.data.is_null() {
+        return Some((data.data as *const u8, data_len));
+    }
+    if !matches!(data.ty, SPA_DATA_MEM_FD | SPA_DATA_DMA_BUF) || data.fd < 0 {
+        return None;
+    }
+    let range = match map_range(data.mapoffset as usize, data_len, page_size()) {
+        Some(r) => r,
+        None => return None,
+    };
+    let key = b as usize;
+    let mut maps = match ctx.maps.lock() {
+        Ok(m) => m,
+        Err(_) => return None,
+    };
+    let same = maps
+        .get(&key)
+        .map(|m| m.fd == data.fd && m.mapoffset == data.mapoffset && m.maxsize == data.maxsize)
+        .unwrap_or(false);
+    if !same {
+        let ptr = libc::mmap(
+            std::ptr::null_mut(),
+            range.len,
+            libc::PROT_READ,
+            libc::MAP_SHARED,
+            data.fd as c_int,
+            range.base as libc::off_t,
+        );
+        if ptr == libc::MAP_FAILED {
+            let err = std::io::Error::last_os_error();
+            if !ctx.map_failed_logged.swap(true, Ordering::Relaxed) {
+                ctx.log.record(
+                    "capturing",
+                    &format!(
+                        "PipeWire: cannot map buffer (data type {}, fd {}, mapoffset {}, \
+                         maxsize {}): {err}",
+                        data.ty, data.fd, data.mapoffset, data.maxsize
+                    ),
+                );
+            }
+            return None;
+        }
+        let mapping = BufferMapping {
+            base: ptr,
+            len: range.len,
+            delta: range.delta,
+            fd: data.fd,
+            mapoffset: data.mapoffset,
+            maxsize: data.maxsize,
+        };
+        // Replacing the entry drops (unmaps) any stale mapping for this
+        // reused buffer pointer.
+        maps.insert(key, mapping);
+    }
+    maps.get(&key).map(|m| (m.data(), data_len))
 }
 
 /// Turn one dequeued `pw_buffer` into a grayscale frame. Bails out (but
@@ -1992,41 +2203,73 @@ unsafe fn convert_buffer(ctx: &mut StreamCtx, b: *mut c_void) -> Option<GrayImag
     if spa.is_null() || (*spa).n_datas == 0 || (*spa).datas.is_null() {
         return None;
     }
+    let info = (*ctx.info.lock().ok()?)?;
     let d = (*spa).datas;
-    let ptr = (*d).data;
     let chunk = (*d).chunk;
-    if ptr.is_null() || chunk.is_null() {
+    if chunk.is_null() {
         return None;
+    }
+    // A non-linear DmaBuf is not readable as pixels. The offer carries
+    // LINEAR (and the modifier-less sentinel); if the node still picks a
+    // tiled modifier, drop the frame with one line of evidence rather
+    // than reading garbage.
+    if let Some(m) = info.modifier {
+        if m != pod::DRM_FORMAT_MOD_LINEAR && m != pod::DRM_FORMAT_MOD_INVALID {
+            if !ctx.map_failed_logged.swap(true, Ordering::Relaxed) {
+                ctx.log.record(
+                    "capturing",
+                    &format!("PipeWire: non-linear buffer modifier 0x{m:016x}; cannot read pixels"),
+                );
+            }
+            return None;
+        }
     }
     let offset = (*chunk).offset as usize;
-    let size = (*chunk).size as usize;
-    let stride = (*chunk).stride;
-    if size == 0 || stride <= 0 {
+    let data_len = if (*d).maxsize != 0 {
+        (*d).maxsize as usize
+    } else {
+        offset.checked_add((*chunk).size as usize)?
+    };
+    if data_len == 0 {
         return None;
     }
-    let stride = stride as usize;
-    let width = stride / 4;
-    let height = size / stride;
-    if width == 0 || height == 0 || width * height > 16_000_000 {
-        return None;
-    }
-    let src = (ptr as *const u8).add(offset);
-    let format = ctx.format.load(Ordering::Relaxed);
+    let (ptr, len) = buffer_bytes(ctx, b, d, data_len)?;
+    read_frame(info, ptr, len, &*chunk)
+}
+
+/// Shape and convert one already-mapped frame into grayscale.
+///
+/// Pure apart from the source bytes, so the geometry (negotiated width/
+/// height, padded stride, chunk bounds) is unit-tested with a plain byte
+/// buffer.
+fn read_frame(
+    info: pod::VideoInfo,
+    ptr: *const u8,
+    data_len: usize,
+    chunk: &SpaChunk,
+) -> Option<GrayImage> {
+    let (width, height, stride) = frame_geometry(info, chunk, data_len)?;
     // Byte order of the three colour channels: BGRA/BGRx store B,G,R;
     // RGBA/RGBx store R,G,B. Alpha is ignored either way.
-    let (r, g, bl) = match format {
+    let (r, g, bl) = match info.format {
         pod::SPA_VIDEO_FORMAT_BGRA | pod::SPA_VIDEO_FORMAT_BGRX => (2usize, 1usize, 0usize),
-        _ => (0usize, 1usize, 2usize),
+        pod::SPA_VIDEO_FORMAT_RGBA | pod::SPA_VIDEO_FORMAT_RGBX => (0usize, 1usize, 2usize),
+        _ => return None,
     };
     let mut pixels = vec![0u8; width * height];
-    for y in 0..height {
-        let row = src.add(y * stride);
-        for x in 0..width {
-            let px = row.add(x * 4);
-            let rr = *px.add(r) as u32;
-            let gg = *px.add(g) as u32;
-            let bb = *px.add(bl) as u32;
-            pixels[y * width + x] = ((77 * rr + 150 * gg + 29 * bb) >> 8) as u8;
+    // The caller guarantees `ptr` covers `data_len`, and `frame_geometry`
+    // proved the chunk (stride/height) fits inside it.
+    unsafe {
+        let src = ptr.add(chunk.offset as usize);
+        for y in 0..height {
+            let row = src.add(y * stride);
+            for x in 0..width {
+                let px = row.add(x * 4);
+                let rr = *px.add(r) as u32;
+                let gg = *px.add(g) as u32;
+                let bb = *px.add(bl) as u32;
+                pixels[y * width + x] = ((77 * rr + 150 * gg + 29 * bb) >> 8) as u8;
+            }
         }
     }
     Some(GrayImage {
@@ -2525,6 +2768,126 @@ mod tests {
         assert_eq!(pod::pod_total_len(&[0, 1, 2]), None);
     }
 
+    /// Item 69c: `spa_data.fd` is 64-bit. The old `i32` field survived
+    /// only because `mapoffset`/`maxsize` happened to fill the same eight
+    /// bytes before `data`; the pointer offsets must stay pinned.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn spa_data_uses_a_64_bit_fd_at_the_c_abi_offsets() {
+        use std::mem::offset_of;
+        assert_eq!(std::mem::size_of::<SpaData>(), 40);
+        assert_eq!(offset_of!(SpaData, ty), 0);
+        assert_eq!(offset_of!(SpaData, flags), 4);
+        assert_eq!(offset_of!(SpaData, fd), 8);
+        assert_eq!(offset_of!(SpaData, mapoffset), 16);
+        assert_eq!(offset_of!(SpaData, maxsize), 20);
+        assert_eq!(offset_of!(SpaData, data), 24);
+        assert_eq!(offset_of!(SpaData, chunk), 32);
+    }
+
+    /// `mmap` needs a page-aligned file offset; SPA offsets need not be.
+    #[test]
+    fn map_range_page_aligns_the_file_offset() {
+        assert_eq!(
+            map_range(0, 4096, 4096),
+            Some(MapRange {
+                base: 0,
+                delta: 0,
+                len: 4096
+            })
+        );
+        assert_eq!(
+            map_range(4096 + 100, 4000, 4096),
+            Some(MapRange {
+                base: 4096,
+                delta: 100,
+                len: 4100
+            })
+        );
+        assert_eq!(map_range(123, 0, 4096), None);
+        assert_eq!(map_range(123, 10, 0), None);
+    }
+
+    /// Item 69e: dimensions come from the negotiated format, not
+    /// `stride / 4`. A padded stride (20 bytes for a 4-pixel row) must
+    /// still yield a 4-pixel-wide frame.
+    #[test]
+    fn frame_geometry_uses_the_negotiated_dimensions_not_the_stride() {
+        let info = pod::VideoInfo {
+            format: pod::SPA_VIDEO_FORMAT_BGRX,
+            width: 4,
+            height: 2,
+            framerate_num: 30,
+            framerate_denom: 1,
+            modifier: None,
+        };
+        let chunk = SpaChunk {
+            offset: 0,
+            size: 40,
+            stride: 20,
+            flags: 0,
+        };
+        assert_eq!(frame_geometry(info, &chunk, 40), Some((4, 2, 20)));
+        assert_ne!(chunk.stride as usize / 4, 4, "the old derivation was wrong");
+
+        // The chunk must actually contain the rows the format describes.
+        let short = SpaChunk { size: 20, ..chunk };
+        assert_eq!(frame_geometry(info, &short, 20), None);
+        assert_eq!(frame_geometry(info, &chunk, 35), None);
+        let narrow = SpaChunk { stride: 12, ..chunk };
+        assert_eq!(frame_geometry(info, &narrow, 40), None);
+        let empty = pod::VideoInfo { width: 0, ..info };
+        assert_eq!(frame_geometry(empty, &chunk, 40), None);
+    }
+
+    /// The conversion reads exactly the negotiated width and skips stride
+    /// padding. BGRA stores B,G,R; RGBA stores R,G,B.
+    #[test]
+    fn read_frame_reads_bgra_rows_with_padding() {
+        let info = pod::VideoInfo {
+            format: pod::SPA_VIDEO_FORMAT_BGRA,
+            width: 2,
+            height: 2,
+            framerate_num: 30,
+            framerate_denom: 1,
+            modifier: None,
+        };
+        let stride = 12usize; // 2 pixels + 4 bytes of padding per row
+        let mut bytes = vec![0xffu8; stride * 2];
+        for y in 0..2 {
+            for x in 0..2 {
+                let at = y * stride + x * 4;
+                // B,G,R,A = 0,0,255,255 -> red.
+                bytes[at] = 0;
+                bytes[at + 1] = 0;
+                bytes[at + 2] = 255;
+                bytes[at + 3] = 255;
+            }
+            // Padding bytes stay 0xff and must not be sampled.
+        }
+        let chunk = SpaChunk {
+            offset: 0,
+            size: (stride * 2) as u32,
+            stride: stride as i32,
+            flags: 0,
+        };
+        let img = read_frame(info, bytes.as_ptr(), bytes.len(), &chunk).unwrap();
+        assert_eq!((img.width, img.height), (2, 2));
+        assert_eq!(img.pixels.len(), 4);
+        let red = ((77 * 255) >> 8) as u8;
+        assert!(img.pixels.iter().all(|&p| p == red), "{:?}", img.pixels);
+
+        // RGBA: the same bytes are read as blue (B in the last channel),
+        // so only the channel order changes.
+        let rgba = pod::VideoInfo {
+            format: pod::SPA_VIDEO_FORMAT_RGBA,
+            ..info
+        };
+        let img = read_frame(rgba, bytes.as_ptr(), bytes.len(), &chunk).unwrap();
+        let blue = ((29 * 255) >> 8) as u8;
+        assert!(img.pixels.iter().all(|&p| p == blue));
+    }
+
     #[test]
     fn restore_token_round_trips_through_app_data() {
         let dir = std::env::temp_dir().join(format!("fracker-sc-token-{}", std::process::id()));
@@ -2792,6 +3155,12 @@ mod tests {
         assert!(
             !REQUIRED_SYMBOLS.contains(&"pw_registry_add_listener"),
             "the registry dependency was dropped in item 60a"
+        );
+        // Item 69d: the Format echo is gone, so the symbol it used is no
+        // longer part of the consumer's FFI surface.
+        assert!(
+            !REQUIRED_SYMBOLS.contains(&"pw_stream_update_params"),
+            "the pass-21 Format echo was removed in item 69d"
         );
         // The real construction sequence: loop -> context -> core (fd) -> stream.
         assert!(REQUIRED_SYMBOLS.contains(&"pw_thread_loop_get_loop"));
