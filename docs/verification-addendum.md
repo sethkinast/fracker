@@ -563,3 +563,15 @@ it refines the brief where they disagree. For the next worker pass.
     after repeated push reloads in a window. Graf's miss:
     the diff review praised the reconnect-hello detail
     without interrogating the comparison semantics.
+62. **POLISH, DEFERRED (Seth, 2026-10-21): in-place plan
+    updates instead of reload-on-push.** The WebSocket
+    push currently reloads the whole page. Nothing
+    fundamental requires it — reload was the cheap
+    mechanism because the renderer emits whole documents
+    and server-side ticks made reload safe. The polish:
+    push the newly rendered plan fragment and swap it
+    into the page in place (ticks are links/forms or can
+    be event-delegated, so no rebinding problem), keeping
+    scroll position and avoiding the reload flash. Small
+    scope; Seth explicitly deferred it — do not build
+    until released.
