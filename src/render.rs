@@ -544,7 +544,7 @@ fn alert_rows(alerts: &[crate::plan::AlertView], ctx: &RenderContext<'_>) -> Str
 /// The crack queue: the mock's `.row.ch` cards — NEXT badge, parent icon,
 /// part/short-name mid-column, relic + refinement/traces right, the run
 /// time last. Tickable (label + checkbox) so a crack can be marked done;
-/// done rows strike.
+/// done rows strike, as do rows whose only relic source is unobtainable.
 fn crack_queue_panel(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     let cracks: Vec<&crate::plan::Chunk> =
         plan.chunks.iter().filter(|c| c.crack.is_some()).collect();
@@ -584,6 +584,9 @@ fn crack_queue_panel(plan: &Plan, ctx: &RenderContext<'_>) -> String {
             }
             if proven {
                 class.push_str(" done");
+            }
+            if ci.unobtainable {
+                class.push_str(" dead");
             }
             h.push_str(&format!(
                 "<label class=\"{class}\">\n<input type=\"checkbox\" data-id=\"{id}\"{checked}>\n{icon}\n<div><b>{gear}</b>{next}<br><span class=\"mut sm\">{part}{extra}</span></div>\n<div class=\"rl\"><b class=\"cy\">{relic}</b><br><span class=\"mut sm\">{refine} &middot; {traces} tr</span></div>\n<span class=\"mut\">{time}</span>\n</label>\n",
@@ -772,10 +775,11 @@ fn hunt_card_html(
     for p in &g.parts {
         let part = short_part(&p.name, &g.gear);
         let rarity = rarity_css(p.rarity);
-        let (relic, refine, vaulted) = match &p.deal {
+        let (relic, refine, tier, vaulted) = match &p.deal {
             Some(d) => (
                 d.relic.clone(),
                 refinement_abbrev(&d.refinement),
+                Some(d.source_tier),
                 d.vaulted,
             ),
             None => (
@@ -784,12 +788,19 @@ fn hunt_card_html(
                     .map(|r| r.relic.clone())
                     .unwrap_or_default(),
                 String::new(),
+                p.relics.first().map(|r| r.source_tier),
                 p.relics.first().map(|r| r.vaulted).unwrap_or(false),
             ),
         };
         let vault_class = if vaulted { " v" } else { "" };
+        let dead_class = if tier.map(|t| t.is_unobtainable()).unwrap_or(false) {
+            " dead"
+        } else {
+            ""
+        };
         h.push_str(&format!(
-            "<div class=\"r\">\n<span class=\"pn\">{part}</span>\n<span class=\"rc {rarity}{vault_class}\">{relic}</span>\n<span class=\"pc {rarity}\">{refine}</span>\n</div>\n",
+            "<div class=\"r{dead_class}\">\n<span class=\"pn\">{part}</span>\n<span class=\"rc {rarity}{vault_class}\">{relic}</span>\n<span class=\"pc {rarity}\">{refine}</span>\n</div>\n",
+            dead_class = dead_class,
             part = esc(&part),
             rarity = rarity,
             vault_class = vault_class,
@@ -1183,6 +1194,7 @@ h3{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--mut)
 .r{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:center;padding:4px 0;border-top:1px solid #1c2330;font-size:13px}
 .pn{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pn em{font-style:normal;color:var(--gold)}
 .rc{border:1px solid;padding:0 7px;font-size:12px;white-space:nowrap}.rc.v{opacity:.7}.pc{font-size:12px;text-align:right;font-variant-numeric:tabular-nums}
+.r.dead .pn,.r.dead .rc,.r.dead .pc{text-decoration:line-through;opacity:.55}
 .common{color:#b08d4f}.uncommon{color:#c0c8d4}.rare{color:#e3c878}.rc.common,.rc.uncommon,.rc.rare{border-color:currentColor;background:#0d1117}
 .gf{display:flex;justify-content:space-between;gap:8px;margin-top:8px;padding:6px 9px;background:#0d1420;border-left:3px solid var(--cy);font-size:12px}.gf b{color:var(--cy)}.fa{color:var(--tx)}.fa.vz{color:var(--gold)}.gf:has(.vz){border-color:var(--gold)}
 .bg{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:6px}.bc{display:flex;align-items:center;gap:8px;background:var(--cell);border:1px solid #1f2735;padding:4px 10px 4px 4px;font-size:13px}.bn{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.bc i{color:var(--mut);font-size:11px}
@@ -1201,6 +1213,8 @@ input[type=checkbox]:checked::after{content:"";width:9px;height:5px;border:2px s
 
 /* Fracker extensions: states the static mock cannot show. */
 .row.done{opacity:.45}.row.done b,.row.done .tm{text-decoration:line-through}
+.row.dead .rl,.row.dead>div{opacity:.55;text-decoration:line-through}
+.g .r.dead{opacity:.75}
 label.row{cursor:pointer}
 .row.ch.tick{grid-template-columns:auto 40px 1fr auto auto}
 .row.ch.tick input[type=checkbox]{align-self:center}
@@ -1365,6 +1379,7 @@ mod tests {
             wants: vec![part.to_owned()],
             parts_have: 0,
             parts_total: 4,
+            partially_unobtainable: false,
             parts: vec![PartRow {
                 name: part.to_owned(),
                 state: PartState::Need,
@@ -1854,6 +1869,7 @@ mod tests {
                     fissure_mission: "Survival".to_owned(),
                     steel_path: true,
                     vaulted: false,
+                    unobtainable: false,
                 }),
             }],
             ..Default::default()
@@ -1888,6 +1904,7 @@ mod tests {
             expected: 10.0,
             owned: Some(2),
             radiant: None,
+            source_tier: crate::plan::SourceTier::Unvaulted,
         });
         let t = crate::tuning::Tuning::for_tests();
         let world = WorldState::default();
@@ -1910,5 +1927,39 @@ mod tests {
             !html.contains("Rad 10%"),
             "chance/expected figures leave the row (addendum #67)"
         );
+    }
+
+    #[test]
+    fn unobtainable_relic_rows_strike() {
+        // Addendum #68 tier 4: the chosen relic has no current source, so
+        // the Hunt part row strikes rather than reading as actionable.
+        let mut g = goal("Gyre Prime", "Gyre Prime Neuroptics Blueprint", true, false);
+        g.parts[0].deal = Some(PartDeal {
+            relic: "Axi Vanguard M1".to_owned(),
+            vaulted: true,
+            refinement: "Intact".to_owned(),
+            chance: 25.33,
+            expected: 3.95,
+            owned: None,
+            radiant: None,
+            source_tier: crate::plan::SourceTier::Unobtainable,
+        });
+        let t = crate::tuning::Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let ctx = empty_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
+        let html = render_plan(
+            &Plan {
+                goals: vec![g],
+                ..Default::default()
+            },
+            &ctx,
+        );
+        assert!(html.contains("<div class=\"r dead\">"));
+        assert!(html.contains("Axi Vanguard M1"));
+        assert!(!html.contains("25.33%"), "chance text stays out of the row");
     }
 }

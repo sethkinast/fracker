@@ -235,6 +235,60 @@ fn golden_ivara_unparked_by_live_resurgence() {
 }
 
 #[test]
+fn golden_source_priority_prefers_unvaulted_caliban_relic() {
+    // Addendum #68: Caliban Prime Blueprint drops from the tier-4
+    // "Axi Vanguard M1" at 25.33% Intact, but unvaulted Lith V11/Meso
+    // K9/Meso V13 are only 11%. Source tier outranks raw chance, so the
+    // deal must be an unvaulted relic.
+    let g = golden_plan_recompute();
+    let caliban = g
+        .plan
+        .goals
+        .iter()
+        .find(|c| c.gear == "Caliban Prime")
+        .expect("Caliban Prime goal card");
+    let bp = caliban
+        .parts
+        .iter()
+        .find(|p| p.name == "Caliban Prime Blueprint")
+        .expect("Caliban Prime Blueprint");
+    let deal = bp.deal.as_ref().expect("deal for Caliban Blueprint");
+    eprintln!(
+        "Caliban Blueprint deal: {} ({:?}, {:.2}%)",
+        deal.relic, deal.source_tier, deal.chance
+    );
+    assert_ne!(deal.relic, "Axi Vanguard M1", "tier 4 never wins on chance");
+    assert_eq!(
+        deal.source_tier,
+        fracker::plan::SourceTier::Unvaulted,
+        "unvaulted lith/meso source wins: {}",
+        deal.relic
+    );
+    assert!(
+        caliban.partially_unobtainable,
+        "Chassis has tier-4 sources, so the card is partially unobtainable"
+    );
+    let chassis = caliban
+        .parts
+        .iter()
+        .find(|p| p.name == "Caliban Prime Chassis Blueprint")
+        .expect("Caliban Prime Chassis Blueprint");
+    eprintln!(
+        "Caliban Chassis deal: {:?}",
+        chassis.deal.as_ref().map(|d| (&d.relic, d.source_tier))
+    );
+    assert!(caliban.parts.iter().any(|p| p.relics.iter().any(|r| {
+        r.source_tier == fracker::plan::SourceTier::Unobtainable
+    })));
+    assert!(caliban.parts.iter().any(|p| {
+        p.name == "Caliban Prime Chassis Blueprint"
+            && p.relics.iter().any(|r| {
+                r.source_tier == fracker::plan::SourceTier::Unobtainable
+            })
+    }));
+}
+
+#[test]
 fn golden_taubound_alerts_enter_tier_1() {
     let g = golden_plan_recompute();
     assert!(
