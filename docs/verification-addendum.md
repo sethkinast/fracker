@@ -633,3 +633,13 @@ it refines the brief where they disagree. For the next worker pass.
     (confirm the format; pw_stream_update_params is a
     standard exported symbol — add it to the FFI +
     manifest) and enumerate modifiers in the offer.
+    Seth's refinement (2026-10-22): event alerts rerun
+    on a small handful of nodes all day, so node+type
+    still is not instance identity across REPEATED
+    instances — the time dimension is the activation
+    guard's (pass 12): a completion corroborates only
+    at/after the alert's activation. Full predicate =
+    tag AND node AND type AND activation window; the
+    rerun regression test (same node+type, completion
+    observed before activation -> NOT struck) rides
+    with the sibling test.
