@@ -688,3 +688,37 @@ it refines the brief where they disagree. For the next worker pass.
     Downrank items that are even partially unobtainable
     (their viable sources include tier-4 relics) in
     target/backlog ordering.
+69. **Capture: external review triage (Claude via Seth,
+    2026-10-22; every claim verified by Graf against
+    master before adoption).**
+    (a) CONFIRMED, the headline: pod::choice wraps its
+    children in a Struct pod — a real SPA Choice body is
+    {kind, flags, child header, RAW values}. Every choice
+    in the EnumFormat offer (format, size, framerate,
+    modifier) is malformed; the pinning test enshrines
+    the wrong layout. Sufficient explanation for "no
+    more input formats" in every build so far.
+    (b) CONFIRMED: negotiate() drops its zbus Connection
+    on return — Negotiated keeps only fd/node/token, so
+    the portal session is orphaned at consent. Keep the
+    Connection + session path alive until capture ends;
+    Session.Close at teardown.
+    (c) CONFIRMED mechanism: nothing in the module ever
+    mmaps buffer memory, so SpaData.data is null for
+    every portal buffer (MemFd and DmaBuf alike) and
+    convert_buffer can never have produced a frame. The
+    fix is buffer mapping (with SpaData.fd corrected to
+    i64 — currently i32, harmless only by alignment
+    luck); the modifier stance follows from it.
+    (d) SUBSTANTIALLY RIGHT: the pass-21 Format echo via
+    pw_stream_update_params is not the canonical accept
+    flow (consumers answer with Buffers/Meta params) —
+    it was Graf's brief, and it goes. Not implicated in
+    any live failure (v0.5.8 never ran capture live).
+    (e) Riders, all verified: pw_stream_new properties
+    are NULL (pass OBS-style media.type/category/role);
+    frame width/height derive from stride (wrong under
+    padding — use the negotiated format); the framerate
+    offer is a pinned 30/1 fraction, not a range from
+    0/1; the frame channel is unbounded (drop-oldest
+    bounded queue instead). Ships as pass 23 (v0.5.10).
