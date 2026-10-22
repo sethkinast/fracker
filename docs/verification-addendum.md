@@ -599,3 +599,37 @@ it refines the brief where they disagree. For the next worker pass.
     correcting the pass-9 doc comment whose private-
     remote theory rationalized the failure. Ships as
     pass 20 (v0.5.6) right behind the WS hotfix.
+64. **Two alerts struck at fresh launch, fresh EE.log
+    (Seth, 2026-10-22, v0.5.6).** Mechanism (Graf, code
+    read): the resident seeds its completion ledger from
+    persisted state at startup, retaining records whose
+    UTC day is today (resident.rs) — a fresh EE.log does
+    not zero it, by design (restart continuity). Seth's
+    evening session and his after-midnight session share
+    one UTC day, so the earlier session's completions
+    re-strike at launch. The wrongful second strike: the
+    pass-17 rule (Graf's brief) lets a SolNode ALONE
+    corroborate within a tag — a same-node sibling alert
+    (same tag, same node, DIFFERENT mission type) is
+    struck by its sibling's completion. Both sides carry
+    mission type; corroboration must require node AND
+    type when both are present, falling back to node-only
+    only when type is absent on a side. Regression test:
+    same-tag, same-node, different-type siblings, one
+    completion -> exactly one struck.
+65. **Capture round 5 (Seth's log, 2026-10-22, v0.5.6).**
+    Token replay CONFIRMED (silent Start, ~20 ms, no
+    picker) and the connect CONFIRMED (node 74, attempt
+    1 — direction fix live). New failure one stage
+    deeper, +40 ms into negotiation: state 2 -> -1
+    "no more input formats". Two gaps verified absent in
+    src/screencast.rs: (a) the FFI never declares
+    pw_stream_update_params and on_param_changed only
+    parses/stores the format — the app never CONFIRMS a
+    chosen format back to the node; (b) the offered
+    EnumFormat pod carries no modifier property, which
+    KWin's screencast node (KPipeWire) may require for
+    any intersection. Fix both: complete the negotiation
+    (confirm the format; pw_stream_update_params is a
+    standard exported symbol — add it to the FFI +
+    manifest) and enumerate modifiers in the offer.
