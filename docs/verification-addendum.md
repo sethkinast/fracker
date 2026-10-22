@@ -546,3 +546,20 @@ it refines the brief where they disagree. For the next worker pass.
     on later SelectSources calls, and log only its last
     few characters — the pass-15 raw-reply logging
     currently prints the whole token.
+61. **HOTFIX: plan page reload storm (Seth, live on
+    v0.5.4, 2026-10-21).** The page reloads every few
+    milliseconds — flickering, re-fetching every icon
+    until the Warframe image CDN rate-limited his IP.
+    Browser Stop pauses it briefly. Root area: pass 18's
+    WebSocket connect path — the server names the current
+    generation on connect and the client's reload
+    predicate can never settle (or fires on any message),
+    so every load self-reloads. Pass 19: fix the
+    predicate (reload only on a genuinely different
+    generation; hello with equal generation is a no-op)
+    AND fail-safe the client independent of server
+    behavior — minimum interval between push reloads plus
+    a circuit breaker that drops to meta-refresh-only
+    after repeated push reloads in a window. Graf's miss:
+    the diff review praised the reconnect-hello detail
+    without interrogating the comparison semantics.
