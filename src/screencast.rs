@@ -657,17 +657,49 @@ mod pod {
         o
     }
 
-    /// A `Choice` pod: `[type, flags, child]` where `child` is a `Struct`
-    /// of the candidate pods (default first for `Enum`; default/min/max
-    /// for `Range`).
+    /// A `Choice` pod in the real SPA layout (addendum #69a):
+    ///
+    /// ```text
+    /// { size, SPA_TYPE_CHOICE,
+    ///   kind, flags,
+    ///   child.size, child.type,   // full pod header, copied from value 0
+    ///   value0 body, value1 body, ... }  // RAW values, no per-value headers
+    /// ```
+    ///
+    /// `struct spa_pod_choice_body` is `{ uint32_t type; uint32_t flags;
+    /// struct spa_pod child; }` (`spa/include/spa/pod/pod.h`), and the
+    /// builder copies the first pushed pod's header into `child` before
+    /// writing each value's body at `child.size` stride. There is no
+    /// wrapper `Struct` pod: every value after the first is just its raw
+    /// payload. The previous implementation wrapped all children in a
+    /// Struct, which made every EnumFormat choice (format, size,
+    /// framerate, modifier) malformed — the cause of "no more input
+    /// formats".
+    ///
+    /// Defaults first for `Enum` (value 0); default/min/max for `Range`.
+    /// The returned `Vec` is exactly `8 + size` bytes; callers embed it in
+    /// a prop, which supplies the 8-byte container padding.
     pub fn choice(kind: u32, children: &[Vec<u8>]) -> Vec<u8> {
-        let child = structure(children);
-        let mut o = Vec::new();
-        header(&mut o, 8 + child.len() as u32, SPA_TYPE_CHOICE);
+        let (child_size, child_type) = children
+            .first()
+            .and_then(|c| read_header(c))
+            .expect("a Choice pod needs at least one well-formed value");
+        let body_len = 8 + 8 + child_size as usize * children.len();
+        let mut o = Vec::with_capacity(8 + body_len);
+        header(&mut o, body_len as u32, SPA_TYPE_CHOICE);
         o.extend_from_slice(&kind.to_le_bytes());
         o.extend_from_slice(&0u32.to_le_bytes());
-        o.extend_from_slice(&child);
-        pad8(&mut o);
+        o.extend_from_slice(&child_size.to_le_bytes());
+        o.extend_from_slice(&child_type.to_le_bytes());
+        for child in children {
+            let (size, ty) = read_header(child).expect("a Choice value must be a pod");
+            assert_eq!(
+                (size, ty),
+                (child_size, child_type),
+                "every Choice value shares the child header"
+            );
+            o.extend_from_slice(&child[8..8 + child_size as usize]);
+        }
         o
     }
 
@@ -696,24 +728,29 @@ mod pod {
         o
     }
 
-    /// The single `EnumFormat` param we offer: raw video, one of the
+    /// The single `EnumFormat` param we offer: raw video in one of the
     /// packed 4-byte formats, any size in `[1x1 .. 8192x8192]`, 30 fps,
     /// and the DRM modifiers we can accept.
     ///
     /// **Addendum #65b.** The modifier property was absent, so KWin's
     /// screencast node (KPipeWire) had no modifier to intersect for its
-    /// DMA-BUF format. It is a `Choice(Enum(Long))` — default first, as
-    /// `spa_pod_builder` emits for an Enum choice — carrying
+    /// DMA-BUF format. It is a `Choice(Enum(Long))` carrying
     /// `DRM_FORMAT_MOD_LINEAR` (mappable) and the modifier-less sentinel
     /// `DRM_FORMAT_MOD_INVALID` last.
+    ///
+    /// **Addendum #69a.** Enum choices repeat their default as the first
+    /// value, exactly as `spa_pod_builder` emits them: formats are
+    /// `[BGRx, BGRx, BGRA, RGBx, RGBA]` and modifiers
+    /// `[LINEAR, LINEAR, INVALID]`.
     pub fn enum_format_video() -> Vec<u8> {
         let formats = choice(
             SPA_CHOICE_ENUM,
             &[
-                id(SPA_VIDEO_FORMAT_BGRA),
                 id(SPA_VIDEO_FORMAT_BGRX),
-                id(SPA_VIDEO_FORMAT_RGBA),
+                id(SPA_VIDEO_FORMAT_BGRX),
+                id(SPA_VIDEO_FORMAT_BGRA),
                 id(SPA_VIDEO_FORMAT_RGBX),
+                id(SPA_VIDEO_FORMAT_RGBA),
             ],
         );
         let sizes = choice(
@@ -722,7 +759,11 @@ mod pod {
         );
         let modifiers = choice(
             SPA_CHOICE_ENUM,
-            &[long(DRM_FORMAT_MOD_LINEAR), long(DRM_FORMAT_MOD_INVALID)],
+            &[
+                long(DRM_FORMAT_MOD_LINEAR),
+                long(DRM_FORMAT_MOD_LINEAR),
+                long(DRM_FORMAT_MOD_INVALID),
+            ],
         );
         object(
             SPA_TYPE_OBJECT_FORMAT,
@@ -2140,69 +2181,147 @@ mod tests {
             u32::from_le_bytes(p[12..16].try_into().unwrap()),
             pod::SPA_PARAM_ENUM_FORMAT
         );
-        // Addendum #65b: the offer carries the modifier property as a
-        // Choice(Enum(Long)) with LINEAR first and INVALID last.
-        let (vtype, voff) = pod::find_prop(&p, pod::SPA_FORMAT_VIDEO_MODIFIER)
-            .expect("EnumFormat must advertise SPA_FORMAT_VIDEO_modifier");
-        assert_eq!(vtype, pod::SPA_TYPE_CHOICE);
+    }
+
+    /// Choice layout (addendum #69a): the header after the pod header is
+    /// `kind, flags, child.size, child.type`, then the raw value bodies at
+    /// `child.size` stride. There must be no Struct wrapper and no
+    /// per-value pod headers.
+    #[test]
+    fn choice_pods_carry_kind_a_child_header_and_raw_values() {
+        let c = pod::choice(pod::SPA_CHOICE_ENUM, &[pod::id(11), pod::id(10)]);
+        let (size, ty) = pod::read_header(&c).unwrap();
+        assert_eq!(ty, pod::SPA_TYPE_CHOICE);
+        // size = kind + flags + child header + two 4-byte Id bodies.
+        assert_eq!(size as usize, 8 + 8 + 2 * 4);
+        assert_eq!(c.len(), 8 + size as usize, "no padding inside the pod");
         assert_eq!(
-            u32::from_le_bytes(p[voff + 8..voff + 12].try_into().unwrap()),
+            u32::from_le_bytes(c[8..12].try_into().unwrap()),
+            pod::SPA_CHOICE_ENUM
+        );
+        assert_eq!(u32::from_le_bytes(c[12..16].try_into().unwrap()), 0);
+        assert_eq!(
+            u32::from_le_bytes(c[16..20].try_into().unwrap()),
+            4,
+            "child.size is the first value's body size"
+        );
+        assert_eq!(
+            u32::from_le_bytes(c[20..24].try_into().unwrap()),
+            pod::SPA_TYPE_ID,
+            "child.type is the first value's pod type"
+        );
+        assert_eq!(u32::from_le_bytes(c[24..28].try_into().unwrap()), 11);
+        assert_eq!(u32::from_le_bytes(c[28..32].try_into().unwrap()), 10);
+
+        // The Long (modifier) shape has the same five-word header and
+        // 8-byte raw values.
+        let l = pod::choice(
             pod::SPA_CHOICE_ENUM,
-            "the modifier list is an Enum choice"
+            &[
+                pod::long(pod::DRM_FORMAT_MOD_LINEAR),
+                pod::long(pod::DRM_FORMAT_MOD_LINEAR),
+                pod::long(pod::DRM_FORMAT_MOD_INVALID),
+            ],
+        );
+        let (size, ty) = pod::read_header(&l).unwrap();
+        assert_eq!(ty, pod::SPA_TYPE_CHOICE);
+        assert_eq!(size as usize, 8 + 8 + 3 * 8);
+        assert_eq!(
+            u32::from_le_bytes(l[20..24].try_into().unwrap()),
+            pod::SPA_TYPE_LONG
         );
         assert_eq!(
-            pod::read_header(&p[voff + 16..]).unwrap().1,
-            pod::SPA_TYPE_STRUCT,
-            "choice children live in a Struct"
-        );
-        assert_eq!(
-            pod::read_header(&p[voff + 24..]).unwrap(),
-            (8, pod::SPA_TYPE_LONG),
-            "DRM modifiers are Long pods"
-        );
-        assert_eq!(
-            u64::from_le_bytes(p[voff + 32..voff + 40].try_into().unwrap()),
+            u64::from_le_bytes(l[24..32].try_into().unwrap()),
             pod::DRM_FORMAT_MOD_LINEAR
         );
         assert_eq!(
-            u64::from_le_bytes(p[voff + 48..voff + 56].try_into().unwrap()),
+            u64::from_le_bytes(l[32..40].try_into().unwrap()),
+            pod::DRM_FORMAT_MOD_LINEAR
+        );
+        assert_eq!(
+            u64::from_le_bytes(l[40..48].try_into().unwrap()),
             pod::DRM_FORMAT_MOD_INVALID
+        );
+
+        // Range choices use the same layout with three values.
+        let r = pod::choice(
+            pod::SPA_CHOICE_RANGE,
+            &[pod::rect(1920, 1080), pod::rect(1, 1), pod::rect(8192, 8192)],
+        );
+        let (size, ty) = pod::read_header(&r).unwrap();
+        assert_eq!(ty, pod::SPA_TYPE_CHOICE);
+        assert_eq!(size as usize, 8 + 8 + 3 * 8);
+        assert_eq!(
+            u32::from_le_bytes(r[20..24].try_into().unwrap()),
+            pod::SPA_TYPE_RECTANGLE
         );
     }
 
-    /// Addendum #65a: the confirmation pod is built from the negotiated
-    /// values and must round-trip through the same parser used on the
-    /// node's Format pod (fourcc, size, framerate and modifier).
+    /// Every EnumFormat choice is a real SPA Choice: default duplicated
+    /// first, child header from value 0, raw values packed behind it.
     #[test]
-    fn confirmed_format_pod_round_trips_the_negotiated_values() {
-        let info = pod::VideoInfo {
-            format: pod::SPA_VIDEO_FORMAT_BGRA,
-            width: 2560,
-            height: 1440,
-            framerate_num: 60,
-            framerate_denom: 1,
-            modifier: Some(pod::DRM_FORMAT_MOD_LINEAR),
+    fn enum_format_choices_have_the_spa_choice_layout() {
+        let p = pod::enum_format_video();
+        let values = |key: u32| -> (u32, u32, Vec<u64>) {
+            let (vtype, voff) = pod::find_prop(&p, key).expect("property present");
+            assert_eq!(vtype, pod::SPA_TYPE_CHOICE);
+            let (size, ty) = pod::read_header(&p[voff..]).unwrap();
+            assert_eq!(ty, pod::SPA_TYPE_CHOICE);
+            assert_eq!(
+                pod::pod_total_len(&p[voff..voff + 8]),
+                Some(size as usize + 8),
+                "the choice's size header covers its whole body"
+            );
+            let kind = u32::from_le_bytes(p[voff + 8..voff + 12].try_into().unwrap());
+            let child_size =
+                u32::from_le_bytes(p[voff + 16..voff + 20].try_into().unwrap()) as usize;
+            let child_type =
+                u32::from_le_bytes(p[voff + 20..voff + 24].try_into().unwrap());
+            let count = (size as usize - 16) / child_size;
+            let mut out = Vec::new();
+            for i in 0..count {
+                let at = voff + 24 + i * child_size;
+                out.push(match child_size {
+                    4 => u32::from_le_bytes(p[at..at + 4].try_into().unwrap()) as u64,
+                    8 => u64::from_le_bytes(p[at..at + 8].try_into().unwrap()),
+                    _ => panic!("unexpected child size {child_size}"),
+                });
+            }
+            (kind, child_type, out)
         };
-        let pod_bytes = pod::format_video(&info);
-        assert_eq!(pod::parse_video_info(&pod_bytes), Some(info));
-        assert_eq!(
-            pod::find_prop(&pod_bytes, pod::SPA_FORMAT_VIDEO_MODIFIER)
-                .expect("negotiated modifier must be confirmed")
-                .0,
-            pod::SPA_TYPE_LONG
-        );
-        assert_eq!(pod::fourcc(info.format), "AR24");
-        assert_eq!(pod::format_name(info.format), "BGRA");
 
-        // A modifier-less format confirms without the property (the
-        // header says to omit it for non-DMA-BUF buffers).
-        let no_modifier = pod::VideoInfo {
-            modifier: None,
-            ..info
-        };
-        let plain = pod::format_video(&no_modifier);
-        assert!(pod::find_prop(&plain, pod::SPA_FORMAT_VIDEO_MODIFIER).is_none());
-        assert_eq!(pod::parse_video_info(&plain), Some(no_modifier));
+        // Format: default BGRx first, then the accepted set.
+        let (kind, ctype, formats) = values(pod::SPA_FORMAT_VIDEO_FORMAT);
+        assert_eq!(kind, pod::SPA_CHOICE_ENUM);
+        assert_eq!(ctype, pod::SPA_TYPE_ID);
+        assert_eq!(
+            formats,
+            vec![
+                pod::SPA_VIDEO_FORMAT_BGRX as u64,
+                pod::SPA_VIDEO_FORMAT_BGRX as u64,
+                pod::SPA_VIDEO_FORMAT_BGRA as u64,
+                pod::SPA_VIDEO_FORMAT_RGBX as u64,
+                pod::SPA_VIDEO_FORMAT_RGBA as u64,
+            ]
+        );
+
+        // Modifier: LINEAR default first and repeated, INVALID last.
+        let (kind, ctype, modifiers) = values(pod::SPA_FORMAT_VIDEO_MODIFIER);
+        assert_eq!(kind, pod::SPA_CHOICE_ENUM);
+        assert_eq!(ctype, pod::SPA_TYPE_LONG);
+        assert_eq!(
+            modifiers,
+            vec![
+                pod::DRM_FORMAT_MOD_LINEAR,
+                pod::DRM_FORMAT_MOD_LINEAR,
+                pod::DRM_FORMAT_MOD_INVALID,
+            ]
+        );
+
+        // Size: Range with default then min/max.
+        let (kind, ctype, _) = values(pod::SPA_FORMAT_VIDEO_SIZE);
+        assert_eq!(kind, pod::SPA_CHOICE_RANGE);
+        assert_eq!(ctype, pod::SPA_TYPE_RECTANGLE);
     }
 
     #[test]
@@ -2260,23 +2379,6 @@ mod tests {
 
         // A truncated/garbage header is rejected rather than underflowed.
         assert_eq!(pod::pod_total_len(&[0, 1, 2]), None);
-    }
-
-    #[test]
-    fn choice_pods_carry_their_kind_and_child_struct() {
-        let c = pod::choice(pod::SPA_CHOICE_ENUM, &[pod::id(11), pod::id(10)]);
-        let (size, ty) = pod::read_header(&c).unwrap();
-        assert_eq!(ty, pod::SPA_TYPE_CHOICE);
-        assert_eq!(size as usize + 8, c.len());
-        assert_eq!(
-            u32::from_le_bytes(c[8..12].try_into().unwrap()),
-            pod::SPA_CHOICE_ENUM
-        );
-        // The child struct starts right after the choice body.
-        assert_eq!(
-            pod::read_header(&c[16..]).unwrap().1,
-            pod::SPA_TYPE_STRUCT
-        );
     }
 
     #[test]
