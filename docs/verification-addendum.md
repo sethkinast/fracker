@@ -844,3 +844,13 @@ it refines the brief where they disagree. For the next worker pass.
     the reset rule keys on true dates everywhere.
     Scope: the profile only — worldstate and static
     caches are separate designs, untouched.
+73. **Varzia timer copy (Seth, 2026-10-22):** the
+    resurgence pill reads "IN 6D LEFT". plan.rs builds
+    ends_in WITH the prefix ("in 6d", plan.rs's
+    countdown formatter) because the header pill wants
+    "N primes · in 6d"; the resurgence panel
+    (render.rs) appends " left" to the same value, and
+    the goal footer ("In Varzia · {ends} left") does
+    it too. Fix: the "…left" sites use a bare duration
+    ("6d left"); the header keeps "in 6d". QUEUED with
+    #72.
