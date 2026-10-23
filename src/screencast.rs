@@ -696,6 +696,32 @@ mod pod {
     /// canonical consumer answer (OBS's linux-pipewire plugin sends
     /// exactly this one prop; count/size/stride derive from the Format).
     pub const SPA_PARAM_BUFFERS_DATA_TYPE: u32 = 6;
+    /// `SPA_PARAM_Meta` and its object type (`spa/include/spa/param/
+    /// param.h` — Meta follows Buffers in the param enum;
+    /// `spa/include/spa/utils/type.h` — ParamMeta follows ParamBuffers).
+    pub const SPA_PARAM_META: u32 = 6;
+    pub const SPA_TYPE_OBJECT_PARAM_META: u32 = 0x40005;
+    /// Meta-param property keys (`spa/include/spa/param/buffers.h:32-36`;
+    /// `SPA_PARAM_META_START` is 0).
+    pub const SPA_PARAM_META_TYPE: u32 = 1;
+    pub const SPA_PARAM_META_SIZE: u32 = 2;
+    /// `enum spa_meta_type` (`spa/include/spa/buffer/meta.h:29-39`,
+    /// zero-based): Header=1, VideoCrop=2, Cursor=5.
+    pub const SPA_META_HEADER: u32 = 1;
+    pub const SPA_META_VIDEO_CROP: u32 = 2;
+    pub const SPA_META_CURSOR: u32 = 5;
+    /// `sizeof(struct spa_meta_header)` = u32+u32+i64+i64+u64
+    /// (`spa/include/spa/buffer/meta.h:77-92`).
+    pub const SPA_META_HEADER_SIZE: i32 = 32;
+    /// `sizeof(struct spa_meta_region)` = one `spa_region`
+    /// (point + rectangle, 8+8) (`spa/include/spa/buffer/meta.h:93-95`).
+    pub const SPA_META_VIDEO_CROP_SIZE: i32 = 16;
+    /// OBS's cursor meta sizes: `sizeof(spa_meta_cursor)` (28) +
+    /// `sizeof(spa_meta_bitmap)` (20) + w*h*4, for 64x64 / 1x1 /
+    /// 1024x1024 (OBS linux-pipewire `CURSOR_META_SIZE`).
+    pub const SPA_META_CURSOR_SIZE: i32 = 28 + 20 + 64 * 64 * 4;
+    pub const SPA_META_CURSOR_SIZE_MIN: i32 = 28 + 20 + 1 * 1 * 4;
+    pub const SPA_META_CURSOR_SIZE_MAX: i32 = 28 + 20 + 1024 * 1024 * 4;
     pub const SPA_TYPE_INT: u32 = 4;
 
     /// Format property keys (`spa/include/spa/param/format.h:91-95`).
@@ -762,18 +788,61 @@ mod pod {
     }
 
     /// The `SPA_PARAM_Buffers` answer a consumer sends once the node has
-    /// proposed a fixed `Format`: the memory types it can read (MemPtr
-    /// bit 1, MemFd bit 2, DmaBuf bit 3 of `spa_data_type` as a mask).
-    /// Count, block size and stride are the node's business, derived
-    /// from the negotiated Format — v0.5.13 sent them (buffers=0 among
-    /// them) and KWin cycled format proposals ~500 times without ever
-    /// allocating; OBS sends dataType alone.
-    pub fn param_buffers() -> Vec<u8> {
+    /// proposed a fixed `Format`: a bare-Int `dataType` mask of the
+    /// memory types it can read (`spa_data_type` bits). Count, block
+    /// size and stride are the node's business, derived from the
+    /// negotiated Format. OBS sends dataType alone, as MemPtr plus
+    /// DmaBuf when the Format carries a modifier.
+    pub fn param_buffers(data_type_mask: u32) -> Vec<u8> {
         object(
             SPA_TYPE_OBJECT_PARAM_BUFFERS,
             SPA_PARAM_BUFFERS,
-            &[prop(SPA_PARAM_BUFFERS_DATA_TYPE, int(0b1110))],
+            &[prop(SPA_PARAM_BUFFERS_DATA_TYPE, int(data_type_mask as i32))],
         )
+    }
+
+    /// One `SPA_PARAM_Meta` declaration: which buffer metadata the
+    /// consumer supports, and at what maximum size.
+    pub fn param_meta(meta_type: u32, size: Vec<u8>) -> Vec<u8> {
+        object(
+            SPA_TYPE_OBJECT_PARAM_META,
+            SPA_PARAM_META,
+            &[
+                prop(SPA_PARAM_META_TYPE, id(meta_type)),
+                prop(SPA_PARAM_META_SIZE, size),
+            ],
+        )
+    }
+
+    /// The full negotiation answer OBS's linux-pipewire plugin sends
+    /// from `param_changed(Format)`, in its order: VideoCrop meta,
+    /// Cursor meta, the Buffers dataType, Header meta — one
+    /// `pw_stream_update_params` call carrying all four. v0.5.14 sent
+    /// the Buffers pod alone: KWin accepted the format (two proposals,
+    /// then quiet) but never allocated a buffer; the Meta declarations
+    /// are the missing half of the canonical answer.
+    pub fn negotiation_params(has_modifier: bool) -> [Vec<u8>; 4] {
+        // `spa_data_type`: MemPtr = 1, DmaBuf = 3 (bit positions).
+        let mut mask: u32 = 1 << 1;
+        if has_modifier {
+            mask |= 1 << 3;
+        }
+        [
+            param_meta(SPA_META_VIDEO_CROP, int(SPA_META_VIDEO_CROP_SIZE)),
+            param_meta(
+                SPA_META_CURSOR,
+                choice(
+                    SPA_CHOICE_RANGE,
+                    &[
+                        int(SPA_META_CURSOR_SIZE),
+                        int(SPA_META_CURSOR_SIZE_MIN),
+                        int(SPA_META_CURSOR_SIZE_MAX),
+                    ],
+                ),
+            ),
+            param_buffers(mask),
+            param_meta(SPA_META_HEADER, int(SPA_META_HEADER_SIZE)),
+        ]
     }
 
     /// A bare `Long` pod (`size = 8`: `struct spa_pod_long` wraps an
@@ -2139,14 +2208,17 @@ unsafe extern "C" fn on_param_changed(data: *mut c_void, id: u32, param: *const 
     } else {
         true
     };
-    let buffers = pod::param_buffers();
-    let bwords = to_aligned_words(&buffers);
-    let bparams: [*const c_void; 1] = [bwords.as_ptr() as *const c_void];
-    let brc = (ctx.api.pw_stream_update_params)(ctx.stream, bparams.as_ptr(), 1);
+    let pods = pod::negotiation_params(info.modifier.is_some());
+    let words: Vec<Vec<u64>> = pods.iter().map(|p| to_aligned_words(p)).collect();
+    let params: Vec<*const c_void> = words
+        .iter()
+        .map(|w| w.as_ptr() as *const c_void)
+        .collect();
+    let brc = (ctx.api.pw_stream_update_params)(ctx.stream, params.as_ptr(), params.len() as u32);
     if brc < 0 {
         ctx.log.record(
             "connecting",
-            &format!("PipeWire: pw_stream_update_params(Buffers) failed ({brc})"),
+            &format!("PipeWire: pw_stream_update_params(negotiation) failed ({brc})"),
         );
     }
 
@@ -2174,7 +2246,7 @@ unsafe extern "C" fn on_param_changed(data: *mut c_void, id: u32, param: *const 
         "connecting",
         &format!(
             "PipeWire negotiated format: {} (fourcc {}, spa {:#x}) {}x{} @ {}/{} fps{}; \
-             answered with SPA_PARAM_Buffers",
+             answered with SPA_PARAM_Buffers + Meta (VideoCrop/Cursor/Header)",
             pod::format_name(info.format),
             pod::fourcc(info.format),
             info.format,
@@ -3081,24 +3153,92 @@ mod tests {
     }
 
     /// The Buffers answer is the canonical minimal one: a single
-    /// dataType prop (v0.5.13's count/size/stride props — buffers=0
-    /// among them — left KWin cycling proposals without allocating).
+    /// dataType prop carrying the caller's mask verbatim.
     #[test]
     fn param_buffers_is_datatype_only() {
-        let p = pod::param_buffers();
-        let (size, ty) = pod::read_header(&p).unwrap();
-        assert_eq!(ty, pod::SPA_TYPE_OBJECT);
-        assert_eq!(size as usize + 8, p.len());
-        let body_type = u32::from_le_bytes(p[8..12].try_into().unwrap());
-        let body_id = u32::from_le_bytes(p[12..16].try_into().unwrap());
-        assert_eq!(body_type, pod::SPA_TYPE_OBJECT_PARAM_BUFFERS);
-        assert_eq!(body_id, pod::SPA_PARAM_BUFFERS);
-        let (key, vtype, value_off, next) = pod::prop_at(&p, 16).unwrap();
+        for mask in [0b0010u32, 0b1010] {
+            let p = pod::param_buffers(mask);
+            let (size, ty) = pod::read_header(&p).unwrap();
+            assert_eq!(ty, pod::SPA_TYPE_OBJECT);
+            assert_eq!(size as usize + 8, p.len());
+            let body_type = u32::from_le_bytes(p[8..12].try_into().unwrap());
+            let body_id = u32::from_le_bytes(p[12..16].try_into().unwrap());
+            assert_eq!(body_type, pod::SPA_TYPE_OBJECT_PARAM_BUFFERS);
+            assert_eq!(body_id, pod::SPA_PARAM_BUFFERS);
+            let (key, vtype, value_off, next) = pod::prop_at(&p, 16).unwrap();
+            assert_eq!(key, pod::SPA_PARAM_BUFFERS_DATA_TYPE);
+            assert_eq!(vtype, pod::SPA_TYPE_INT);
+            let v = i32::from_le_bytes(p[value_off + 8..value_off + 12].try_into().unwrap());
+            assert_eq!(v, mask as i32);
+            assert_eq!(next, p.len(), "exactly one prop");
+        }
+    }
+
+    /// The negotiation answer is OBS's four-param set, in order:
+    /// VideoCrop meta, Cursor meta, Buffers, Header meta — with the
+    /// header-verified meta type ids and struct sizes.
+    #[test]
+    fn negotiation_params_match_obs_shape() {
+        let pods = pod::negotiation_params(true);
+        let meta_head = |p: &[u8]| {
+            let (size, ty) = pod::read_header(p).unwrap();
+            assert_eq!(ty, pod::SPA_TYPE_OBJECT);
+            assert_eq!(size as usize + 8, p.len());
+            let body_type = u32::from_le_bytes(p[8..12].try_into().unwrap());
+            let body_id = u32::from_le_bytes(p[12..16].try_into().unwrap());
+            assert_eq!(body_type, pod::SPA_TYPE_OBJECT_PARAM_META);
+            assert_eq!(body_id, pod::SPA_PARAM_META);
+            let (k1, t1, v1, n1) = pod::prop_at(p, 16).unwrap();
+            assert_eq!(k1, pod::SPA_PARAM_META_TYPE);
+            assert_eq!(t1, pod::SPA_TYPE_ID);
+            let meta_type = u32::from_le_bytes(p[v1 + 8..v1 + 12].try_into().unwrap());
+            let (k2, t2, v2, n2) = pod::prop_at(p, n1).unwrap();
+            assert_eq!(k2, pod::SPA_PARAM_META_SIZE);
+            assert_eq!(n2, p.len(), "exactly two props");
+            (meta_type, t2, v2)
+        };
+        // [0] VideoCrop: bare Int size = sizeof(spa_meta_region) = 16.
+        let (mt, t2, v2) = meta_head(&pods[0]);
+        assert_eq!(mt, pod::SPA_META_VIDEO_CROP);
+        assert_eq!(t2, pod::SPA_TYPE_INT);
+        assert_eq!(
+            i32::from_le_bytes(pods[0][v2 + 8..v2 + 12].try_into().unwrap()),
+            16
+        );
+        // [1] Cursor: Choice(Range) of Int, OBS's cursor sizes.
+        let (mt, t2, v2) = meta_head(&pods[1]);
+        assert_eq!(mt, pod::SPA_META_CURSOR);
+        assert_eq!(t2, pod::SPA_TYPE_CHOICE);
+        let p = &pods[1];
+        let kind = u32::from_le_bytes(p[v2 + 8..v2 + 12].try_into().unwrap());
+        assert_eq!(kind, pod::SPA_CHOICE_RANGE);
+        let vals: Vec<i32> = (0..3)
+            .map(|i| i32::from_le_bytes(p[v2 + 24 + 4 * i..v2 + 28 + 4 * i].try_into().unwrap()))
+            .collect();
+        assert_eq!(vals, vec![16432, 52, 4194352]);
+        // [2] Buffers with modifier: MemPtr|DmaBuf.
+        let (key, vtype, value_off, _) = pod::prop_at(&pods[2], 16).unwrap();
         assert_eq!(key, pod::SPA_PARAM_BUFFERS_DATA_TYPE);
         assert_eq!(vtype, pod::SPA_TYPE_INT);
-        let v = i32::from_le_bytes(p[value_off + 8..value_off + 12].try_into().unwrap());
-        assert_eq!(v, 0b1110, "MemPtr|MemFd|DmaBuf");
-        assert_eq!(next, p.len(), "exactly one prop");
+        assert_eq!(
+            i32::from_le_bytes(pods[2][value_off + 8..value_off + 12].try_into().unwrap()),
+            0b1010
+        );
+        // [3] Header: bare Int size = sizeof(spa_meta_header) = 32.
+        let (mt, t2, v2) = meta_head(&pods[3]);
+        assert_eq!(mt, pod::SPA_META_HEADER);
+        assert_eq!(t2, pod::SPA_TYPE_INT);
+        assert_eq!(
+            i32::from_le_bytes(pods[3][v2 + 8..v2 + 12].try_into().unwrap()),
+            32
+        );
+        // Without a modifier the mask is MemPtr alone.
+        let pods = pod::negotiation_params(false);
+        let (_, _, value_off, _) = pod::prop_at(&pods[2], 16).unwrap();
+        assert_eq!(
+            i32::from_le_bytes(pods[2][value_off + 8..value_off + 12].try_into().unwrap()),
+            0b0010
+        );
     }
 
     #[test]
