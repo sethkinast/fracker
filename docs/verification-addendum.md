@@ -774,3 +774,22 @@ it refines the brief where they disagree. For the next worker pass.
     values. Discriminators: the page's profile status
     line, the cache file's mtime + stored Daily values,
     and a direct curl of the endpoint. Still queued.
+    RESOLVED (same night, hard evidence): the plan's
+    status line reads "profile live", generated
+    2026-10-23 02:48 UTC; the cache file (written by a
+    LIVE fetch at 02:39 UTC) contains yesterday's
+    document byte-for-byte (DailyAffiliation 0,
+    Necraloid 1000, DailyFocus 232630, Ventkids 30994 —
+    the 6-point spend is yesterday's fingerprint),
+    while a direct curl at 03:04 UTC returns current
+    values (19586 / 31000 / 387278). DE's endpoint
+    served a pre-reset replica for ~3h after the reset
+    and rolled over between 02:48 and 03:04 UTC. The
+    app chain is exonerated — it fetched live and
+    rendered faithfully. The app-side defect that
+    remains: profile_context judges freshness by OUR
+    fetch clock, but the endpoint's data has its own
+    age. Fix shape (same queued item): treat a
+    post-reset snapshot whose DailyCaps are identical
+    to the last pre-reset snapshot's as pre-reset
+    (render full caps) — content age, not fetch age.
