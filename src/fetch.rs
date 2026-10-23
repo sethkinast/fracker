@@ -373,6 +373,18 @@ pub fn parse_profile(text: &str) -> Result<ProfileSnapshot, String> {
     })
 }
 
+/// Load the uniqueName -> display name map (`data/cache/item-names.json`,
+/// built from the WFCD items dataset). Missing/unreadable = empty map:
+/// name resolution degrades, never guesses.
+pub fn load_item_names(
+    data_dir: &Path,
+) -> std::collections::HashMap<String, String> {
+    std::fs::read_to_string(data_dir.join("cache/item-names.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
 /// Resolve profile XPInfo uniqueNames to display names via the
 /// uniqueName -> name map (`data/cache/item-names.json`, built from the
 /// WFCD items dataset). Unresolvable entries are skipped, never guessed.

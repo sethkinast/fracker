@@ -94,6 +94,8 @@ fn golden_plan_recompute() -> Golden {
     let stock: &'static RelicStock = Box::leak(Box::new(RelicStock::Unknown));
     let pins: &'static Vec<String> = Box::leak(Box::new(Vec::new()));
     let recent: &'static HashSet<String> = Box::leak(Box::new(HashSet::new()));
+    let item_names: &'static std::collections::HashMap<String, String> =
+        Box::leak(Box::new(fracker::fetch::load_item_names(&root().join("data"))));
     let tuning: &'static fracker::tuning::Tuning =
         Box::leak(Box::new(fracker::tuning::Tuning::load(&root().join("data")).unwrap()));
     let input = PlanInput {
@@ -109,6 +111,7 @@ fn golden_plan_recompute() -> Golden {
         steel_path_tiebreak: true,
         completed_missions: &[],
         tuning,
+        item_names,
     };
     let plan = plan::plan(&input);
     // Re-read the backlog for assertions (the leaked copies are 'static).
