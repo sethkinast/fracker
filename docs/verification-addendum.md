@@ -811,3 +811,25 @@ it refines the brief where they disagree. For the next worker pass.
     4", row "~32m for 4", the 400 tr prep framing):
     the plan's EV math is not a commitment to prep
     four relics. QUEUED by Seth ("next in queue").
+    Seth's shape (2026-10-22, supersedes the fingerprint
+    as the primary fix): the rule is about the snapshot's
+    DATE, not its content. A snapshot dated pre-reset
+    must be ignored post-reset. The current live path
+    violates this by construction: fetch_profile's TTL
+    branch discards the snapshot's true age and
+    report.rs stamps fetched_at = now, so a document
+    fetched 23:50 and served from the 30-min cache at
+    00:10 renders pre-reset values as current — wrong
+    for 20 minutes in the NORMAL case, no endpoint lag
+    required. Fix: (1) fetch_profile surfaces the true
+    fetch time (network = now, cache hit = file mtime)
+    and report.rs passes it through (profile_fallback
+    already does); (2) the profile TTL clamps at the
+    reset boundary — a cache entry never counts as
+    fresh across 00:00 UTC, so the first post-reset
+    generate refetches instead of coasting. With true
+    dating, the existing profile_context reset rule
+    does the rest. Named limit: tonight's incident (a
+    live post-reset fetch returning pre-reset DATA)
+    is not covered by dating alone — Seth's call
+    whether the content check joins it.
