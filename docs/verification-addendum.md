@@ -992,3 +992,40 @@ it refines the brief where they disagree. For the next worker pass.
     theory. Parked for when frames flow: skip frames
     whose chunk size is 0 (KWin's no-change signal)
     instead of re-OCR-ing stale pixels.
+80. **Capture WORKS live (v0.5.17, Seth's runs
+    2026-10-23 ~02:05–02:13 EDT).** Round 5 landed:
+    state 2→3, add_buffer ×3, frames drained, clean
+    teardown. Seth's captures wrote real stock —
+    Arcanes (75 stacks with per-rank copies), Relics
+    (per-tier counts). Two live defects remain:
+    (a) Prime Parts never classifies — its header
+    strip OCRs to nothing the parts keywords match,
+    so every frame fell to Other (finalize said
+    "nothing collected", never "0 parts"). (b) Lossy
+    coverage: ~700 distinct relics, slow scroll,
+    152 captured = ~2 viewports of 77. Mechanism is
+    in the code: read_frame spawns tesseract per
+    cell (name + count ≈ 150–230 spawns per 77-cell
+    screen = many seconds per frame) while the frame
+    channel holds ONE frame (sync_channel(1) +
+    try_send drops the rest); a continuous scroll
+    outruns the reader. Step-and-hold works today
+    (the channel always holds the newest frame).
+    The durable fix is batched OCR: one tesseract
+    TSV pass per grid, word boxes mapped to cells.
+    v0.5.18 ships the evidence for both defects —
+    header-OCR samples + frames seen/read/skipped
+    logged at every finalize, and evidence PNGs
+    (first frame, first frame per recognised class)
+    under <data>/capture-debug/ — so the Parts fix
+    lands as data (screens.toml keywords) read off
+    the actual header text, and the batching win is
+    measurable. Also in v0.5.18 (Seth, same night):
+    Farm rows OUT of the crack queue — the tier-3
+    farm chunks and the appended "Farm:" rows both
+    removed; score_farms/FarmHint data kept for a
+    future presentation. Box-suite note: the OCR
+    fixture tests are multi-minute each on the
+    aarch64 box (a single capture-sequence test
+    exceeds 150 s alone) — gate them on CI, not by
+    watching a box suite and calling it hung.
