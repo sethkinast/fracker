@@ -309,9 +309,11 @@ pub async fn generate(
     let (cfg_file, _) = config::Config::load(&cfg.config_path)
         .unwrap_or((config::Config::default(), config::ConfigSource::Defaults));
 
+    let item_names = fetch::load_item_names(&cfg.data_dir);
     let input = plan::PlanInput {
         now,
         world: &world,
+        item_names: &item_names,
         owned: &owned,
         wants: &wants,
         roster: &roster,
@@ -432,11 +434,7 @@ fn profile_context(
     fetched_at: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
 ) -> (OwnedEquipment, Option<render::DailyRender>) {
-    let names: HashMap<String, String> =
-        std::fs::read_to_string(data_dir.join("cache/item-names.json"))
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default();
+    let names = fetch::load_item_names(data_dir);
     let owned = fetch::owned_names_from_profile(snap, &names);
     let mr = snap.mastery_rank;
     let caps = &tuning.planner.daily_caps;

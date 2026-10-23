@@ -43,6 +43,10 @@ pub struct PlanInput<'a> {
     pub completed_missions: &'a [crate::elog::MissionCompletion],
     /// Runtime estimates/thresholds (loaded from `data/`).
     pub tuning: &'a Tuning,
+    /// uniqueName -> display name map (the items dataset). Resolves
+    /// the Varzia rotation's Void Projection items to relic names
+    /// (addendum #76).
+    pub item_names: &'a HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,7 +57,7 @@ pub enum PartState {
 }
 
 /// Where a relic's copies can come from, in the order the planner
-/// prefers them (addendum #68): held stock first, then relics still in
+/// prefers them (addendum #76): held stock first, then relics still in
 /// the drop tables, then vaulted relics carried by the live Varzia
 /// rotation, and finally relics with no current source at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -70,88 +74,47 @@ impl SourceTier {
     }
 }
 
-/// Live Varzia availability (addendum #68), derived from the world
-/// state's `PrimeVaultTraders` manifest only.
+/// Live Varzia availability (addendum #76), resolved exactly from
+/// the world state's `PrimeVaultTraders` manifest: the rotation
+/// sells a FIXED set of relics, published as Void Projection items,
+/// and the items dataset names each projection (the manifest's
+/// `.../Projections/T2VoidProjectionProteaIvaraVaultBBronze` is the
+/// dataset's "Meso V16 Intact"). Availability is a lookup, never an
+/// inference.
 ///
-/// A vaulted relic is available when either:
-/// * the manifest directly names that relic, or
-/// * the manifest's gear tokens cover the parent gear of the relic's
-///   rarest roster-identified reward (lowest Intact chance; ties combine
-///   parent gears and any match counts).
-///
-/// The second clause mirrors how Varzia sells relics: the rotation
-/// advertises gear, and buying that gear's relics is the path to the
-/// listed rewards. Anchoring on the *rarest* reward avoids treating every
-/// mixed legacy relic that happens to contain a rotation frame's common
-/// part as available.
+/// Addendum #68's rarest-reward rule inferred availability from
+/// content overlap; that is false — Axi V12 contains a Velox Prime
+/// Barrel and Velox is in the current loop, but the loop's Velox
+/// relic is Meso V16 and Axi V12 is not sold (Seth, 2026-10-22:
+/// "the data model is important here").
 #[derive(Debug, Clone, Default)]
 pub struct VarziaAvailability {
     available: HashSet<String>,
 }
 
 impl VarziaAvailability {
-    pub fn from_world(
-        world: &WorldState,
-        roster: &Roster,
-        relics: &RelicTables,
-    ) -> Self {
+    pub fn from_world(world: &WorldState, item_names: &HashMap<String, String>) -> Self {
         let Some(vt) = world.vault_trader.as_ref() else {
             return Self::default();
         };
-        let gear_tokens = vt.gear_tokens();
-        let manifest_names: Vec<String> = vt
-            .inventory
-            .iter()
-            .flat_map(|item| {
-                [
-                    crate::model::normalize_gear_token(&item.unique_name),
-                    crate::model::normalize_gear_token(&item.item),
-                ]
-            })
-            .filter(|s| !s.is_empty())
-            .collect();
-        let parentage = roster.parentage();
         let mut available = HashSet::new();
-        for (name, relic) in &relics.relics {
-            // Unvaulted relics are already tier 2; only vaulted relics
-            // need the Varzia question answered.
-            if !relic.vaulted {
+        for item in &vt.inventory {
+            // Manifest paths are StoreItems variants of the dataset's
+            // /Lotus/Types keys; match on the projection tail.
+            let Some(tail) = item.unique_name.split("/Projections/").nth(1) else {
                 continue;
-            }
-            let direct = relic_name_token(name);
-            if !direct.is_empty()
-                && manifest_names
-                    .iter()
-                    .any(|m| token_contains(m, &direct))
-            {
-                available.insert(name.clone());
+            };
+            let key = format!("/Lotus/Types/Game/Projections/{tail}");
+            let Some(display) = item_names.get(&key) else {
                 continue;
-            }
-            // Rarest roster-identified reward: ignore Forma and other
-            // rewards with no prime parent when choosing the anchor.
-            let mut rarest = f64::INFINITY;
-            let mut parents: Vec<&str> = Vec::new();
-            for reward in &relic.rewards {
-                let chance = reward.chance_at(Refinement::Intact);
-                if chance <= 0.0 {
-                    continue;
-                }
-                let Some(ps) = parentage.get(&reward.name) else {
-                    continue;
-                };
-                if chance < rarest - 1e-9 {
-                    rarest = chance;
-                    parents.clear();
-                }
-                if (chance - rarest).abs() < 1e-9 {
-                    parents.extend(ps.iter().map(String::as_str));
-                }
-            }
-            if parents
-                .iter()
-                .any(|p| gear_in_tokens(p, &gear_tokens))
-            {
-                available.insert(name.clone());
+            };
+            // "Meso V16 Intact" -> "Meso V16": drop the refinement word.
+            let relic = display
+                .rsplit_once(' ')
+                .map(|(name, _)| name)
+                .unwrap_or(display.as_str());
+            if !relic.is_empty() {
+                available.insert(relic.to_owned());
             }
         }
         Self { available }
@@ -194,22 +157,6 @@ impl VarziaAvailability {
         });
         out
     }
-}
-
-/// "Axi P10" -> "axi p10", for direct manifest-name matching.
-fn relic_name_token(name: &str) -> String {
-    name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { ' ' })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// Token-boundary containment ("axi p10" matches "axi p10 relic", not
-/// "axi p100").
-fn token_contains(haystack: &str, needle: &str) -> bool {
-    format!(" {haystack} ").contains(&format!(" {needle} "))
 }
 
 #[derive(Debug, Clone)]
@@ -358,6 +305,8 @@ pub struct CrackInfo {
     pub relic: String,
     pub refinement: String,
     pub chance: f64,
+    /// The target part's rarity band (queue part-name color, #72c).
+    pub rarity: Rarity,
     /// Relic copies in the crack batch (`×4`).
     pub batch: u32,
     /// Total void-trace cost for the batch (`400 tr`).
@@ -874,7 +823,15 @@ fn part_rows_for_gear(
             }
         }
     }
-    names.sort();
+    // Addendum #74: the item's own blueprint heads the list — exactly
+    // "<Gear> Blueprint", not component blueprints like "<Gear>
+    // Chassis Blueprint". The rest stay alphabetical.
+    let own_blueprint = format!("{gear} Blueprint");
+    names.sort_by(|a, b| {
+        (a != &own_blueprint)
+            .cmp(&(b != &own_blueprint))
+            .then_with(|| a.cmp(b))
+    });
     names
         .into_iter()
         .map(|part| {
@@ -1482,6 +1439,11 @@ fn build_chunks(
                 .reverse()
                 .then_with(|| a.name.cmp(&b.name))
         });
+        // Addendum #72b: the representative crack must be obtainable.
+        // A frame whose needed parts have no obtainable source at all
+        // (relics vaulted, none owned, not in the Varzia loop) never
+        // enters the crack queue — there is nothing to run for it.
+        let mut representative = None;
         for part in needed {
             let mut others = want_set.clone();
             others.remove(&part.name);
@@ -1496,15 +1458,20 @@ fn build_chunks(
                 input.steel_path_tiebreak,
                 input.tuning,
             ) {
-                ranked.push((
-                    card.gear.clone(),
-                    cand,
-                    pick,
-                    part.name.clone(),
-                    card.action.text.clone(),
-                ));
-                break;
+                if !cand.source_tier.is_unobtainable() {
+                    representative = Some((cand, pick, part.name.clone()));
+                    break;
+                }
             }
+        }
+        if let Some((cand, pick, part_name)) = representative {
+            ranked.push((
+                card.gear.clone(),
+                cand,
+                pick,
+                part_name,
+                card.action.text.clone(),
+            ));
         }
     }
     ranked.sort_by(|a, b| {
@@ -1575,6 +1542,7 @@ fn build_chunks(
                 relic: cand.relic.clone(),
                 refinement: cand.refinement.name().to_owned(),
                 chance: cand.chance,
+                rarity: cand_rarity(input.tuning, &cand),
                 batch: cand.batch,
                 traces: cand.trace_cost,
                 covers: cand.coverage,
@@ -1787,7 +1755,7 @@ fn sanitize_id(s: &str) -> String {
 /// The planner: pure function of (world, profile, targets, drops, now).
 pub fn plan(input: &PlanInput<'_>) -> Plan {
     let (active, pruned) = prune_wants(input.owned, input.wants, input.roster);
-    let varzia = VarziaAvailability::from_world(input.world, input.roster, input.relics);
+    let varzia = VarziaAvailability::from_world(input.world, input.item_names);
     let cards = goal_cards_for(input, &active, &varzia);
     let focus = pick_focus(&cards, input.relics, input.stock, &varzia, input.tuning);
     let (chunks, farms, notes) =
@@ -1904,6 +1872,12 @@ mod tests {
     use super::*;
     use crate::elog;
     use crate::model::{Fissure, RelicTables, Roster, WorldState};
+
+    fn test_item_names() -> &'static HashMap<String, String> {
+        static NAMES: std::sync::OnceLock<HashMap<String, String>> =
+            std::sync::OnceLock::new();
+        NAMES.get_or_init(HashMap::new)
+    }
 
     fn tuning() -> Tuning {
         Tuning::for_tests()
@@ -2118,6 +2092,7 @@ mod tests {
             recent_gear: &recent,
             steel_path_tiebreak: true,
             completed_missions: &[],
+            item_names: test_item_names(),
             tuning: &tuning(),
         });
         assert_eq!(p.focus.len(), 3, "at most 3 parts");
@@ -2212,6 +2187,7 @@ mod tests {
             recent_gear: &recent,
             steel_path_tiebreak: true,
             completed_missions: &[],
+            item_names: test_item_names(),
             tuning: &tuning(),
         });
         let order: Vec<&str> = p.goals.iter().map(|g| g.gear.as_str()).collect();
@@ -2255,6 +2231,7 @@ mod tests {
             recent_gear: &recent,
             steel_path_tiebreak: true,
             completed_missions: &[],
+            item_names: test_item_names(),
             tuning: &tuning(),
         });
         assert_eq!(unpinned.goals[0].gear, "Khora Prime");
@@ -2271,6 +2248,7 @@ mod tests {
             recent_gear: &recent,
             steel_path_tiebreak: true,
             completed_missions: &[],
+            item_names: test_item_names(),
             tuning: &tuning(),
         });
         assert_eq!(p.goals[0].gear, "Zakti Prime");
@@ -2290,68 +2268,66 @@ mod tests {
     }
 
     #[test]
-    fn varzia_uses_the_rarest_roster_identified_reward() {
-        // Addendum #68: the manifest advertises gear. A vaulted relic is
-        // available only when the rotation covers the parent of its
-        // rarest prime reward, so mixed legacy relics do not all qualify.
-        let roster = Roster::from_json(
-            r#"[{"name": "Protea Prime", "vaulted": true, "type": "warframe",
-                  "parts": [{"name": "Protea Prime Blueprint"}, {"name": "Protea Prime Chassis Blueprint"}]},
-                 {"name": "Mesa Prime", "vaulted": true, "type": "warframe",
-                  "parts": [{"name": "Mesa Prime Blueprint"}, {"name": "Mesa Prime Neuroptics Blueprint"}]}]"#,
-        )
-        .unwrap();
-        let text = r#"{
-            "relics": {
-                "Axi P1": {"name": "Axi P1", "vaulted": true, "sources": {},
-                    "rewards": [
-                        {"name": "Protea Prime Blueprint", "chance": {"Intact": 2}},
-                        {"name": "Mesa Prime Blueprint", "chance": {"Intact": 11}},
-                        {"name": "Forma Blueprint", "chance": {"Intact": 25.33}}
-                    ]},
-                "Axi P2": {"name": "Axi P2", "vaulted": true, "sources": {},
-                    "rewards": [
-                        {"name": "Mesa Prime Neuroptics Blueprint", "chance": {"Intact": 2}},
-                        {"name": "Protea Prime Chassis Blueprint", "chance": {"Intact": 11}}
-                    ]},
-                "Axi P3": {"name": "Axi P3", "vaulted": true, "sources": {},
-                    "rewards": [
-                        {"name": "Mesa Prime Neuroptics Blueprint", "chance": {"Intact": 2}},
-                        {"name": "Protea Prime Chassis Blueprint", "chance": {"Intact": 11}}
-                    ]},
-                "Axi P4": {"name": "Axi P4", "vaulted": true, "sources": {},
-                    "rewards": [
-                        {"name": "Protea Prime Blueprint", "chance": {"Intact": 2}}
-                    ]}
-            },
-            "sources": {}
-        }"#;
-        let relics = RelicTables::from_json(text).unwrap();
-        let world = varzia_world(
-            "/Lotus/Types/StoreItems/Packages/MegaPrimeVault/MPVProteaPrimeSinglePack",
+    fn varzia_resolves_the_manifests_projection_set() {
+        // Addendum #76: the rotation sells a fixed relic set, published
+        // as Void Projection items and named by the items dataset.
+        // Content overlap is NOT availability: Axi V12 contains a
+        // Velox Prime Barrel and Velox gear is in this loop, but the
+        // loop's Velox relic is Meso V16 — Axi V12 stays unavailable.
+        let mut names: HashMap<String, String> = HashMap::new();
+        names.insert(
+            "/Lotus/Types/Game/Projections/T2VoidProjectionProteaIvaraVaultBBronze"
+                .to_owned(),
+            "Meso V16 Intact".to_owned(),
         );
-        let varzia = VarziaAvailability::from_world(&world, &roster, &relics);
+        names.insert(
+            "/Lotus/Types/Game/Projections/T4VoidProjectionProteaIvaraVaultABronze"
+                .to_owned(),
+            "Axi A23 Radiant".to_owned(),
+        );
+        let world = WorldState {
+            vault_trader: Some(crate::model::VaultTrader {
+                inventory: vec![
+                    crate::model::VaultTraderItem {
+                        unique_name: "/Lotus/StoreItems/Weapons/Tenno/Pistols/PrimeVelox/PrimeVeloxPistol"
+                            .to_owned(),
+                        item: String::new(),
+                    },
+                    crate::model::VaultTraderItem {
+                        unique_name: "/Lotus/StoreItems/Types/Game/Projections/T2VoidProjectionProteaIvaraVaultBBronze"
+                            .to_owned(),
+                        item: String::new(),
+                    },
+                    crate::model::VaultTraderItem {
+                        unique_name: "/Lotus/StoreItems/Types/Game/Projections/T4VoidProjectionProteaIvaraVaultABronze"
+                            .to_owned(),
+                        item: String::new(),
+                    },
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let varzia = VarziaAvailability::from_world(&world, &names);
+        assert!(varzia.is_available("Meso V16"), "the Vault B Meso projection");
+        assert!(varzia.is_available("Axi A23"), "any refinement variant names the relic");
         assert!(
-            varzia.is_available("Axi P1"),
-            "Protea is the rarest identified reward"
+            !varzia.is_available("Axi V12"),
+            "contains a featured part, but is not in the sold set"
+        );
+        assert!(!varzia.is_available("Lith B12"), "not in this manifest");
+        // No trader -> nothing is Varzia-available.
+        assert!(
+            !VarziaAvailability::from_world(&WorldState::default(), &names)
+                .is_available("Meso V16")
+        );
+        // A projection the dataset cannot name resolves to nothing,
+        // never a guess.
+        let unnamed = varzia_world(
+            "/Lotus/StoreItems/Types/Game/Projections/T1VoidProjectionNowhereVaultABronze",
         );
         assert!(
-            !varzia.is_available("Axi P2"),
-            "Mesa is the rarest; a Protea common part does not qualify"
-        );
-        assert!(
-            varzia.is_available("Axi P4"),
-            "Forma has no parent, so the rarest *roster-identified* reward is still Protea"
-        );
-        // Direct manifest naming still wins even when the rarest reward
-        // is not in the rotation.
-        let direct = varzia_world(
-            "/Lotus/StoreItems/Types/Game/Projections/T4VoidProjectionAxiP3Bronze",
-        );
-        assert!(
-            VarziaAvailability::from_world(&direct, &roster, &relics)
-                .is_available("Axi P3"),
-            "the manifest's projection names Axi P3"
+            !VarziaAvailability::from_world(&unnamed, &names).is_available("Lith B12")
         );
     }
 
@@ -2437,7 +2413,7 @@ mod tests {
         ];
         let recent: HashSet<String> = HashSet::new();
         let now: DateTime<Utc> = "2026-10-15T21:00:00Z".parse().unwrap();
-        let varzia = VarziaAvailability::from_world(&world, &roster, &relics);
+        let varzia = VarziaAvailability::from_world(&world, &HashMap::new());
         let cards = goal_cards(
             &PlanInput {
                 now,
@@ -2451,6 +2427,7 @@ mod tests {
                 recent_gear: &recent,
                 steel_path_tiebreak: true,
                 completed_missions: &[],
+                item_names: test_item_names(),
                 tuning: &tuning(),
             },
             &wants,
@@ -2524,6 +2501,7 @@ mod tests {
                 recent_gear: &recent,
                 steel_path_tiebreak: true,
                 completed_missions: &[],
+                item_names: test_item_names(),
                 tuning: &tuning(),
             })
         };
@@ -2609,6 +2587,7 @@ mod tests {
             recent_gear: &recent,
             steel_path_tiebreak: true,
             completed_missions: &[],
+            item_names: test_item_names(),
             tuning: &t,
         });
         assert_eq!(p.event_alerts.len(), 1, "expired alert drops out");
@@ -2632,6 +2611,7 @@ mod tests {
             recent_gear: &recent,
             steel_path_tiebreak: true,
             completed_missions: &[],
+            item_names: test_item_names(),
             tuning: &t,
         });
         assert!(q.event_alerts.is_empty() && q.lotus_alerts.is_empty());
@@ -2688,6 +2668,7 @@ mod tests {
             recent_gear: &recent,
             steel_path_tiebreak: true,
             completed_missions: &completions,
+            item_names: test_item_names(),
             tuning: &t,
         });
         assert_eq!(p.event_alerts.len(), 2);
@@ -2709,6 +2690,7 @@ mod tests {
             recent_gear: &recent,
             steel_path_tiebreak: true,
             completed_missions: &[],
+            item_names: test_item_names(),
             tuning: &t,
         });
         assert!(q.event_alerts.iter().all(|a| !a.done));

@@ -24,7 +24,6 @@ pub const XUERIAN_WISHLIST_URL: &str = "https://wf.xuerian.net/json/wishlist.jso
 /// WFCD items dataset (uniqueName -> display name, imageName, ...).
 pub const WFCD_ITEMS_URL: &str = "https://api.warframestat.us/items";
 
-pub const TTL_PROFILE: Duration = Duration::from_secs(30 * 60);
 pub const TTL_XUERIAN: Duration = Duration::from_secs(60 * 60);
 pub const TTL_STATIC_DATA: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
@@ -193,6 +192,46 @@ pub struct ProfileSnapshot {
     pub daily: DailyCaps,
 }
 
+/// How a live profile fetch failed: a `Definitive` answer (409 —
+/// the account does not exist) is a real error, never masked by the
+/// cache; anything else falls back to the on-disk snapshot.
+enum LiveFail {
+    Definitive(String),
+    Transient(String),
+}
+
+async fn fetch_profile_live(client: &reqwest::Client, url: &str) -> Result<String, LiveFail> {
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| LiveFail::Transient(format!("profile: {e}")))?;
+    if resp.status() == reqwest::StatusCode::CONFLICT {
+        return Err(LiveFail::Definitive(
+            "profile: no such account (HTTP 409)".to_owned(),
+        ));
+    }
+    let resp = resp
+        .error_for_status()
+        .map_err(|e| LiveFail::Transient(format!("profile: {e}")))?;
+    resp.text()
+        .await
+        .map_err(|e| LiveFail::Transient(format!("profile: {e}")))
+}
+
+fn profile_cache_fallback(
+    path: &Path,
+    reason: String,
+) -> Result<Fetched<ProfileSnapshot>, String> {
+    let cached =
+        read_cache(path).ok_or_else(|| format!("profile unreachable, no cache: {reason}"))?;
+    let snap = parse_profile(&cached)?;
+    Ok(Fetched {
+        value: snap,
+        status: FetchStatus::CacheFallback { reason },
+    })
+}
+
 pub async fn fetch_profile(
     client: &reqwest::Client,
     cache_dir: &Path,
@@ -200,42 +239,26 @@ pub async fn fetch_profile(
 ) -> Result<Fetched<ProfileSnapshot>, String> {
     let name = format!("profile-{account_id}.json");
     let path = cache_file(cache_dir, &name);
-    if cache_age(&path).map(|a| a < TTL_PROFILE).unwrap_or(false) {
-        if let Some(text) = read_cache(&path) {
-            if let Ok(snap) = parse_profile(&text) {
-                return Ok(Fetched {
+    let url = format!("{PROFILE_URL}?playerId={account_id}");
+    // Addendum #71: no app-side TTL. DE's endpoint already caches
+    // (~5 min per its own Cache-Control); a second 30-minute cache
+    // here only ever served pre-reset numbers after the 00:00 UTC
+    // reset. The disk file is the failure fallback, nothing more —
+    // and the report layer dates it by its mtime, so the reset rule
+    // sees its true age.
+    match fetch_profile_live(client, &url).await {
+        Ok(text) => match parse_profile(&text) {
+            Ok(snap) => {
+                write_cache(cache_dir, &name, &text);
+                Ok(Fetched {
                     value: snap,
                     status: FetchStatus::Fresh,
-                });
+                })
             }
-        }
-    }
-    let url = format!("{PROFILE_URL}?playerId={account_id}");
-    match client.get(&url).send().await {
-        Ok(resp) => {
-            if resp.status() == reqwest::StatusCode::CONFLICT {
-                return Err("profile: no such account (HTTP 409)".to_owned());
-            }
-            let resp = resp.error_for_status().map_err(|e| format!("profile: {e}"))?;
-            let text = resp.text().await.map_err(|e| format!("profile: {e}"))?;
-            let snap = parse_profile(&text)?;
-            write_cache(cache_dir, &name, &text);
-            Ok(Fetched {
-                value: snap,
-                status: FetchStatus::Fresh,
-            })
-        }
-        Err(e) => {
-            let cached = read_cache(&path)
-                .ok_or_else(|| format!("profile unreachable, no cache: {e}"))?;
-            let snap = parse_profile(&cached)?;
-            Ok(Fetched {
-                value: snap,
-                status: FetchStatus::CacheFallback {
-                    reason: e.to_string(),
-                },
-            })
-        }
+            Err(e) => profile_cache_fallback(&path, e),
+        },
+        Err(LiveFail::Definitive(e)) => Err(e),
+        Err(LiveFail::Transient(e)) => profile_cache_fallback(&path, e),
     }
 }
 
@@ -348,6 +371,18 @@ pub fn parse_profile(text: &str) -> Result<ProfileSnapshot, String> {
             per_family,
         },
     })
+}
+
+/// Load the uniqueName -> display name map (`data/cache/item-names.json`,
+/// built from the WFCD items dataset). Missing/unreadable = empty map:
+/// name resolution degrades, never guesses.
+pub fn load_item_names(
+    data_dir: &Path,
+) -> std::collections::HashMap<String, String> {
+    std::fs::read_to_string(data_dir.join("cache/item-names.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
 }
 
 /// Resolve profile XPInfo uniqueNames to display names via the
@@ -609,13 +644,10 @@ mod tests {
     #[test]
     fn freshness_math() {
         let now = SystemTime::now();
-        assert!(is_fresh(now, TTL_PROFILE, now));
-        assert!(!is_fresh(
-            now - TTL_PROFILE - Duration::from_secs(1),
-            TTL_PROFILE,
-            now
-        ));
-        assert!(!is_fresh(now + Duration::from_secs(60), TTL_PROFILE, now));
+        let ttl = Duration::from_secs(30 * 60);
+        assert!(is_fresh(now, ttl, now));
+        assert!(!is_fresh(now - ttl - Duration::from_secs(1), ttl, now));
+        assert!(!is_fresh(now + Duration::from_secs(60), ttl, now));
     }
 
     #[test]
