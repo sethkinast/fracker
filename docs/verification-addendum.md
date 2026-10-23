@@ -882,3 +882,24 @@ it refines the brief where they disagree. For the next worker pass.
     pw_stream_set_active after connect (new FFI
     symbol), and the negotiated-format line logs only
     on change.
+76. **The Varzia inference is wrong (Seth, 2026-10-22;
+    supersedes #68's rarest-reward rule).** "Velox
+    Prime is obtainable, therefore Axi V12 is
+    obtainable" is false: Axi V12 is vaulted, and this
+    rotation's Velox-Barrel relic is Meso V16. The
+    rotation sells a FIXED SET of relics — the
+    manifest's Void Projection items (T1-T4, Vault
+    A/B; six this loop) — not every relic that happens
+    to contain a featured part. Content overlap is not
+    availability. Verified in data: the tables mark
+    even Meso V16 vaulted with no sources (Resurgence
+    availability lives nowhere in the drop data), and
+    the manifest names the sold relics only as
+    projection SKUs, never by relic name. The correct
+    fix needs a projection -> relic-name mapping from
+    an items source (candidates: the items dataset's
+    per-relic uniqueNames, warframestat, the wiki's
+    resurgence list) — until then the rarest-reward
+    promotion must not stand as-is. Seth's call on the
+    interim: disable the inference, or keep it until
+    the mapping lands. QUEUED.
