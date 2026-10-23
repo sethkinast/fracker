@@ -833,3 +833,14 @@ it refines the brief where they disagree. For the next worker pass.
     live post-reset fetch returning pre-reset DATA)
     is not covered by dating alone — Seth's call
     whether the content check joins it.
+    Final shape (Seth, 2026-10-22): drop the app's
+    30-minute profile cache entirely — DE already
+    caches the profile for ~5 minutes (Cache-Control:
+    public, max-age=276, observed live); use theirs.
+    fetch_profile always fetches; the disk file remains
+    only as the failure fallback, dated by its mtime
+    (the fallback path already dates it truthfully).
+    With no app-side TTL there is nothing to clamp, and
+    the reset rule keys on true dates everywhere.
+    Scope: the profile only — worldstate and static
+    caches are separate designs, untouched.
