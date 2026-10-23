@@ -945,3 +945,22 @@ it refines the brief where they disagree. For the next worker pass.
        parts the relic also contains (Meso V14 covers
        two other needed items) — "this gets crazy
        fast"; needs worked examples before building.
+78. **Capture round 4 (v0.5.15, from Seth's v0.5.14
+    live log, 2026-10-22).** v0.5.14 changed the
+    shape — two Format proposals, then quiet, instead
+    of ~500 — but still no add_buffer, no frame.
+    Diffing our answer against OBS's linux-pipewire
+    param_changed handler (fetched live): OBS answers
+    a fixed Format with FOUR params in ONE
+    update_params call — SPA_PARAM_Meta VideoCrop
+    (size 16), SPA_PARAM_Meta Cursor (size = choice
+    range 16432/52/4194352), SPA_PARAM_Buffers
+    (dataType bare Int; MemPtr, plus DmaBuf iff the
+    Format carries a modifier), SPA_PARAM_Meta Header
+    (size 32). We sent the Buffers pod alone. v0.5.15
+    sends the canonical four; every constant
+    header-verified (spa/param/buffers.h spa_param_meta
+    enum; spa/buffer/meta.h meta types + struct sizes;
+    type ids ParamMeta 0x40005 / SPA_PARAM_Meta 6).
+    Success signature unchanged: negotiated-format
+    line, then add_buffer, then first frame.
