@@ -998,7 +998,7 @@ mod pod {
     /// One `spa_pod_prop` inside an object: `(key, value_type,
     /// value_pod_offset, next_prop_offset)`. `spa_pod_prop` is `key`,
     /// `flags`, then the value pod inline (`spa/include/spa/pod/pod.h:115-130`).
-    fn prop_at(bytes: &[u8], off: usize) -> Option<(u32, u32, usize, usize)> {
+    pub fn prop_at(bytes: &[u8], off: usize) -> Option<(u32, u32, usize, usize)> {
         if off + 16 > bytes.len() {
             return None;
         }
