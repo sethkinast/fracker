@@ -918,3 +918,30 @@ it refines the brief where they disagree. For the next worker pass.
     the path tail, any refinement variant, strip the
     refinement word) and the #68 inference (direct-name
     + rarest-reward clauses) is deleted outright.
+77. **Full per-item part resolution (Seth's design,
+    2026-10-22; LOGGED, DO NOT BUILD YET — waits for
+    faithful relic data (the #76 fix) and Seth's
+    worked example cases).** For a goal item (Protea
+    Prime as the example):
+    1. Parts already owned are filtered out. Per
+       remaining part:
+    2. Owned relics for the part are collected. If
+       none, continue down the chain.
+    3. Part vaulted and NOT in Varzia: owned relics
+       are the ONLY current source — flag them
+       LIMITED; run these relics only as a group,
+       never burn them casually/solo.
+    4. Otherwise find the relic(s) where the part
+       sits at the LOWEST rarity (Protea Prime
+       Blueprint is Common in Meso V1, Neo C6,
+       Meso K7, Meso W4, Axi N13, Lith W4, Meso V14).
+    5. Among those, match the most desirable farming
+       mission: A = capture / rescue / survival;
+       B = exterminate; C = conjunction survival;
+       D = mobile defense / defense. Show a relic
+       from the best available tier; all relics of a
+       given class have relatively equivalent value.
+    6. ADVANCED (later): weigh how many OTHER needed
+       parts the relic also contains (Meso V14 covers
+       two other needed items) — "this gets crazy
+       fast"; needs worked examples before building.
