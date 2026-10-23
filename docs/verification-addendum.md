@@ -964,3 +964,31 @@ it refines the brief where they disagree. For the next worker pass.
     type ids ParamMeta 0x40005 / SPA_PARAM_Meta 6).
     Success signature unchanged: negotiated-format
     line, then add_buffer, then first frame.
+79. **Capture round 5 (v0.5.17, from Seth's v0.5.15/16
+    live log, 2026-10-23).** The full OBS param set
+    changed nothing: two modifier proposals (INVALID,
+    LINEAR), no add_buffer. Evidence gathered before
+    theorizing: the captured KWin Format fixture
+    decoded — its modifier prop carries flags 0 (NO
+    DONT_FIXATE) with a single-value Choice(INVALID),
+    so the fixation dance a review suggested is NOT
+    what KWin is asking for. Two deltas shipped
+    together (bisect later if it works; Seth's run
+    cycles are the scarce resource): (a) the offer is
+    SHM-only — the #65b DRM modifier enum is removed.
+    Every stalled round negotiated on KWin's DMA-BUF
+    path, and this reader cannot consume DmaBuf
+    buffers anyway (no GBM/EGL path); OBS always
+    includes an SHM offer alongside its DMA-BUF ones.
+    dataType mask is now MemPtr|MemFd. (b)
+    pw_stream_set_active moves from connect-time to
+    after the first answered Format — v0.5.13 (never)
+    cycled proposals forever, v0.5.14+ (at connect)
+    went quiet after two; the canonical lifecycle
+    activates once params are set. Plus a one-shot
+    hex dump of the first Format pod. If this still
+    stalls, the next instrument is the server's own
+    log (PIPEWIRE_DEBUG / KWin), not more client
+    theory. Parked for when frames flow: skip frames
+    whose chunk size is 0 (KWin's no-change signal)
+    instead of re-OCR-ing stale pixels.
