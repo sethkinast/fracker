@@ -903,3 +903,18 @@ it refines the brief where they disagree. For the next worker pass.
     promotion must not stand as-is. Seth's call on the
     interim: disable the inference, or keep it until
     the mapping lands. QUEUED.
+    Resolution (Graf, same night): the mapping was
+    already in the app's own data. item-names.json
+    resolves projection uniqueNames to relic names —
+    the manifest's "/Lotus/StoreItems/Types/Game/
+    Projections/T2VoidProjectionProteaIvaraVaultB
+    Bronze" is the item-names key "/Lotus/Types/Game/
+    Projections/T2VoidProjectionProteaIvaraVaultB
+    Bronze" -> "Meso V16 Intact" (Seth's example,
+    exactly). This rotation's sold set resolves to
+    Lith B12, Meso I3, Meso V16, Neo P11, Neo O4,
+    Axi A23. Fix shape: VarziaAvailability resolves
+    manifest projections through item-names (match on
+    the path tail, any refinement variant, strip the
+    refinement word) and the #68 inference (direct-name
+    + rarest-reward clauses) is deleted outright.
