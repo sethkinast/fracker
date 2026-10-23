@@ -722,3 +722,45 @@ it refines the brief where they disagree. For the next worker pass.
     offer is a pinned 30/1 fraction, not a range from
     0/1; the frame channel is unbounded (drop-oldest
     bounded queue instead). Ships as pass 23 (v0.5.10).
+70. **Capture SOLVED at the protocol layer (2026-10-22,
+    Seth's v0.5.12 diagnostic run).** The link existed
+    all along (pw-link: kwin_wayland:output_1 ->
+    fracker.bin:input_1) and KWin WAS proposing fixed
+    Format pods — parse_video_info rejected every one:
+    libspa wraps each value of a fixed Format in a
+    Choice pod (kind None, sometimes several
+    near-duplicate values), while the parser only
+    accepted bare scalar pods — the same self-consistent
+    fiction as the old choice test, one layer up. The
+    captured 328-byte KWin pod (2560x1440, BGRx, modifier
+    INVALID) is now a regression fixture in the test
+    suite. Fix: the parser unwraps Choice values to
+    their first entry. Handshake completion: the
+    consumer now answers a parsed Format with
+    SPA_PARAM_Buffers via pw_stream_update_params
+    (buffers/blocks/size/stride/dataType from the
+    negotiated geometry) — the canonical accept whose
+    absence left KWin cycling proposals and io_changed
+    id=1 forever. Item 69d refined, not reversed: the
+    Format ECHO stays out; Buffers is the answer.
+    io_changed logging is transition-only now. Ships
+    as v0.5.13.
+71. **Standing shows pre-reset values until the next
+    regeneration trigger (Seth, 2026-10-22).** Root
+    cause (Graf, code-verified): the resident
+    regenerates the plan ONLY on SessionStart /
+    EE.log FileChanged / MissionEnd / Manual triggers —
+    there is no periodic and no reset-boundary trigger.
+    Across the 00:00 UTC reset, an idle app keeps
+    rendering the last pre-reset snapshot (his syndicate
+    pool at 0 remaining, Necraloid at 1k) until he plays
+    or regenerates by hand. Expected post-reset values
+    were 19,586 syndicate / 31k Necraloid. Fix shape: a
+    reset-boundary regeneration trigger in the resident
+    loop. Secondary defect in the same area: the live
+    fetch path stamps fetched_at = now even when
+    fetch_profile served its any-age CacheFallback, so
+    profile_context's reset rule can never fire on that
+    path — fetch_profile should surface the snapshot's
+    true fetch time (cache mtime), as profile_fallback
+    already does. QUEUED by Seth; not yet released.

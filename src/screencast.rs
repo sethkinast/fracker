@@ -36,7 +36,7 @@ use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -686,6 +686,19 @@ mod pod {
     /// `SPA_PARAM_Format` (the negotiated one, delivered to `param_changed`;
     /// `spa/include/spa/param/param.h:29`).
     pub const SPA_PARAM_FORMAT: u32 = 4;
+    /// `SPA_PARAM_Buffers` and its object type (`spa/include/spa/param/
+    /// param.h`; `spa/include/spa/utils/type.h` — ParamBuffers is the
+    /// object right after Format).
+    pub const SPA_PARAM_BUFFERS: u32 = 5;
+    pub const SPA_TYPE_OBJECT_PARAM_BUFFERS: u32 = 0x40004;
+    /// Buffer-param property keys (`spa/include/spa/param/buffers.h`;
+    /// `SPA_PARAM_BUFFERS_START` is 0).
+    pub const SPA_PARAM_BUFFERS_BUFFERS: u32 = 1;
+    pub const SPA_PARAM_BUFFERS_BLOCKS: u32 = 2;
+    pub const SPA_PARAM_BUFFERS_SIZE: u32 = 3;
+    pub const SPA_PARAM_BUFFERS_STRIDE: u32 = 4;
+    pub const SPA_PARAM_BUFFERS_DATA_TYPE: u32 = 6;
+    pub const SPA_TYPE_INT: u32 = 4;
 
     /// Format property keys (`spa/include/spa/param/format.h:91-95`).
     pub const SPA_FORMAT_MEDIA_TYPE: u32 = 1;
@@ -740,6 +753,34 @@ mod pod {
         header(&mut o, 4, SPA_TYPE_ID);
         o.extend_from_slice(&value.to_le_bytes());
         o
+    }
+
+    /// A bare `Int` pod (`size = 4`).
+    pub fn int(value: i32) -> Vec<u8> {
+        let mut o = Vec::new();
+        header(&mut o, 4, SPA_TYPE_INT);
+        o.extend_from_slice(&value.to_le_bytes());
+        o
+    }
+
+    /// The `SPA_PARAM_Buffers` answer a consumer sends once the node has
+    /// proposed a fixed `Format`: one block per buffer, sized from the
+    /// negotiated geometry, readable memory types only (MemPtr bit 1,
+    /// MemFd bit 2, DmaBuf bit 3 of `spa_data_type` as a flags mask).
+    pub fn param_buffers(info: &VideoInfo) -> Vec<u8> {
+        let stride = info.width.saturating_mul(4);
+        let size = stride.saturating_mul(info.height);
+        object(
+            SPA_TYPE_OBJECT_PARAM_BUFFERS,
+            SPA_PARAM_BUFFERS,
+            &[
+                prop(SPA_PARAM_BUFFERS_BUFFERS, int(0)),
+                prop(SPA_PARAM_BUFFERS_BLOCKS, int(1)),
+                prop(SPA_PARAM_BUFFERS_SIZE, int(size as i32)),
+                prop(SPA_PARAM_BUFFERS_STRIDE, int(stride as i32)),
+                prop(SPA_PARAM_BUFFERS_DATA_TYPE, int(0b1110)),
+            ],
+        )
     }
 
     /// A bare `Long` pod (`size = 8`: `struct spa_pod_long` wraps an
@@ -1002,23 +1043,40 @@ mod pod {
         let mut off = 16usize;
         while off + 16 <= bytes.len() {
             let (key, vtype, value_off, next) = prop_at(bytes, off)?;
-            let body = value_off + 8;
+            // A fixed Format proposal produced by libspa wraps EVERY value
+            // in a Choice pod (kind None for fixed values, sometimes with
+            // several near-duplicate entries). Unwrap to the first value:
+            // the effective type is the choice's child type and the value
+            // bytes follow the choice preamble (kind, flags, child header).
+            // (Verified against a captured KWin proposal, 2026-10-22: bare-
+            // scalar matching rejected every real Format pod.)
+            let (etype, body) = if vtype == SPA_TYPE_CHOICE {
+                let cbody = value_off + 8;
+                if cbody + 16 > bytes.len() {
+                    return None;
+                }
+                let child_type =
+                    u32::from_le_bytes(bytes[cbody + 12..cbody + 16].try_into().ok()?);
+                (child_type, cbody + 16)
+            } else {
+                (vtype, value_off + 8)
+            };
             match key {
-                SPA_FORMAT_VIDEO_FORMAT if vtype == SPA_TYPE_ID && body + 4 <= bytes.len() => {
+                SPA_FORMAT_VIDEO_FORMAT if etype == SPA_TYPE_ID && body + 4 <= bytes.len() => {
                     info.format = u32::from_le_bytes(bytes[body..body + 4].try_into().ok()?);
                 }
-                SPA_FORMAT_VIDEO_SIZE if vtype == SPA_TYPE_RECTANGLE && body + 8 <= bytes.len() => {
+                SPA_FORMAT_VIDEO_SIZE if etype == SPA_TYPE_RECTANGLE && body + 8 <= bytes.len() => {
                     info.width = u32::from_le_bytes(bytes[body..body + 4].try_into().ok()?);
                     info.height = u32::from_le_bytes(bytes[body + 4..body + 8].try_into().ok()?);
                 }
                 SPA_FORMAT_VIDEO_FRAMERATE
-                    if vtype == SPA_TYPE_FRACTION && body + 8 <= bytes.len() =>
+                    if etype == SPA_TYPE_FRACTION && body + 8 <= bytes.len() =>
                 {
                     info.framerate_num = u32::from_le_bytes(bytes[body..body + 4].try_into().ok()?);
                     info.framerate_denom =
                         u32::from_le_bytes(bytes[body + 4..body + 8].try_into().ok()?);
                 }
-                SPA_FORMAT_VIDEO_MODIFIER if vtype == SPA_TYPE_LONG && body + 8 <= bytes.len() => {
+                SPA_FORMAT_VIDEO_MODIFIER if etype == SPA_TYPE_LONG && body + 8 <= bytes.len() => {
                     info.modifier =
                         Some(u64::from_le_bytes(bytes[body..body + 8].try_into().ok()?));
                 }
@@ -1266,6 +1324,7 @@ pub const REQUIRED_SYMBOLS: &[&str] = &[
     "pw_stream_new",            // stream.h
     "pw_stream_add_listener",   // stream.h
     "pw_stream_connect",        // stream.h
+    "pw_stream_update_params",  // stream.h (the SPA_PARAM_Buffers answer)
     "pw_stream_disconnect",     // stream.h
     "pw_stream_destroy",        // stream.h
     "pw_stream_dequeue_buffer", // stream.h
@@ -1298,6 +1357,9 @@ struct PwApi {
         unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_void, *mut c_void),
     pw_stream_connect:
         unsafe extern "C" fn(*mut c_void, c_int, u32, u32, *const *const c_void, u32) -> c_int,
+    /// `stream.h`: hand the node our buffer parameters once it proposes
+    /// a fixed format (the canonical accept; NOT a Format echo).
+    pw_stream_update_params: unsafe extern "C" fn(*mut c_void, *const *const c_void, u32) -> c_int,
     pw_stream_disconnect: unsafe extern "C" fn(*mut c_void) -> c_int,
     pw_stream_destroy: unsafe extern "C" fn(*mut c_void),
     pw_stream_dequeue_buffer: unsafe extern "C" fn(*mut c_void) -> *mut c_void,
@@ -1417,6 +1479,10 @@ impl PwApi {
                 "pw_stream_connect",
                 unsafe extern "C" fn(*mut c_void, c_int, u32, u32, *const *const c_void, u32) -> c_int
             ),
+            pw_stream_update_params: sym!(
+                "pw_stream_update_params",
+                unsafe extern "C" fn(*mut c_void, *const *const c_void, u32) -> c_int
+            ),
             pw_stream_disconnect: sym!(
                 "pw_stream_disconnect",
                 unsafe extern "C" fn(*mut c_void) -> c_int
@@ -1530,6 +1596,8 @@ struct StreamCtx {
     /// One-shot evidence when a buffer cannot be mapped; per-frame logging
     /// would flood the capture log.
     map_failed_logged: AtomicBool,
+    /// Last `io_changed` id logged (transition-only logging).
+    last_io: AtomicU32,
     err: Arc<Mutex<Option<String>>>,
     /// Verbatim PipeWire stream-state + error log (ninth pass §1).
     log: CaptureLog,
@@ -1611,6 +1679,7 @@ impl ScreenCastSource {
             info: Mutex::new(None),
             maps: Mutex::new(HashMap::new()),
             map_failed_logged: AtomicBool::new(false),
+            last_io: AtomicU32::new(u32::MAX),
             err: err.clone(),
             log: log.clone(),
         });
@@ -1876,7 +1945,7 @@ impl FrameSource for ScreenCastSource {
                     // silence. Surface the stall instead of blocking.
                     if !self.got_first && Instant::now() >= self.first_frame_deadline {
                         let msg = format!(
-                            "PipeWire: no first frame within {}s — stream never linked",
+                            "PipeWire: no first frame within {}s — negotiation produced no frame",
                             FIRST_FRAME_TIMEOUT.as_secs()
                         );
                         self.log.record(self.error_stage(), &msg);
@@ -2046,14 +2115,22 @@ unsafe extern "C" fn on_param_changed(data: *mut c_void, id: u32, param: *const 
         );
         return;
     };
-    // Item 69d: no Format echo. A consumer does not accept a format by
-    // pushing the same pod back with pw_stream_update_params — that was
-    // the pass-21 mechanism, and it is not the canonical flow. Buffer
-    // parameters (SPA_PARAM_Buffers/Meta) are not needed either: this
-    // consumer maps whatever the node allocates. So the callback only
-    // records the negotiated format for frame shaping.
+    // Item 69d, refined by the 2026-10-22 capture: no Format echo (that
+    // was the pass-21 mechanism, and it is not the canonical flow) — but
+    // the handshake is only complete once the consumer answers with its
+    // buffer parameters. Record the format, then send SPA_PARAM_Buffers.
     if let Ok(mut slot) = ctx.info.lock() {
         *slot = Some(info);
+    }
+    let buffers = pod::param_buffers(&info);
+    let bwords = to_aligned_words(&buffers);
+    let bparams: [*const c_void; 1] = [bwords.as_ptr() as *const c_void];
+    let brc = (ctx.api.pw_stream_update_params)(ctx.stream, bparams.as_ptr(), 1);
+    if brc < 0 {
+        ctx.log.record(
+            "connecting",
+            &format!("PipeWire: pw_stream_update_params(Buffers) failed ({brc})"),
+        );
     }
 
     // Addendum #65: the negotiated size is also the practical evidence
@@ -2077,7 +2154,7 @@ unsafe extern "C" fn on_param_changed(data: *mut c_void, id: u32, param: *const 
         "connecting",
         &format!(
             "PipeWire negotiated format: {} (fourcc {}, spa {:#x}) {}x{} @ {}/{} fps{}; \
-             no Format echo (buffers are mapped on demand)",
+             answered with SPA_PARAM_Buffers",
             pod::format_name(info.format),
             pod::fourcc(info.format),
             info.format,
@@ -2090,14 +2167,18 @@ unsafe extern "C" fn on_param_changed(data: *mut c_void, id: u32, param: *const 
     );
 }
 
-/// `io_changed`: an IO area was assigned — negotiation evidence.
+/// `io_changed`: an IO area was assigned — negotiation evidence. A node
+/// stuck mid-negotiation re-fires the same id thousands of times, so log
+/// only transitions.
 unsafe extern "C" fn on_io_changed(data: *mut c_void, id: u32, _area: *mut c_void, _size: u32) {
     if data.is_null() {
         return;
     }
     let ctx = &mut *(data as *mut StreamCtx);
-    ctx.log
-        .record("connecting", &format!("PipeWire io_changed id={id}"));
+    if ctx.last_io.swap(id, Ordering::Relaxed) != id {
+        ctx.log
+            .record("connecting", &format!("PipeWire io_changed id={id}"));
+    }
 }
 
 /// `add_buffer`: the node allocated a buffer — negotiation evidence; the
@@ -2958,6 +3039,61 @@ mod tests {
         assert!(img.pixels.iter().all(|&p| p == blue));
     }
 
+    /// Regression (2026-10-22 live capture): a REAL fixed Format pod from
+    /// KWin. Every value is wrapped in a Choice pod (kind None), the
+    /// format choice carries five near-duplicate ids, an unknown
+    /// maxFramerate prop is present, and the modifier is INVALID. The
+    /// bare-scalar parser rejected this pod (and every real peer pod),
+    /// so negotiation never completed.
+    #[test]
+    fn kwin_format_pod_parses() {
+        let hex = "400100000f00000003000400040000000100000000000000140000001300000000000000000000000400000003000000020000000000000002000000000000001400000013000000000000000000000004000000030000000100000000000000030002000000000018000000130000000000000000000000080000000a000000000a0000a0050000040002000000000018000000130000000000000000000000080000000b0000000000000001000000050002000000000028000000130000000000000000000000080000000b0000008f0000000100000000000000010000008f0000000100000001000200000000002400000013000000000000000000000004000000030000000800000008000000080000000c0000000c000000000000000200020000000000180000001300000000000000000000000800000005000000ffffffffffffff00";
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
+        assert_eq!(bytes.len(), 328);
+        let info = pod::parse_video_info(&bytes).expect("a real KWin Format pod must parse");
+        assert_eq!(info.format, pod::SPA_VIDEO_FORMAT_BGRX);
+        assert_eq!((info.width, info.height), (2560, 1440));
+        assert_eq!((info.framerate_num, info.framerate_denom), (0, 1));
+        assert_eq!(info.modifier, Some(0x00ff_ffff_ffff_ffff));
+    }
+
+    /// The Buffers answer carries the negotiated geometry.
+    #[test]
+    fn param_buffers_carry_the_negotiated_geometry() {
+        let info = pod::VideoInfo {
+            format: pod::SPA_VIDEO_FORMAT_BGRX,
+            width: 2560,
+            height: 1440,
+            framerate_num: 0,
+            framerate_denom: 1,
+            modifier: None,
+        };
+        let p = pod::param_buffers(&info);
+        let (size, ty) = pod::read_header(&p).unwrap();
+        assert_eq!(ty, pod::SPA_TYPE_OBJECT);
+        assert_eq!(size as usize + 8, p.len());
+        // Object body: type + id, then props.
+        let body_type = u32::from_le_bytes(p[8..12].try_into().unwrap());
+        let body_id = u32::from_le_bytes(p[12..16].try_into().unwrap());
+        assert_eq!(body_type, pod::SPA_TYPE_OBJECT_PARAM_BUFFERS);
+        assert_eq!(body_id, pod::SPA_PARAM_BUFFERS);
+        let mut found = std::collections::HashMap::new();
+        let mut off = 16usize;
+        while off + 16 <= p.len() {
+            let (key, vtype, value_off, next) = pod::prop_at(&p, off).unwrap();
+            assert_eq!(vtype, pod::SPA_TYPE_INT);
+            let v = i32::from_le_bytes(p[value_off + 8..value_off + 12].try_into().unwrap());
+            found.insert(key, v);
+            off = next;
+        }
+        assert_eq!(found[&pod::SPA_PARAM_BUFFERS_STRIDE], 2560 * 4);
+        assert_eq!(found[&pod::SPA_PARAM_BUFFERS_SIZE], 2560 * 4 * 1440);
+        assert_eq!(found[&pod::SPA_PARAM_BUFFERS_BLOCKS], 1);
+    }
+
     #[test]
     fn restore_token_round_trips_through_app_data() {
         let dir = std::env::temp_dir().join(format!("fracker-sc-token-{}", std::process::id()));
@@ -3226,11 +3362,12 @@ mod tests {
             !REQUIRED_SYMBOLS.contains(&"pw_registry_add_listener"),
             "the registry dependency was dropped in item 60a"
         );
-        // Item 69d: the Format echo is gone, so the symbol it used is no
-        // longer part of the consumer's FFI surface.
+        // Item 69d removed the Format echo; the 2026-10-22 capture showed
+        // the handshake also needs the SPA_PARAM_Buffers answer, which
+        // uses the same symbol for the canonical purpose.
         assert!(
-            !REQUIRED_SYMBOLS.contains(&"pw_stream_update_params"),
-            "the pass-21 Format echo was removed in item 69d"
+            REQUIRED_SYMBOLS.contains(&"pw_stream_update_params"),
+            "the Buffers answer completes format negotiation"
         );
         // The real construction sequence: loop -> context -> core (fd) -> stream.
         assert!(REQUIRED_SYMBOLS.contains(&"pw_thread_loop_get_loop"));

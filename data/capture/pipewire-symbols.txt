@@ -23,9 +23,10 @@
 # target-not-found instead. The library's exported symbol table, not the
 # header, is the ground truth for this list.
 #
-# NOTE (item 69d): pw_stream_update_params is absent. The pass-21 Format
-# echo was not the canonical accept flow and was removed; this consumer
-# maps buffers and sends no buffer params.
+# NOTE (item 69d, refined 2026-10-22): the pass-21 Format echo is gone,
+# but pw_stream_update_params stays — it carries the SPA_PARAM_Buffers
+# answer that completes the format handshake (KWin's proposals cycle
+# until the consumer sends it).
 pw_init
 pw_thread_loop_new
 pw_thread_loop_start
@@ -39,6 +40,7 @@ pw_properties_new_string
 pw_stream_new
 pw_stream_add_listener
 pw_stream_connect
+pw_stream_update_params
 pw_stream_disconnect
 pw_stream_destroy
 pw_stream_dequeue_buffer
