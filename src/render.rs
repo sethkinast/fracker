@@ -607,17 +607,9 @@ fn crack_queue_panel(plan: &Plan, ctx: &RenderContext<'_>) -> String {
             ));
         }
     }
-    // Farms keep their data (brief: completeness is the app's) as quiet
-    // rows in the same panel.
-    for f in &plan.farms {
-        h.push_str(&format!(
-            "<div class=\"row ch\"><div><b>Farm: {node}</b><br><span class=\"mut sm\">{relics}</span></div><div class=\"rl\"><b class=\"cy\">{mode}</b><br><span class=\"mut sm\">{planet}</span></div></div>\n",
-            node = esc(&f.node),
-            relics = esc(&f.relics.join(", ")),
-            mode = esc(&f.mode),
-            planet = esc(&f.planet),
-        ));
-    }
+    // Farm hints are carried on the plan but not rendered here:
+    // the appended Farm rows were removed 2026-10-23 (Seth) — with
+    // real stock they dumped every farmable relic into the panel.
     h.push_str("</section>\n");
     h
 }

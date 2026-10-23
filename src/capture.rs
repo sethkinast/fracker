@@ -163,8 +163,19 @@ impl ScreenClassifier {
 
     /// OCR the header strip of `frame` and classify it.
     pub fn classify(&self, engine: &dyn OcrEngine, frame: &GrayImage) -> ScreenClass {
+        self.classify_detailed(engine, frame).0
+    }
+
+    /// Like [`classify`](Self::classify), but also returns the raw
+    /// header text — the evidence a zero-collection diagnosis needs.
+    pub fn classify_detailed(
+        &self,
+        engine: &dyn OcrEngine,
+        frame: &GrayImage,
+    ) -> (ScreenClass, String) {
         let text = engine.read_text(frame, self.header, self.header_psm, self.header_upscale);
-        self.classify_text(&text)
+        let class = self.classify_text(&text);
+        (class, text)
     }
 }
 
@@ -176,6 +187,9 @@ pub struct CaptureData {
     pub universe: Universe,
     pub relic_names: HashSet<String>,
     pub arcane_names: HashSet<String>,
+    /// The directory the data was loaded from; capture debug dumps
+    /// (evidence frames) land in its `capture-debug` subdirectory.
+    pub data_dir: PathBuf,
 }
 
 impl CaptureData {
@@ -193,6 +207,7 @@ impl CaptureData {
             universe,
             relic_names,
             arcane_names,
+            data_dir: data_dir.to_path_buf(),
         })
     }
 
@@ -205,6 +220,7 @@ impl CaptureData {
             arcane_names: &self.arcane_names,
             classifier: &self.classifier,
             min_confidence: 0.5,
+            debug_dir: Some(self.data_dir.join("capture-debug")),
         }
     }
 }
@@ -263,6 +279,9 @@ pub struct CaptureContext<'a> {
     pub arcane_names: &'a HashSet<String>,
     pub classifier: &'a ScreenClassifier,
     pub min_confidence: f32,
+    /// When set, capture dumps evidence frames (the first frame, and
+    /// the first frame of each recognised class) here as PNGs.
+    pub debug_dir: Option<PathBuf>,
 }
 
 /// Live per-bucket stack counts shown in the tray while capturing.
@@ -289,6 +308,12 @@ pub struct CaptureSession {
     saw_relics: bool,
     saw_parts: bool,
     saw_arcanes: bool,
+    /// Evidence for a zero-collection diagnosis: the first few
+    /// (class, header OCR text) pairs this session classified.
+    pub header_samples: Vec<(ScreenClass, String)>,
+    /// Evidence frames written to the debug dir, by file name.
+    pub debug_files: Vec<String>,
+    debug_dumped: std::collections::HashSet<&'static str>,
     last_sig: Option<u64>,
     last_class: Option<ScreenClass>,
     idle: u64,
@@ -352,6 +377,9 @@ impl CaptureSession {
         frame: &GrayImage,
     ) {
         self.frames_seen += 1;
+        if self.frames_seen == 1 {
+            self.dump_debug_frame(ctx, frame, "first");
+        }
         let sig = frame_signature(frame);
         if self.last_sig == Some(sig) {
             // Unchanged screen: same class as last time.
@@ -365,8 +393,21 @@ impl CaptureSession {
         }
         self.last_sig = Some(sig);
 
-        let class = ctx.classifier.classify(engine, frame);
+        let (class, header_text) = ctx.classifier.classify_detailed(engine, frame);
         self.last_class = Some(class);
+        if self.header_samples.len() < 10 {
+            let flat: String = header_text
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(160)
+                .collect();
+            self.header_samples.push((class, flat));
+        }
+        if class != ScreenClass::Other {
+            self.dump_debug_frame(ctx, frame, class.label());
+        }
         let Some(layout) = class.layout_key().and_then(|k| ctx.layouts.get(k)) else {
             // No screen recognised — pause, do not read the wrong grid.
             self.frames_skipped += 1;
@@ -385,6 +426,20 @@ impl CaptureSession {
         let results = read_frame(layout, frame, engine, ctx);
         let frame_stock = StockState::from_results(&results, ctx.relic_names, ctx.arcane_names);
         self.captured.merge_from(&frame_stock);
+    }
+
+    /// Write an evidence frame to the context's debug dir (once per
+    /// name; best-effort — a failed dump never fails a capture).
+    fn dump_debug_frame(&mut self, ctx: &CaptureContext<'_>, frame: &GrayImage, name: &'static str) {
+        let Some(dir) = &ctx.debug_dir else { return };
+        if !self.debug_dumped.insert(name) {
+            return;
+        }
+        let _ = std::fs::create_dir_all(dir);
+        let file = format!("frame-{name}.png");
+        if frame.write_png(&dir.join(&file)).is_ok() {
+            self.debug_files.push(file);
+        }
     }
 
     /// Finalise into an existing stock file: REPLACE only the buckets that
@@ -1019,6 +1074,7 @@ mod tests {
                         arcane_names: &arcane_names,
                         classifier: &classifier,
                         min_confidence: 0.5,
+                        debug_dir: None,
                     };
                     let session = run_capture(
                         &ctx,

@@ -758,8 +758,26 @@ async fn finalize_capture(
     log: &CaptureLog,
 ) -> bool {
     set_capture_stage(status, log, CaptureStage::Finalizing);
+    log.record(
+        "finalizing",
+        &format!(
+            "capture evidence: {} frames seen, {} read, {} skipped",
+            session.frames_seen(),
+            session.frames_read(),
+            session.frames_skipped()
+        ),
+    );
     if !session.has_any() {
         log.record("finalizing", "nothing collected — stock untouched");
+        for (class, text) in &session.header_samples {
+            log.record("finalizing", &format!("header OCR [{}]: {text}", class.label()));
+        }
+        if !session.debug_files.is_empty() {
+            log.record(
+                "finalizing",
+                &format!("debug frames written: {}", session.debug_files.join(", ")),
+            );
+        }
         set_capture_stage(status, log, CaptureStage::Idle);
         refresh_tray(tray).await;
         return false;

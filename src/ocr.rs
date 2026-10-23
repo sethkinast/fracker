@@ -225,6 +225,18 @@ impl GrayImage {
 
     /// Decode a PNG (any colour type) to luma, compositing alpha over
     /// black (the UI screenshots have no transparency, but be safe).
+    /// Write the image as an 8-bit grayscale PNG (the inverse of
+    /// `from_png`). Used for capture debug dumps, so a human can look
+    /// at exactly what the OCR was fed.
+    pub fn write_png(&self, path: &std::path::Path) -> Result<(), String> {
+        let file = std::fs::File::create(path).map_err(|e| format!("write_png: {e}"))?;
+        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), self.width, self.height);
+        encoder.set_color(png::ColorType::Grayscale);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().map_err(|e| format!("write_png: {e}"))?;
+        writer.write_image_data(&self.pixels).map_err(|e| format!("write_png: {e}"))
+    }
+
     fn from_png(bytes: &[u8]) -> Result<Self, String> {
         let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
         let mut reader = decoder
@@ -1691,6 +1703,25 @@ pub fn ingest_folder(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn write_png_round_trips_through_from_png() {
+        let mut img = GrayImage::blank(7, 5, 0);
+        for (i, px) in img.pixels.iter_mut().enumerate() {
+            *px = (i * 37 % 256) as u8;
+        }
+        let dir = std::env::temp_dir().join(format!("fracker-png-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("frame.png");
+        img.write_png(&path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let back = GrayImage::from_png(&bytes).unwrap();
+        assert_eq!(back.width, img.width);
+        assert_eq!(back.height, img.height);
+        assert_eq!(back.pixels, img.pixels);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
     use crate::tuning::Tuning;
     use std::sync::OnceLock;

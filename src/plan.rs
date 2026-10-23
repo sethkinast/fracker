@@ -1573,20 +1573,12 @@ fn build_chunks(
         .filter(|g| g.action.kind == ActionKind::Farm)
         .collect();
     if t2_count < input.tuning.planner.thin_tier2_below && !farm_goals.is_empty() {
+        // The farm data is still computed and carried on the plan,
+        // but it is NOT chunked into the crack queue: with real stock
+        // the rows listed every farmable relic across all goals —
+        // removed 2026-10-23 (Seth) until a presentation that earns
+        // its space exists.
         farms = score_farms(input, cards);
-        for f in farms.iter().take(input.tuning.planner.farm_chunks) {
-            chunks.push(Chunk {
-                id: format!("t3-farm-{}", sanitize_id(&f.node)),
-                tier: 3,
-                title: format!("Farm relics: {} ({}) — {}.", f.node, f.planet, f.mode),
-                minutes_label: "farm".to_owned(),
-                why: format!("Relics: {}.", f.relics.join(", ")),
-                kind: "relic farm".to_owned(),
-                expiry: None,
-                gear: None,
-                crack: None,
-            });
-        }
     }
     if farms.is_empty() && !cards.is_empty() {
         let any_farm_action = cards
