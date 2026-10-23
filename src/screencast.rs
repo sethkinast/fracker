@@ -692,11 +692,9 @@ mod pod {
     pub const SPA_PARAM_BUFFERS: u32 = 5;
     pub const SPA_TYPE_OBJECT_PARAM_BUFFERS: u32 = 0x40004;
     /// Buffer-param property keys (`spa/include/spa/param/buffers.h`;
-    /// `SPA_PARAM_BUFFERS_START` is 0).
-    pub const SPA_PARAM_BUFFERS_BUFFERS: u32 = 1;
-    pub const SPA_PARAM_BUFFERS_BLOCKS: u32 = 2;
-    pub const SPA_PARAM_BUFFERS_SIZE: u32 = 3;
-    pub const SPA_PARAM_BUFFERS_STRIDE: u32 = 4;
+    /// `SPA_PARAM_BUFFERS_START` is 0). Only dataType is sent — the
+    /// canonical consumer answer (OBS's linux-pipewire plugin sends
+    /// exactly this one prop; count/size/stride derive from the Format).
     pub const SPA_PARAM_BUFFERS_DATA_TYPE: u32 = 6;
     pub const SPA_TYPE_INT: u32 = 4;
 
@@ -764,22 +762,17 @@ mod pod {
     }
 
     /// The `SPA_PARAM_Buffers` answer a consumer sends once the node has
-    /// proposed a fixed `Format`: one block per buffer, sized from the
-    /// negotiated geometry, readable memory types only (MemPtr bit 1,
-    /// MemFd bit 2, DmaBuf bit 3 of `spa_data_type` as a flags mask).
-    pub fn param_buffers(info: &VideoInfo) -> Vec<u8> {
-        let stride = info.width.saturating_mul(4);
-        let size = stride.saturating_mul(info.height);
+    /// proposed a fixed `Format`: the memory types it can read (MemPtr
+    /// bit 1, MemFd bit 2, DmaBuf bit 3 of `spa_data_type` as a mask).
+    /// Count, block size and stride are the node's business, derived
+    /// from the negotiated Format — v0.5.13 sent them (buffers=0 among
+    /// them) and KWin cycled format proposals ~500 times without ever
+    /// allocating; OBS sends dataType alone.
+    pub fn param_buffers() -> Vec<u8> {
         object(
             SPA_TYPE_OBJECT_PARAM_BUFFERS,
             SPA_PARAM_BUFFERS,
-            &[
-                prop(SPA_PARAM_BUFFERS_BUFFERS, int(0)),
-                prop(SPA_PARAM_BUFFERS_BLOCKS, int(1)),
-                prop(SPA_PARAM_BUFFERS_SIZE, int(size as i32)),
-                prop(SPA_PARAM_BUFFERS_STRIDE, int(stride as i32)),
-                prop(SPA_PARAM_BUFFERS_DATA_TYPE, int(0b1110)),
-            ],
+            &[prop(SPA_PARAM_BUFFERS_DATA_TYPE, int(0b1110))],
         )
     }
 
@@ -1325,6 +1318,7 @@ pub const REQUIRED_SYMBOLS: &[&str] = &[
     "pw_stream_add_listener",   // stream.h
     "pw_stream_connect",        // stream.h
     "pw_stream_update_params",  // stream.h (the SPA_PARAM_Buffers answer)
+    "pw_stream_set_active",     // stream.h (start the graph after connect)
     "pw_stream_disconnect",     // stream.h
     "pw_stream_destroy",        // stream.h
     "pw_stream_dequeue_buffer", // stream.h
@@ -1360,6 +1354,10 @@ struct PwApi {
     /// `stream.h`: hand the node our buffer parameters once it proposes
     /// a fixed format (the canonical accept; NOT a Format echo).
     pw_stream_update_params: unsafe extern "C" fn(*mut c_void, *const *const c_void, u32) -> c_int,
+    /// `stream.h`: activate the stream — the canonical consumer start
+    /// (OBS calls it right after connect; without it the stream sits in
+    /// PAUSED while formats cycle).
+    pw_stream_set_active: unsafe extern "C" fn(*mut c_void, bool) -> c_int,
     pw_stream_disconnect: unsafe extern "C" fn(*mut c_void) -> c_int,
     pw_stream_destroy: unsafe extern "C" fn(*mut c_void),
     pw_stream_dequeue_buffer: unsafe extern "C" fn(*mut c_void) -> *mut c_void,
@@ -1482,6 +1480,10 @@ impl PwApi {
             pw_stream_update_params: sym!(
                 "pw_stream_update_params",
                 unsafe extern "C" fn(*mut c_void, *const *const c_void, u32) -> c_int
+            ),
+            pw_stream_set_active: sym!(
+                "pw_stream_set_active",
+                unsafe extern "C" fn(*mut c_void, bool) -> c_int
             ),
             pw_stream_disconnect: sym!(
                 "pw_stream_disconnect",
@@ -1869,6 +1871,15 @@ impl ScreenCastSource {
                      awaiting first frame"
                 ),
             );
+            // Start the graph (OBS's consumer flow): an inactive stream
+            // negotiates forever and never leaves PAUSED.
+            let arc = unsafe { (api.pw_stream_set_active)(created, true) };
+            if arc < 0 {
+                log.record(
+                    "connecting",
+                    &format!("PipeWire: pw_stream_set_active(true) failed ({arc})"),
+                );
+            }
             break (created, attempt_hook);
         };
         // The negotiated fd is now owned by PipeWire; leak the OwnedFd so
@@ -2119,10 +2130,16 @@ unsafe extern "C" fn on_param_changed(data: *mut c_void, id: u32, param: *const 
     // was the pass-21 mechanism, and it is not the canonical flow) — but
     // the handshake is only complete once the consumer answers with its
     // buffer parameters. Record the format, then send SPA_PARAM_Buffers.
-    if let Ok(mut slot) = ctx.info.lock() {
+    // A node mid-negotiation re-proposes often; answer every time, but
+    // log only when the format actually changes.
+    let changed = if let Ok(mut slot) = ctx.info.lock() {
+        let c = *slot != Some(info);
         *slot = Some(info);
-    }
-    let buffers = pod::param_buffers(&info);
+        c
+    } else {
+        true
+    };
+    let buffers = pod::param_buffers();
     let bwords = to_aligned_words(&buffers);
     let bparams: [*const c_void; 1] = [bwords.as_ptr() as *const c_void];
     let brc = (ctx.api.pw_stream_update_params)(ctx.stream, bparams.as_ptr(), 1);
@@ -2150,6 +2167,9 @@ unsafe extern "C" fn on_param_changed(data: *mut c_void, id: u32, param: *const 
         Some(m) => format!(", modifier 0x{m:016x}"),
         None => ", no modifier".to_owned(),
     };
+    if !changed {
+        return;
+    }
     ctx.log.record(
         "connecting",
         &format!(
@@ -3060,38 +3080,25 @@ mod tests {
         assert_eq!(info.modifier, Some(0x00ff_ffff_ffff_ffff));
     }
 
-    /// The Buffers answer carries the negotiated geometry.
+    /// The Buffers answer is the canonical minimal one: a single
+    /// dataType prop (v0.5.13's count/size/stride props — buffers=0
+    /// among them — left KWin cycling proposals without allocating).
     #[test]
-    fn param_buffers_carry_the_negotiated_geometry() {
-        let info = pod::VideoInfo {
-            format: pod::SPA_VIDEO_FORMAT_BGRX,
-            width: 2560,
-            height: 1440,
-            framerate_num: 0,
-            framerate_denom: 1,
-            modifier: None,
-        };
-        let p = pod::param_buffers(&info);
+    fn param_buffers_is_datatype_only() {
+        let p = pod::param_buffers();
         let (size, ty) = pod::read_header(&p).unwrap();
         assert_eq!(ty, pod::SPA_TYPE_OBJECT);
         assert_eq!(size as usize + 8, p.len());
-        // Object body: type + id, then props.
         let body_type = u32::from_le_bytes(p[8..12].try_into().unwrap());
         let body_id = u32::from_le_bytes(p[12..16].try_into().unwrap());
         assert_eq!(body_type, pod::SPA_TYPE_OBJECT_PARAM_BUFFERS);
         assert_eq!(body_id, pod::SPA_PARAM_BUFFERS);
-        let mut found = std::collections::HashMap::new();
-        let mut off = 16usize;
-        while off + 16 <= p.len() {
-            let (key, vtype, value_off, next) = pod::prop_at(&p, off).unwrap();
-            assert_eq!(vtype, pod::SPA_TYPE_INT);
-            let v = i32::from_le_bytes(p[value_off + 8..value_off + 12].try_into().unwrap());
-            found.insert(key, v);
-            off = next;
-        }
-        assert_eq!(found[&pod::SPA_PARAM_BUFFERS_STRIDE], 2560 * 4);
-        assert_eq!(found[&pod::SPA_PARAM_BUFFERS_SIZE], 2560 * 4 * 1440);
-        assert_eq!(found[&pod::SPA_PARAM_BUFFERS_BLOCKS], 1);
+        let (key, vtype, value_off, next) = pod::prop_at(&p, 16).unwrap();
+        assert_eq!(key, pod::SPA_PARAM_BUFFERS_DATA_TYPE);
+        assert_eq!(vtype, pod::SPA_TYPE_INT);
+        let v = i32::from_le_bytes(p[value_off + 8..value_off + 12].try_into().unwrap());
+        assert_eq!(v, 0b1110, "MemPtr|MemFd|DmaBuf");
+        assert_eq!(next, p.len(), "exactly one prop");
     }
 
     #[test]

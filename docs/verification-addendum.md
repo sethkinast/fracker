@@ -864,3 +864,21 @@ it refines the brief where they disagree. For the next worker pass.
     list; the rest stay alphabetical. (Component
     blueprints — Chassis Blueprint etc. — are not the
     item blueprint.) QUEUED with #72/#73.
+75. **Capture, round 3 (Seth's v0.5.13 live log,
+    2026-10-22).** The Choice-unwrap worked — formats
+    parse and get answered — but KWin re-proposed the
+    Format ~500 times (modifier INVALID, then LINEAR)
+    and never allocated a buffer; the stream never
+    left PAUSED. Two canonical consumer steps were
+    still missing, both verified against OBS's
+    linux-pipewire source: (1) OBS's SPA_PARAM_Buffers
+    object carries ONLY dataType (bare Int) — count,
+    size and stride derive from the Format; v0.5.13
+    sent buffers=0/blocks/size/stride, and a literal
+    zero buffer count can never allocate. (2) OBS
+    calls pw_stream_set_active(stream, true) right
+    after connect; we never activated the stream at
+    all. v0.5.14: Buffers = dataType only,
+    pw_stream_set_active after connect (new FFI
+    symbol), and the negotiated-format line logs only
+    on change.

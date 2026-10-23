@@ -41,6 +41,7 @@ pw_stream_new
 pw_stream_add_listener
 pw_stream_connect
 pw_stream_update_params
+pw_stream_set_active
 pw_stream_disconnect
 pw_stream_destroy
 pw_stream_dequeue_buffer
