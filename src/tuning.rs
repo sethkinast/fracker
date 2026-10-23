@@ -158,8 +158,9 @@ impl MissionTuning {
 // Refinement + rarity
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Rarity {
+    #[default]
     Common,
     Uncommon,
     Rare,

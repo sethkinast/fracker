@@ -305,6 +305,8 @@ pub struct CrackInfo {
     pub relic: String,
     pub refinement: String,
     pub chance: f64,
+    /// The target part's rarity band (queue part-name color, #72c).
+    pub rarity: Rarity,
     /// Relic copies in the crack batch (`×4`).
     pub batch: u32,
     /// Total void-trace cost for the batch (`400 tr`).
@@ -1437,6 +1439,11 @@ fn build_chunks(
                 .reverse()
                 .then_with(|| a.name.cmp(&b.name))
         });
+        // Addendum #72b: the representative crack must be obtainable.
+        // A frame whose needed parts have no obtainable source at all
+        // (relics vaulted, none owned, not in the Varzia loop) never
+        // enters the crack queue — there is nothing to run for it.
+        let mut representative = None;
         for part in needed {
             let mut others = want_set.clone();
             others.remove(&part.name);
@@ -1451,15 +1458,20 @@ fn build_chunks(
                 input.steel_path_tiebreak,
                 input.tuning,
             ) {
-                ranked.push((
-                    card.gear.clone(),
-                    cand,
-                    pick,
-                    part.name.clone(),
-                    card.action.text.clone(),
-                ));
-                break;
+                if !cand.source_tier.is_unobtainable() {
+                    representative = Some((cand, pick, part.name.clone()));
+                    break;
+                }
             }
+        }
+        if let Some((cand, pick, part_name)) = representative {
+            ranked.push((
+                card.gear.clone(),
+                cand,
+                pick,
+                part_name,
+                card.action.text.clone(),
+            ));
         }
     }
     ranked.sort_by(|a, b| {
@@ -1530,6 +1542,7 @@ fn build_chunks(
                 relic: cand.relic.clone(),
                 refinement: cand.refinement.name().to_owned(),
                 chance: cand.chance,
+                rarity: cand_rarity(input.tuning, &cand),
                 batch: cand.batch,
                 traces: cand.trace_cost,
                 covers: cand.coverage,

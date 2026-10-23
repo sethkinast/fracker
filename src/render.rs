@@ -564,11 +564,7 @@ fn crack_queue_panel(plan: &Plan, ctx: &RenderContext<'_>) -> String {
             } else {
                 String::new()
             };
-            format!(
-                "{}{steel} &middot; stay for {}",
-                esc(&ci.fissure_node),
-                ci.batch,
-            )
+            format!("{}{steel}", esc(&ci.fissure_node))
         }
         None => "—".to_owned(),
     };
@@ -596,7 +592,7 @@ fn crack_queue_panel(plan: &Plan, ctx: &RenderContext<'_>) -> String {
                 class.push_str(" dead");
             }
             h.push_str(&format!(
-                "<label class=\"{class}\">\n<input type=\"checkbox\" data-id=\"{id}\"{checked}>\n{icon}\n<div><b>{gear}</b>{next}<br><span class=\"mut sm\">{part}{extra}</span></div>\n<div class=\"rl\"><b class=\"cy\">{relic}</b><br><span class=\"mut sm\">{refine} &middot; {traces} tr</span></div>\n<span class=\"mut\">{time}</span>\n</label>\n",
+                "<label class=\"{class}\">\n<input type=\"checkbox\" data-id=\"{id}\"{checked}>\n{icon}\n<div><b>{gear}</b>{next}<br><span class=\"sm {rarity}\">{part}{extra}</span></div>\n<div class=\"rl\"><b class=\"cy\">{relic}</b><br><span class=\"mut sm\">{refine}</span></div>\n</label>\n",
                 class = class,
                 id = esc(&c.id),
                 checked = if proven { " checked" } else { "" },
@@ -605,10 +601,9 @@ fn crack_queue_panel(plan: &Plan, ctx: &RenderContext<'_>) -> String {
                 next = next,
                 part = esc(&short_part(&ci.part, &ci.gear)),
                 extra = extra,
+                rarity = rarity_css(ci.rarity),
                 relic = esc(&ci.relic),
                 refine = esc(&ci.refinement),
-                traces = ci.traces,
-                time = esc(&c.minutes_label),
             ));
         }
     }
@@ -1184,7 +1179,7 @@ h3{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--mut)
 .ev{grid-template-columns:64px 1fr auto}.ch{grid-template-columns:40px 1fr auto auto}
 .tm{font-size:21px;font-weight:700;color:var(--tx)}.tm.hot{color:var(--amb)}.tm.warm{color:var(--gold)}
 .rl{text-align:right}.ch b{font-size:17px}.nx{font-style:normal;font-size:10px;letter-spacing:.12em;color:var(--cy);border:1px solid var(--cy);padding:0 5px;margin-left:8px}
-.ch.next{background:linear-gradient(90deg,rgba(174,227,239,.07),transparent);box-shadow:inset 3px 0 var(--cy);padding-left:10px}
+.ch.next{background:linear-gradient(90deg,rgba(174,227,239,.07),transparent);box-shadow:inset 3px 0 var(--cy)}
 .mi{width:22px;height:22px;flex:none;position:relative;overflow:hidden;display:inline-flex;align-items:center;justify-content:center;font:700 12px Rajdhani,sans-serif;color:var(--gold);background:#0d1117;border:1px solid var(--line)}
 .mi.lg{width:36px;height:36px;font-size:18px}.mi img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#0d1117}
 .chips{display:flex;flex-wrap:wrap;gap:6px}.chip{display:inline-flex;align-items:center;gap:7px;background:var(--cell);border:1px solid #1f2735;padding:3px 10px 3px 3px;font-size:13px}
@@ -1871,6 +1866,7 @@ mod tests {
                     relic: "Neo C8".to_owned(),
                     refinement: "Radiant".to_owned(),
                     chance: 10.0,
+                    rarity: crate::plan::Rarity::Uncommon,
                     batch: 4,
                     traces: 400,
                     covers: 2,
@@ -1888,13 +1884,24 @@ mod tests {
         assert!(p1.contains("class=\"row ch tick next\""), "first crack is NEXT + tickable");
         assert!(p1.contains("<em class=nx>NEXT</em>"));
         assert!(p1.contains("<b class=\"cy\">Neo C8</b>"));
-        assert!(p1.contains("Radiant &middot; 400 tr"));
+        assert!(p1.contains("Radiant"));
+        assert!(
+            !p1.contains("400 tr"),
+            "trace prep framing is gone from the queue (addendum #72)"
+        );
+        assert!(
+            p1.contains("class=\"sm uncommon\">Systems"),
+            "the part name carries its rarity color (addendum #72)"
+        );
         assert!(
             !p1.contains("Radiant &middot; 10%"),
             "per-crack chance is dead weight in the queue (addendum #67)"
         );
         assert!(p1.contains("Systems &middot; +2 also"), "short part + coverage");
-        assert!(p1.contains("stay for 4"));
+        assert!(
+            !p1.contains("stay for"),
+            "no batch framing in the queue header (addendum #72)"
+        );
         assert!(!p1.contains("long human title"), "mock phrasing replaces prose");
     }
 
