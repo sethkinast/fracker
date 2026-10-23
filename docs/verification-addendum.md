@@ -793,3 +793,21 @@ it refines the brief where they disagree. For the next worker pass.
     post-reset snapshot whose DailyCaps are identical
     to the last pre-reset snapshot's as pre-reset
     (render full caps) — content age, not fetch age.
+72. **Crack queue errata (Seth, 2026-10-22, with
+    screenshot).** (a) The NEXT row's accent
+    misaligns: `.ch.next` adds `padding-left:10px`
+    (render.rs style block) that plain `.ch` rows
+    lack, shifting its content instead of compensating
+    — keep the content box uniform; the inset shadow
+    + gradient carry the highlight. (b) Caliban Prime
+    renders in the queue struck-through (relics
+    vaulted, none owned) — a frame with zero parts
+    obtainable from owned relics must not enter the
+    crack queue at all. (c) Part names need the rarity
+    coloring the Hunt page already has (`rarity_css`,
+    render.rs) — the queue renderer doesn't apply it.
+    (d) Remove the time estimates and the "for 4"
+    framing everywhere in the queue (header "stay for
+    4", row "~32m for 4", the 400 tr prep framing):
+    the plan's EV math is not a commitment to prep
+    four relics. QUEUED by Seth ("next in queue").
