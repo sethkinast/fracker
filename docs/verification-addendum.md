@@ -764,3 +764,13 @@ it refines the brief where they disagree. For the next worker pass.
     path — fetch_profile should surface the snapshot's
     true fetch time (cache mtime), as profile_fallback
     already does. QUEUED by Seth; not yet released.
+    Correction (Seth, same night): the launch WAS fresh
+    — a SessionStart regeneration happened post-reset
+    and the plan still rendered 0. The missing-trigger
+    theory is dead; the SNAPSHOT itself is stale. The
+    fork is now: (a) our cache chain served a pre-reset
+    file as current, or (b) DE's profile endpoint itself
+    lags the reset and keeps returning pre-reset Daily
+    values. Discriminators: the page's profile status
+    line, the cache file's mtime + stored Daily values,
+    and a direct curl of the endpoint. Still queued.
