@@ -791,8 +791,8 @@ mod pod {
     /// proposed a fixed `Format`: a bare-Int `dataType` mask of the
     /// memory types it can read (`spa_data_type` bits). Count, block
     /// size and stride are the node's business, derived from the
-    /// negotiated Format. OBS sends dataType alone, as MemPtr plus
-    /// DmaBuf when the Format carries a modifier.
+    /// negotiated Format. The mask is the caller's choice; the
+    /// negotiation answer passes the SHM mask (addendum #79).
     pub fn param_buffers(data_type_mask: u32) -> Vec<u8> {
         object(
             SPA_TYPE_OBJECT_PARAM_BUFFERS,
@@ -814,19 +814,16 @@ mod pod {
         )
     }
 
-    /// The full negotiation answer OBS's linux-pipewire plugin sends
-    /// from `param_changed(Format)`, in its order: VideoCrop meta,
+    /// The full negotiation answer, modeled on OBS's linux-pipewire
+    /// `param_changed(Format)` handler, in its order: VideoCrop meta,
     /// Cursor meta, the Buffers dataType, Header meta — one
     /// `pw_stream_update_params` call carrying all four. v0.5.14 sent
-    /// the Buffers pod alone: KWin accepted the format (two proposals,
-    /// then quiet) but never allocated a buffer; the Meta declarations
-    /// are the missing half of the canonical answer.
-    pub fn negotiation_params(has_modifier: bool) -> [Vec<u8>; 4] {
-        // `spa_data_type`: MemPtr = 1, DmaBuf = 3 (bit positions).
-        let mut mask: u32 = 1 << 1;
-        if has_modifier {
-            mask |= 1 << 3;
-        }
+    /// the Buffers pod alone and v0.5.15 the full set on the DMA-BUF
+    /// path; neither allocated. The dataType mask is SHM —
+    /// MemPtr|MemFd (`spa_data_type` bits 1 and 2) — matching the
+    /// SHM-only offer (addendum #79).
+    pub fn negotiation_params() -> [Vec<u8>; 4] {
+        let mask: u32 = (1 << 1) | (1 << 2);
         [
             param_meta(SPA_META_VIDEO_CROP, int(SPA_META_VIDEO_CROP_SIZE)),
             param_meta(
@@ -964,19 +961,22 @@ mod pod {
     }
 
     /// The single `EnumFormat` param we offer: raw video in one of the
-    /// packed 4-byte formats, any size in `[1x1 .. 8192x8192]`, 30 fps,
-    /// and the DRM modifiers we can accept.
+    /// packed 4-byte formats, any size in `[1x1 .. 8192x8192]`, any
+    /// framerate from 0/1.
     ///
-    /// **Addendum #65b.** The modifier property was absent, so KWin's
-    /// screencast node (KPipeWire) had no modifier to intersect for its
-    /// DMA-BUF format. It is a `Choice(Enum(Long))` carrying
-    /// `DRM_FORMAT_MOD_LINEAR` (mappable) and the modifier-less sentinel
-    /// `DRM_FORMAT_MOD_INVALID` last.
+    /// **No modifier property (round 5, addendum #79).** The #65b
+    /// modifier enum put negotiation on KWin's DMA-BUF path: its
+    /// proposals arrived with DRM modifiers (INVALID, then LINEAR)
+    /// and buffer allocation never followed, across four rounds of
+    /// otherwise-canonical answers. This reader can only consume SHM
+    /// memory anyway (a DmaBuf cannot be mmap'd into pixels without a
+    /// GBM/EGL path), so the offer is SHM-only — the shape the
+    /// canonical SHM consumers use, and the fallback OBS always
+    /// includes alongside its DMA-BUF offers.
     ///
-    /// **Addendum #69a.** Enum choices repeat their default as the first
-    /// value, exactly as `spa_pod_builder` emits them: formats are
-    /// `[BGRx, BGRx, BGRA, RGBx, RGBA]` and modifiers
-    /// `[LINEAR, LINEAR, INVALID]`.
+    /// **Addendum #69a.** Enum choices repeat their default as the
+    /// first value, exactly as `spa_pod_builder` emits them: formats
+    /// are `[BGRx, BGRx, BGRA, RGBx, RGBA]`.
     pub fn enum_format_video() -> Vec<u8> {
         let formats = choice(
             SPA_CHOICE_ENUM,
@@ -992,14 +992,6 @@ mod pod {
             SPA_CHOICE_RANGE,
             &[rect(1920, 1080), rect(1, 1), rect(8192, 8192)],
         );
-        let modifiers = choice(
-            SPA_CHOICE_ENUM,
-            &[
-                long(DRM_FORMAT_MOD_LINEAR),
-                long(DRM_FORMAT_MOD_LINEAR),
-                long(DRM_FORMAT_MOD_INVALID),
-            ],
-        );
         // Item 69e: a range from 0/1 (any rate), not the pinned 30/1
         // fraction this used to be — KWin may offer a variable rate.
         let framerates = choice(
@@ -1013,7 +1005,6 @@ mod pod {
                 prop(SPA_FORMAT_MEDIA_TYPE, id(SPA_MEDIA_TYPE_VIDEO)),
                 prop(SPA_FORMAT_MEDIA_SUBTYPE, id(SPA_MEDIA_SUBTYPE_RAW)),
                 prop(SPA_FORMAT_VIDEO_FORMAT, formats),
-                prop(SPA_FORMAT_VIDEO_MODIFIER, modifiers),
                 prop(SPA_FORMAT_VIDEO_SIZE, sizes),
                 prop(SPA_FORMAT_VIDEO_FRAMERATE, framerates),
             ],
@@ -1387,7 +1378,7 @@ pub const REQUIRED_SYMBOLS: &[&str] = &[
     "pw_stream_add_listener",   // stream.h
     "pw_stream_connect",        // stream.h
     "pw_stream_update_params",  // stream.h (the SPA_PARAM_Buffers answer)
-    "pw_stream_set_active",     // stream.h (start the graph after connect)
+    "pw_stream_set_active",     // stream.h (activate once params are answered)
     "pw_stream_disconnect",     // stream.h
     "pw_stream_destroy",        // stream.h
     "pw_stream_dequeue_buffer", // stream.h
@@ -1669,6 +1660,9 @@ struct StreamCtx {
     map_failed_logged: AtomicBool,
     /// Last `io_changed` id logged (transition-only logging).
     last_io: AtomicU32,
+    /// One-shot: the stream is activated after its first answered
+    /// Format (round 5), not at connect.
+    activated: AtomicBool,
     err: Arc<Mutex<Option<String>>>,
     /// Verbatim PipeWire stream-state + error log (ninth pass §1).
     log: CaptureLog,
@@ -1751,6 +1745,7 @@ impl ScreenCastSource {
             maps: Mutex::new(HashMap::new()),
             map_failed_logged: AtomicBool::new(false),
             last_io: AtomicU32::new(u32::MAX),
+            activated: AtomicBool::new(false),
             err: err.clone(),
             log: log.clone(),
         });
@@ -1940,15 +1935,11 @@ impl ScreenCastSource {
                      awaiting first frame"
                 ),
             );
-            // Start the graph (OBS's consumer flow): an inactive stream
-            // negotiates forever and never leaves PAUSED.
-            let arc = unsafe { (api.pw_stream_set_active)(created, true) };
-            if arc < 0 {
-                log.record(
-                    "connecting",
-                    &format!("PipeWire: pw_stream_set_active(true) failed ({arc})"),
-                );
-            }
+            // Activation happens in `on_param_changed`, once the first
+            // Format has been answered (round 5): activating here —
+            // before any param was set — left KWin's node quiet after
+            // two proposals, while never activating (v0.5.13) cycled
+            // proposals forever.
             break (created, attempt_hook);
         };
         // The negotiated fd is now owned by PipeWire; leak the OwnedFd so
@@ -2201,14 +2192,25 @@ unsafe extern "C" fn on_param_changed(data: *mut c_void, id: u32, param: *const 
     // buffer parameters. Record the format, then send SPA_PARAM_Buffers.
     // A node mid-negotiation re-proposes often; answer every time, but
     // log only when the format actually changes.
-    let changed = if let Ok(mut slot) = ctx.info.lock() {
+    let (changed, first) = if let Ok(mut slot) = ctx.info.lock() {
+        let first = slot.is_none();
         let c = *slot != Some(info);
         *slot = Some(info);
-        c
+        (c, first)
     } else {
-        true
+        (true, true)
     };
-    let pods = pod::negotiation_params(info.modifier.is_some());
+    if first {
+        ctx.log.record(
+            "connecting",
+            &format!(
+                "PipeWire first Format pod ({} bytes): {}",
+                bytes.len(),
+                hex_dump(&bytes[..bytes.len().min(768)])
+            ),
+        );
+    }
+    let pods = pod::negotiation_params();
     let words: Vec<Vec<u64>> = pods.iter().map(|p| to_aligned_words(p)).collect();
     let params: Vec<*const c_void> = words
         .iter()
@@ -2220,6 +2222,18 @@ unsafe extern "C" fn on_param_changed(data: *mut c_void, id: u32, param: *const 
             "connecting",
             &format!("PipeWire: pw_stream_update_params(negotiation) failed ({brc})"),
         );
+    }
+    // Activate once the first Format has been answered (round 5): the
+    // canonical lifecycle sets params on a PAUSED stream, then starts
+    // it. One-shot — later re-proposals only re-answer.
+    if !ctx.activated.swap(true, Ordering::Relaxed) {
+        let arc = (ctx.api.pw_stream_set_active)(ctx.stream, true);
+        if arc < 0 {
+            ctx.log.record(
+                "connecting",
+                &format!("PipeWire: pw_stream_set_active(true) failed ({arc})"),
+            );
+        }
     }
 
     // Addendum #65: the negotiated size is also the practical evidence
@@ -2935,17 +2949,12 @@ mod tests {
             ]
         );
 
-        // Modifier: LINEAR default first and repeated, INVALID last.
-        let (kind, ctype, modifiers) = values(pod::SPA_FORMAT_VIDEO_MODIFIER);
-        assert_eq!(kind, pod::SPA_CHOICE_ENUM);
-        assert_eq!(ctype, pod::SPA_TYPE_LONG);
-        assert_eq!(
-            modifiers,
-            vec![
-                pod::DRM_FORMAT_MOD_LINEAR,
-                pod::DRM_FORMAT_MOD_LINEAR,
-                pod::DRM_FORMAT_MOD_INVALID,
-            ]
+        // No modifier prop (round 5): the offer is SHM-only — KWin's
+        // DMA-BUF path never allocated for this consumer, and its
+        // buffers are unreadable here anyway.
+        assert!(
+            pod::find_prop(&p, pod::SPA_FORMAT_VIDEO_MODIFIER).is_none(),
+            "the EnumFormat offer carries no modifier prop"
         );
 
         // Size: Range with default then min/max.
@@ -3179,7 +3188,7 @@ mod tests {
     /// header-verified meta type ids and struct sizes.
     #[test]
     fn negotiation_params_match_obs_shape() {
-        let pods = pod::negotiation_params(true);
+        let pods = pod::negotiation_params();
         let meta_head = |p: &[u8]| {
             let (size, ty) = pod::read_header(p).unwrap();
             assert_eq!(ty, pod::SPA_TYPE_OBJECT);
@@ -3216,13 +3225,13 @@ mod tests {
             .map(|i| i32::from_le_bytes(p[v2 + 24 + 4 * i..v2 + 28 + 4 * i].try_into().unwrap()))
             .collect();
         assert_eq!(vals, vec![16432, 52, 4194352]);
-        // [2] Buffers with modifier: MemPtr|DmaBuf.
+        // [2] Buffers: SHM only — MemPtr|MemFd.
         let (key, vtype, value_off, _) = pod::prop_at(&pods[2], 16).unwrap();
         assert_eq!(key, pod::SPA_PARAM_BUFFERS_DATA_TYPE);
         assert_eq!(vtype, pod::SPA_TYPE_INT);
         assert_eq!(
             i32::from_le_bytes(pods[2][value_off + 8..value_off + 12].try_into().unwrap()),
-            0b1010
+            0b0110
         );
         // [3] Header: bare Int size = sizeof(spa_meta_header) = 32.
         let (mt, t2, v2) = meta_head(&pods[3]);
@@ -3231,13 +3240,6 @@ mod tests {
         assert_eq!(
             i32::from_le_bytes(pods[3][v2 + 8..v2 + 12].try_into().unwrap()),
             32
-        );
-        // Without a modifier the mask is MemPtr alone.
-        let pods = pod::negotiation_params(false);
-        let (_, _, value_off, _) = pod::prop_at(&pods[2], 16).unwrap();
-        assert_eq!(
-            i32::from_le_bytes(pods[2][value_off + 8..value_off + 12].try_into().unwrap()),
-            0b0010
         );
     }
 
