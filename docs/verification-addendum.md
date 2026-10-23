@@ -854,3 +854,13 @@ it refines the brief where they disagree. For the next worker pass.
     it too. Fix: the "…left" sites use a bare duration
     ("6d left"); the header keeps "in 6d". QUEUED with
     #72.
+74. **Blueprint sorts first on goal cards (Seth,
+    2026-10-22).** Part names on a goal card are
+    sorted plain-alphabetically (plan.rs's goal-parts
+    builder: `names.sort()`), so "Kestrel Prime
+    Blueprint" lands between Blade and Grip. Warframe
+    convention — and Seth's ask: the item's own
+    blueprint ("<Gear> Blueprint") always heads the
+    list; the rest stay alphabetical. (Component
+    blueprints — Chassis Blueprint etc. — are not the
+    item blueprint.) QUEUED with #72/#73.
