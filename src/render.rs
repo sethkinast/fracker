@@ -161,6 +161,13 @@ fn display_gear(gear: &str) -> String {
     s.strip_suffix(" Prime").unwrap_or(s).to_owned()
 }
 
+/// `days_until` values carry an "in " prefix for the header pills
+/// ("2 primes · in 6d"); the "… left" sites want the bare duration
+/// (addendum #73: the pill must not read "IN 6D LEFT").
+fn bare_duration(s: &str) -> &str {
+    s.strip_prefix("in ").unwrap_or(s)
+}
+
 /// Rarity as the mock's palette class (`common` / `uncommon` / `rare`).
 fn rarity_css(r: crate::plan::Rarity) -> &'static str {
     match r {
@@ -627,7 +634,7 @@ fn resurgence_panel(r: &crate::plan::ResurgenceView, ctx: &RenderContext<'_>) ->
         "<section class=\"panel\">\n<h2>{}<small>{}</small><em class=\"pill\">{} left</em></h2>\n<div class=\"chips\">\n",
         esc(&r.contact),
         esc(&r.location),
-        esc(&r.ends_in),
+        esc(bare_duration(&r.ends_in)),
     ));
     for gear in &r.gears {
         h.push_str(&format!(
@@ -810,7 +817,9 @@ fn hunt_card_html(
     }
     // Footer: the recommendation line (mock `.gf`).
     if g.resurgence_live {
-        let ends = varzia_end.map(esc).unwrap_or_else(|| "now".to_owned());
+        let ends = varzia_end
+            .map(|e| esc(bare_duration(e)))
+            .unwrap_or_else(|| "now".to_owned());
         h.push_str(&format!(
             "<div class=\"gf\"><span class=\"fa vz\">◆ In Varzia · {ends} left</span></div>\n"
         ));

@@ -874,7 +874,15 @@ fn part_rows_for_gear(
             }
         }
     }
-    names.sort();
+    // Addendum #74: the item's own blueprint heads the list — exactly
+    // "<Gear> Blueprint", not component blueprints like "<Gear>
+    // Chassis Blueprint". The rest stay alphabetical.
+    let own_blueprint = format!("{gear} Blueprint");
+    names.sort_by(|a, b| {
+        (a != &own_blueprint)
+            .cmp(&(b != &own_blueprint))
+            .then_with(|| a.cmp(b))
+    });
     names
         .into_iter()
         .map(|part| {
