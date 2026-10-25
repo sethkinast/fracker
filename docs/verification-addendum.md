@@ -1422,3 +1422,31 @@ it refines the brief where they disagree. For the next worker pass.
     token (union 146 vs attempt 1's 147 correct +
     2 false). The decoder recovers the <=1-edit
     population; that is the price of the proof.
+94. **Required quantities > 1 per part (Seth,
+    2026-10-25; QUEUED — not in pass 30).** Some
+    items require multiple units of a single part:
+    Quassus Prime builds from its blueprint plus
+    TWO Blades and TWO Handles (five parts total);
+    Akarius Prime is a second example; the pattern
+    is mostly but not always melee/dual weapons.
+    Seth could only verify this once parts started
+    showing up in the planner. Current state: the
+    roster's parts are name-only (no quantity field
+    anywhere in the data pipeline), the pass-28 Have
+    derivation fires at canonical count >= 1, and
+    Backlog pips render per part rather than per
+    required unit — so holding 1 of 2 Quassus Prime
+    Blades renders the part fully Have, overstating
+    progress. The build: carry the required quantity
+    per part from the public recipe data into the
+    roster model; pips hold per-unit state (N
+    required -> N slots, filled per canonical count
+    capped at N); Have only at count >= required,
+    with a distinct partial denotation in Hunt rows
+    (e.g. the count shown as 1/2). Open design point
+    for that build, NOT decided here: what an
+    unverified click (pass 30, #93) asserts on a
+    multi-unit part — the full requirement or one
+    unit. Quantities are also a prerequisite input
+    for #77's per-item resolution (a part at 1/2
+    still needs farming).
