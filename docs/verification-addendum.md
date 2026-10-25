@@ -1338,3 +1338,10 @@ it refines the brief where they disagree. For the next worker pass.
     margin ceiling is the known limiter on long
     shared-suffix part names, documented here and in
     docs/twenty-seventh-pass.md.
+    DECISION (Seth, 2026-10-25): leave the margin
+    ceiling as the documented limiter — the A/B is
+    not commissioned. The never-guess margin stands
+    as-is; revisit only on new evidence (e.g. a future
+    census showing the refusal class growing, or a
+    remedy shape that provably cannot flip the
+    destroyed-gear-word counter-class).
