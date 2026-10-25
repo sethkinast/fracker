@@ -1128,6 +1128,21 @@ it refines the brief where they disagree. For the next worker pass.
     today, which is why "collected" has no denotation
     there). QUEUED for the next build at Seth's
     direction; not in the current capture/OCR build.
+    RESOLVED (pass 28, v0.5.23, 2026-10-25): report.rs
+    keeps the parsed StockState and feeds the plan a
+    canonical part-stock map (StockState::
+    canonical_part_counts — built + blueprint forms
+    summed per #89 rule 3, landing with pass 27);
+    part_rows_for_gear constructs PartState::Have at
+    canonical count >= 1 (the roster carries no
+    required-quantity data, so the threshold is 1);
+    Backlog pips light via the existing parts_have
+    derivation; Hunt rows denote Have with a `have`
+    row class, gold part name, and a "✓ " prefix.
+    Pinned by tests at all three layers, including
+    Seth's case ("Dual Zoren Prime Handle" in stock ->
+    Have row + one lit pip). Addendum #77 remains
+    DO NOT BUILD.
 85. **Baro pill while he is HERE (Seth, 2026-10-25).**
     With Baro active the header pill reads "BARO
     EarthHUB · in 0d". Two defects: (a) the countdown is
@@ -1142,6 +1157,16 @@ it refines the brief where they disagree. For the next worker pass.
     id (EarthHUB is a pinned decode gap — the app never
     invents a name); noted, not prescribed. QUEUED for
     the next build.
+    RESOLVED (pass 28, v0.5.23, 2026-10-25): while a
+    trader window is live, BaroView.ends_in is
+    "Leaves in " + mins_left_label (hour/minute
+    granularity — "Leaves in 25h00m", never "in 0d"),
+    and the header pill carries a `baro-live` class
+    with a pulse keyframe animation while plan.baro
+    is present. The not-active branch (next-arrival
+    relative countdown) is unchanged. The raw node id
+    in the location text is the pinned decode gap
+    above and remains as-is. Tests pin both states.
 86. **Tab still resets on refresh (Seth, 2026-10-25) —
     #46/#52 not holding live.** Design intent: the
     remembered tab survives a plan's own 60s refreshes
@@ -1158,6 +1183,21 @@ it refines the brief where they disagree. For the next worker pass.
     is not the "new report" moment #52 aimed at (that
     was the session-start open). QUEUED for the next
     build.
+    RESOLVED (pass 28, v0.5.23, 2026-10-25) — fork (i)
+    confirmed, and Seth's instruction SUPERSEDES #52:
+    next_generation() mints a token unique to every
+    regeneration and the resident regenerates on
+    worldstate ticks minutes apart, so scope_to's
+    clear-on-generation-change fired constantly and
+    #46 never held live. TabStore::scope_to now
+    records the new generation but no longer clears
+    the remembered tab; the generation field is kept
+    (serialized form unchanged) and a slug naming no
+    current tab still falls back to First Crack at
+    serve time. The #52 reset rule is retired, not
+    amended — flagged here per Seth's instruction.
+    Tests rewritten at the store and HTTP layers
+    (a_new_generation_keeps_the_remembered_tab).
 87. **Crack queue NEXT accent still misaligned (Seth,
     2026-10-25, with screenshot).** The accent bar for
     the NEXT row renders offset from the row it marks
@@ -1171,6 +1211,19 @@ it refines the brief where they disagree. For the next worker pass.
     Root cause to be pinned against the live DOM in the
     build; the mock's alignment is the reference.
     QUEUED for the next build.
+    RESOLVED (pass 28, v0.5.23, 2026-10-25): the accent
+    is now a deterministic construction — .ch.next is
+    position:relative and its bar is a ::before pinned
+    to the row's own box (left/top/bottom 0, width
+    3px), replacing the inset box-shadow whose paint
+    box left the bar's registration ambiguous against
+    the row (grid row, 9px 0 padding, border-top
+    separator, clipped panel). The gradient is kept.
+    No live-DOM verification was available in the
+    build environment; the geometry argument and the
+    pinning render test are in
+    docs/twenty-eighth-pass.md — visual confirmation
+    on Seth's next session is the remaining check.
 88. **Varzia supersedes the vault badge in Hunt (Seth,
     2026-10-25).** A vaulted goal that is live at Varzia
     shows BOTH the "V" badge and the "◆ In Varzia"
@@ -1182,6 +1235,13 @@ it refines the brief where they disagree. For the next worker pass.
     below it; the Backlog section split already treats
     Varzia-live as its own class — the badge never got
     the same condition. QUEUED for the next build.
+    RESOLVED (pass 28, v0.5.23, 2026-10-25): the Hunt
+    goal card emits the V badge only when
+    vaulted && !resurgence_live; the VARZIA badge
+    stands alone on Varzia-live goals. Pinned by
+    render test varzia_badge_replaces_vault_badge_
+    never_both (one V and one VARZIA across a mixed
+    pair of cards).
 89. **Built components are first-class capture stock
     (Seth, 2026-10-25; resolves the census's open
     product question).** A built component and its

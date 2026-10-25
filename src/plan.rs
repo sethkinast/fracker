@@ -33,6 +33,10 @@ pub struct PlanInput<'a> {
     pub roster: &'a Roster,
     pub relics: &'a RelicTables,
     pub stock: &'a RelicStock,
+    /// Captured part stock, canonicalised per roster part (built and
+    /// blueprint forms summed — addendum #84/#89). Drives
+    /// PartState::Have in part rows and the Backlog pips.
+    pub part_stock: &'a HashMap<String, u32>,
     pub pins: &'a [String],
     /// Normalized gear names of the last two prime releases (radshare gate).
     pub recent_gear: &'a HashSet<String>,
@@ -810,6 +814,7 @@ fn part_rows_for_gear(
     roster: &Roster,
     relics: &RelicTables,
     stock: &RelicStock,
+    part_stock: &HashMap<String, u32>,
     varzia: &VarziaAvailability,
     want_set: &HashSet<String>,
     tuning: &Tuning,
@@ -835,7 +840,13 @@ fn part_rows_for_gear(
     names
         .into_iter()
         .map(|part| {
-            let state = if want_set.contains(&part) {
+            // Addendum #84: captured part stock reaches the plan. A
+            // canonical count >= 1 (blueprint or built form, #89)
+            // means the part is in hand; the roster carries no
+            // required-quantity data, so the threshold is 1.
+            let state = if part_stock.get(&part).copied().unwrap_or(0) >= 1 {
+                PartState::Have
+            } else if want_set.contains(&part) {
                 PartState::Need
             } else {
                 PartState::Unknown
@@ -939,6 +950,7 @@ fn goal_cards(
                 input.roster,
                 input.relics,
                 input.stock,
+                input.part_stock,
                 varzia,
                 &want_set,
                 input.tuning,
@@ -1834,10 +1846,17 @@ fn donow_resurgence(input: &PlanInput<'_>, cards: &[GoalCard]) -> Option<Resurge
 /// Pass-4 trader section: the live trader window, if any.
 fn donow_baro(input: &PlanInput<'_>) -> Option<BaroView> {
     let live = input.world.active_trader(&input.now)?;
+    // Addendum #85: while the window is live the header pill reads
+    // "Leaves in HhMMm" at minute granularity — days_until's
+    // day-rounded "in 0d" told Seth nothing on the last day.
+    let ends_in = match parse_time(&live.expiry) {
+        Some(expiry) => format!("Leaves in {}", mins_left_label(input.now, expiry)),
+        None => "soon".to_owned(),
+    };
     Some(BaroView {
         vendor: input.tuning.planner.vendor.name.clone(),
         location: live.location.clone(),
-        ends_in: days_until(input.now, &live.expiry, input.tuning),
+        ends_in,
     })
 }
 
@@ -1873,6 +1892,14 @@ mod tests {
 
     fn tuning() -> Tuning {
         Tuning::for_tests()
+    }
+
+    /// Shared empty part-stock map for PlanInput literals that do not
+    /// exercise addendum #84.
+    fn no_part_stock() -> &'static HashMap<String, u32> {
+        static EMPTY: std::sync::OnceLock<HashMap<String, u32>> =
+            std::sync::OnceLock::new();
+        EMPTY.get_or_init(HashMap::new)
     }
 
     fn syn_fissure(node: &str, mtype: &str, tier: &str, expiry: &str) -> Fissure {
@@ -2080,6 +2107,7 @@ mod tests {
             roster: &roster,
             relics: &tables,
             stock: &stock,
+            part_stock: no_part_stock(),
             pins: &[],
             recent_gear: &recent,
             steel_path_tiebreak: true,
@@ -2175,6 +2203,7 @@ mod tests {
             roster: &roster,
             relics: &tables,
             stock: &stock,
+            part_stock: no_part_stock(),
             pins: &[],
             recent_gear: &recent,
             steel_path_tiebreak: true,
@@ -2219,6 +2248,7 @@ mod tests {
             roster: &roster,
             relics: &tables,
             stock: &stock,
+            part_stock: no_part_stock(),
             pins: &[],
             recent_gear: &recent,
             steel_path_tiebreak: true,
@@ -2236,6 +2266,7 @@ mod tests {
             roster: &roster,
             relics: &tables,
             stock: &stock,
+            part_stock: no_part_stock(),
             pins: &pins,
             recent_gear: &recent,
             steel_path_tiebreak: true,
@@ -2415,6 +2446,7 @@ mod tests {
                 roster: &roster,
                 relics: &relics,
                 stock: &stock,
+                part_stock: no_part_stock(),
                 pins: &[],
                 recent_gear: &recent,
                 steel_path_tiebreak: true,
@@ -2489,6 +2521,7 @@ mod tests {
                 roster: &roster,
                 relics: &tables,
                 stock: &stock,
+                part_stock: no_part_stock(),
                 pins: &pins,
                 recent_gear: &recent,
                 steel_path_tiebreak: true,
@@ -2575,6 +2608,7 @@ mod tests {
             roster: &roster,
             relics: &tables,
             stock: &stock,
+            part_stock: no_part_stock(),
             pins: &pins,
             recent_gear: &recent,
             steel_path_tiebreak: true,
@@ -2599,6 +2633,7 @@ mod tests {
             roster: &roster,
             relics: &tables,
             stock: &stock,
+            part_stock: no_part_stock(),
             pins: &pins,
             recent_gear: &recent,
             steel_path_tiebreak: true,
@@ -2609,7 +2644,70 @@ mod tests {
         assert!(q.event_alerts.is_empty() && q.lotus_alerts.is_empty());
         let b = q.baro.expect("trader live mid-window");
         assert_eq!(b.location, "Orcus Relay (Pluto)");
-        assert!(!b.ends_in.is_empty());
+        // Addendum #85: live window reads "Leaves in …" at hour/minute
+        // granularity (noon Oct 17 -> expiry 13:00 Oct 18 = 25h00m).
+        assert_eq!(b.ends_in, "Leaves in 25h00m");
+    }
+
+    #[test]
+    fn captured_part_stock_marks_rows_have_and_lights_pips() {
+        // Addendum #84 (Seth's case): "Dual Zoren Prime Handle" in the
+        // captured stock -> the Dual Zoren goal card shows that part
+        // as Have and counts it in parts_have (the Backlog pips).
+        let tables = mini_tables();
+        let roster = Roster::from_json(
+            r#"[{"name": "Dual Zoren Prime", "vaulted": true, "type": "melee",
+                 "parts": [{"name": "Dual Zoren Prime Blueprint"},
+                           {"name": "Dual Zoren Prime Blade"},
+                           {"name": "Dual Zoren Prime Handle"}]}]"#,
+        )
+        .unwrap();
+        let now: DateTime<Utc> = "2026-10-16T02:55:00Z".parse().unwrap();
+        let world = WorldState::default();
+        let owned = OwnedEquipment::empty();
+        let stock = RelicStock::Unknown;
+        // The map report.rs builds from a capture holding the Handle.
+        let captured = crate::ocr::StockState {
+            parts: [("Dual Zoren Prime Handle".to_owned(), 1)]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let part_stock = captured.canonical_part_counts(&roster);
+        let wants = vec!["Dual Zoren Prime Blade".to_owned()];
+        let pins: Vec<String> = Vec::new();
+        let recent: HashSet<String> = HashSet::new();
+        let t = tuning();
+        let p = plan(&PlanInput {
+            now,
+            world: &world,
+            owned: &owned,
+            wants: &wants,
+            roster: &roster,
+            relics: &tables,
+            stock: &stock,
+            part_stock: &part_stock,
+            pins: &pins,
+            recent_gear: &recent,
+            steel_path_tiebreak: true,
+            completed_missions: &[],
+            item_names: test_item_names(),
+            tuning: &t,
+        });
+        let card = p
+            .goals
+            .iter()
+            .find(|g| g.gear == "Dual Zoren Prime")
+            .expect("goal card");
+        let state_of = |name: &str| {
+            card.parts
+                .iter()
+                .find(|r| r.name == name)
+                .map(|r| &r.state)
+        };
+        assert_eq!(state_of("Dual Zoren Prime Handle"), Some(&PartState::Have));
+        assert_eq!(state_of("Dual Zoren Prime Blade"), Some(&PartState::Need));
+        assert_eq!(card.parts_have, 1, "the held Handle lights one pip");
     }
 
     /// Ninth pass §4: a log-proven completion strikes exactly the alert
@@ -2656,6 +2754,7 @@ mod tests {
             roster: &roster,
             relics: &tables,
             stock: &stock,
+            part_stock: no_part_stock(),
             pins: &pins,
             recent_gear: &recent,
             steel_path_tiebreak: true,
@@ -2678,6 +2777,7 @@ mod tests {
             roster: &roster,
             relics: &tables,
             stock: &stock,
+            part_stock: no_part_stock(),
             pins: &pins,
             recent_gear: &recent,
             steel_path_tiebreak: true,

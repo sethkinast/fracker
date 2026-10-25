@@ -295,15 +295,19 @@ pub async fn generate(
         gated_label: format!("{} gated", taubound.community_goal.gated_set),
     };
 
-    let stock = match std::fs::read_to_string(&cfg.stock_path) {
+    // Addendum #84: the parsed capture state feeds BOTH planner
+    // shapes — relic stock as before, plus the canonical part-stock
+    // map (built + blueprint forms summed per roster part, #89) that
+    // lights the Hunt/Backlog part states.
+    let (stock, part_stock) = match std::fs::read_to_string(&cfg.stock_path) {
         Ok(text) => match crate::ocr::StockState::from_json(&text) {
-            Ok(s) => s.to_relic_stock(),
+            Ok(s) => (s.to_relic_stock(), s.canonical_part_counts(&roster)),
             Err(e) => {
                 endpoint_failures.push(format!("stock {}: {e}", cfg.stock_path.display()));
-                RelicStock::Unknown
+                (RelicStock::Unknown, HashMap::new())
             }
         },
-        Err(_) => RelicStock::Unknown,
+        Err(_) => (RelicStock::Unknown, HashMap::new()),
     };
 
     let (cfg_file, _) = config::Config::load(&cfg.config_path)
@@ -319,6 +323,7 @@ pub async fn generate(
         roster: &roster,
         relics: &relics,
         stock: &stock,
+        part_stock: &part_stock,
         pins: &cfg_file.pins,
         recent_gear: &HashSet::new(),
         steel_path_tiebreak: cfg_file.steel_path_tiebreak,
@@ -347,9 +352,9 @@ pub async fn generate(
     };
 
     // Item 52: unique per REGENERATION (not the worldstate's timestamp,
-    // which can repeat across runs). The server scopes the remembered tab
-    // to this value: same generation = the 60s refreshes keep the tab; a
-    // new report = First Crack. Item 58 publishes this token to open pages
+    // which can repeat across runs). The server records this value with
+    // the remembered tab; since addendum #86 the choice itself persists
+    // across generations. Item 58 publishes this token to open pages
     // once the page file is in place.
     let generation = next_generation();
     let ctx = render::RenderContext {
@@ -385,8 +390,9 @@ pub async fn generate(
     std::fs::rename(&tmp, &cfg.out).map_err(|e| format!("publish report: {e}"))?;
     // Item 58: the page is now atomically in place, so this is the exact
     // publication point that pushes the new generation to open pages. A
-    // reload lands on the generation whose token rode the same run (item
-    // 52: ticks stay server-side, tab scope is generation-aware).
+    // reload lands on the generation whose token rode the same run
+    // (ticks stay server-side; the tab choice persists per addendum
+    // #86).
     if let Some(hub) = &cfg.push {
         hub.publish(&generation);
     }

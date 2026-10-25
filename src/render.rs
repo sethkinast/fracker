@@ -396,7 +396,13 @@ fn header_html(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     let mut h = String::new();
     h.push_str("<header class=\"top\">\n<div class=\"brand\">FRACKER</div>\n");
     h.push_str("<div class=\"pills\">\n");
-    h.push_str(&format!("<span><b>{vendor}</b>{baro}</span>\n"));
+    // Addendum #85: while Baro is live his pill pulses.
+    let baro_class = if plan.baro.is_some() {
+        " class=\"baro-live\""
+    } else {
+        ""
+    };
+    h.push_str(&format!("<span{baro_class}><b>{vendor}</b>{baro}</span>\n"));
     h.push_str(&format!("<span><b>{contact}</b>{varzia}</span>\n"));
     h.push_str(&format!(
         "<span><b>TARGETS</b>{} goals &middot; {} parts</span>\n",
@@ -759,7 +765,9 @@ fn hunt_card_html(
         mi_span(&g.gear, ctx, "mi lg"),
         esc(&g.gear),
     ));
-    if g.vaulted {
+    // Addendum #88: a Varzia-live goal shows the Varzia marker
+    // INSTEAD of the vault V — never both.
+    if g.vaulted && !g.resurgence_live {
         h.push_str("<em class=\"bd v\">V</em>\n");
     }
     if g.resurgence_live {
@@ -792,10 +800,21 @@ fn hunt_card_html(
         } else {
             ""
         };
+        // Addendum #84: a part already in hand (captured stock) is
+        // denoted on the row itself — gold name with a check mark,
+        // matching the Backlog pips' Have treatment.
+        let have = p.state == crate::plan::PartState::Have;
+        let have_class = if have { " have" } else { "" };
+        let part_label = if have {
+            format!("✓ {part}")
+        } else {
+            part.clone()
+        };
         h.push_str(&format!(
-            "<div class=\"r{dead_class}\">\n<span class=\"pn\">{part}</span>\n<span class=\"rc {rarity}{vault_class}\">{relic}</span>\n<span class=\"pc {rarity}\">{refine}</span>\n</div>\n",
+            "<div class=\"r{dead_class}{have_class}\">\n<span class=\"pn\">{part}</span>\n<span class=\"rc {rarity}{vault_class}\">{relic}</span>\n<span class=\"pc {rarity}\">{refine}</span>\n</div>\n",
             dead_class = dead_class,
-            part = esc(&part),
+            have_class = have_class,
+            part = esc(&part_label),
             rarity = rarity,
             vault_class = vault_class,
             relic = esc(&relic),
@@ -1171,7 +1190,8 @@ h3{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--mut)
 .ev{grid-template-columns:64px 1fr auto}.ch{grid-template-columns:40px 1fr auto auto}
 .tm{font-size:21px;font-weight:700;color:var(--tx)}.tm.hot{color:var(--amb)}.tm.warm{color:var(--gold)}
 .rl{text-align:right}.ch b{font-size:17px}.nx{font-style:normal;font-size:10px;letter-spacing:.12em;color:var(--cy);border:1px solid var(--cy);padding:0 5px;margin-left:8px}
-.ch.next{background:linear-gradient(90deg,rgba(174,227,239,.07),transparent);box-shadow:inset 3px 0 var(--cy)}
+.ch.next{position:relative;background:linear-gradient(90deg,rgba(174,227,239,.07),transparent)}
+.ch.next::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--cy)}
 .mi{width:22px;height:22px;flex:none;position:relative;overflow:hidden;display:inline-flex;align-items:center;justify-content:center;font:700 12px Rajdhani,sans-serif;color:var(--gold);background:#0d1117;border:1px solid var(--line)}
 .mi.lg{width:36px;height:36px;font-size:18px}.mi img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#0d1117}
 .chips{display:flex;flex-wrap:wrap;gap:6px}.chip{display:inline-flex;align-items:center;gap:7px;background:var(--cell);border:1px solid #1f2735;padding:3px 10px 3px 3px;font-size:13px}
@@ -1208,9 +1228,12 @@ input[type=checkbox]:checked::after{content:"";width:9px;height:5px;border:2px s
 @media(max-width:860px){.g2,.g2.b,.g3{grid-template-columns:1fr}.lg-note{margin-left:0}}
 
 /* Fracker extensions: states the static mock cannot show. */
+@keyframes baro-pulse{0%,100%{opacity:1}50%{opacity:.5}}
+.pills span.baro-live{animation:baro-pulse 1.6s ease-in-out infinite}
 .row.done{opacity:.45}.row.done b,.row.done .tm{text-decoration:line-through}
 .row.dead .rl,.row.dead>div{opacity:.55;text-decoration:line-through}
 .g .r.dead{opacity:.75}
+.g .r.have .pn{color:var(--gold)}
 label.row{cursor:pointer}
 .row.ch.tick{grid-template-columns:auto 40px 1fr auto auto}
 .row.ch.tick input[type=checkbox]{align-self:center}
@@ -1549,6 +1572,97 @@ mod tests {
         assert!(html.contains("function filt("), "CSS-driven filter JS");
     }
 
+    /// Addendum #88: a vaulted goal that is live at Varzia shows the
+    /// VARZIA badge instead of the vault V — never both; a vaulted
+    /// goal not at Varzia keeps its V.
+    #[test]
+    fn varzia_badge_replaces_vault_badge_never_both() {
+        let t = crate::tuning::Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let ctx = empty_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
+        let plan = Plan {
+            goals: vec![
+                goal("Protea Prime", "Protea Prime Blueprint", true, true),
+                goal("Vauban Prime", "Vauban Prime Blueprint", true, false),
+            ],
+            ..Default::default()
+        };
+        let html = render_plan(&plan, &ctx);
+        let p2 = page(&html, "p2");
+        assert_eq!(
+            p2.matches("<em class=\"bd z\">VARZIA</em>").count(),
+            1,
+            "the Varzia-live goal carries the VARZIA badge"
+        );
+        assert_eq!(
+            p2.matches("<em class=\"bd v\">V</em>").count(),
+            1,
+            "only the non-Varzia vaulted goal carries the V"
+        );
+    }
+
+    /// Addendum #85: the Baro pill pulses only while a trader window
+    /// is live (plan.baro present); the pulse keyframes ship in the
+    /// style block either way.
+    #[test]
+    fn baro_pill_pulses_only_while_the_trader_is_live() {
+        let t = crate::tuning::Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let ctx = empty_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
+        let live = Plan {
+            baro: Some(crate::plan::BaroView {
+                vendor: "Baro Ki'Teer".to_owned(),
+                location: "Larunda Relay (Mercury)".to_owned(),
+                ends_in: "Leaves in 18h24m".to_owned(),
+            }),
+            ..Default::default()
+        };
+        let html = render_plan(&live, &ctx);
+        assert!(html.contains("class=\"baro-live\""), "live pill carries the pulse class");
+        assert!(html.contains("@keyframes baro-pulse"), "pulse keyframes in the style block");
+        assert!(html.contains("Leaves in 18h24m"), "live pill shows the leave countdown");
+        let idle = render_plan(&Plan::default(), &ctx);
+        assert!(
+            !idle.contains("class=\"baro-live\""),
+            "no pulse class attribute without a live window"
+        );
+    }
+
+    /// Addendum #84: a part row in state Have is denoted on the Hunt
+    /// card (row class + check mark) and fills its Backlog pip.
+    #[test]
+    fn have_part_is_denoted_on_hunt_row_and_backlog_pip() {
+        let t = crate::tuning::Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let ctx = empty_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
+        let mut card = goal("Dual Zoren Prime", "Dual Zoren Prime Handle", true, false);
+        card.parts[0].state = crate::plan::PartState::Have;
+        card.parts_have = 1;
+        let plan = Plan {
+            goals: vec![card],
+            ..Default::default()
+        };
+        let html = render_plan(&plan, &ctx);
+        let p2 = page(&html, "p2");
+        assert!(p2.contains("class=\"r have\""), "Hunt row carries the have class");
+        assert!(p2.contains("✓ Handle"), "Hunt row shows the check + part name");
+        let p3 = page(&html, "p3");
+        assert!(p3.contains("<i class=\"seg have\"></i>"), "Backlog Have pip fills");
+        assert!(p3.contains("<i>1/4</i>"), "have count beside the pips");
+    }
+
     /// Twelfth pass §1: backlog component-progress pips sit beside the
     /// 0/4-style count.
     #[test]
@@ -1874,6 +1988,13 @@ mod tests {
         let html = render_plan(&plan, &ctx);
         let p1 = page(&html, "p1");
         assert!(p1.contains("class=\"row ch tick next\""), "first crack is NEXT + tickable");
+        // Addendum #87: the NEXT accent is a ::before bar pinned to the
+        // row's own box (left/top/bottom 0), not an inset box-shadow.
+        assert!(
+            html.contains(".ch.next::before{content:\"\";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--cy)}"),
+            "NEXT accent bar is pinned to the row box"
+        );
+        assert!(!html.contains("inset 3px 0"), "the old inset-shadow accent is gone");
         assert!(p1.contains("<em class=nx>NEXT</em>"));
         assert!(p1.contains("<b class=\"cy\">Neo C8</b>"));
         assert!(p1.contains("Radiant"));

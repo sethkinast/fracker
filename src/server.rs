@@ -397,8 +397,8 @@ fn query_param(query: &str, key: &str) -> Option<String> {
 
 /// Re-read the report file for every request (so a regenerated page is
 /// always current), splice the live ticks onto the `<body>` tag, and mark
-/// the remembered tab `checked` when it belongs to THIS generation
-/// (thirteenth pass §2; item 52 scopes it to one generation).
+/// the remembered tab `checked` (thirteenth pass §2; addendum #86 keeps
+/// the choice across generations — see [`crate::tabs`]).
 fn plan_page(
     report_path: &std::path::Path,
     tabs_path: &std::path::Path,
@@ -413,10 +413,9 @@ fn plan_page(
     let generation = body_generation(&html).unwrap_or_default();
     let store = ticks.lock().map(|s| s.clone()).unwrap_or_default();
     let json = serde_json::to_string(&store).unwrap_or_else(|_| "{}".to_owned());
-    // The remembered slug only applies while the report is the same
-    // generation. A new regeneration clears the scope, so the page starts
-    // on First Crack again; the 60s meta-refreshes of one report keep the
-    // choice. The scoped-out store is written back best-effort.
+    // The remembered slug applies across generations (addendum #86):
+    // scoping only records the generation being served and persists it
+    // best-effort. A slug naming no current tab falls back to t1 below.
     let active = tabs
         .lock()
         .ok()
@@ -1053,10 +1052,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Item 52: the choice survives the 60s refreshes of one report but a
-    /// NEW regeneration resets it to First Crack.
+    /// Addendum #86 (superseding item 52): the choice survives the 60s
+    /// refreshes of one report AND a new regeneration — generations
+    /// churn on every worldstate tick, so resetting on them made the
+    /// tab reset on ordinary refreshes.
     #[test]
-    fn a_new_generation_resets_the_remembered_tab() {
+    fn a_new_generation_keeps_the_remembered_tab() {
         let dir = std::env::temp_dir().join(format!(
             "fracker-tab-gen-{}",
             std::process::id()
@@ -1091,13 +1092,14 @@ mod tests {
             assert!(refreshed.contains("id=\"t3\" checked"), "{refreshed}");
         }
 
-        // A new report lands (a regeneration): First Crack again.
+        // A new report lands (a regeneration): the tab is KEPT
+        // (addendum #86) — a refresh must land back on the viewed tab.
         std::fs::write(&report, page("gen-2")).unwrap();
-        let reset = http_get(server.port(), "/");
-        assert!(reset.contains("id=\"t1\" checked"), "{reset}");
-        assert!(!reset.contains("id=\"t3\" checked"), "{reset}");
+        let kept = http_get(server.port(), "/");
+        assert!(kept.contains("id=\"t3\" checked"), "{kept}");
+        assert!(!kept.contains("id=\"t1\" checked"), "{kept}");
 
-        // The choice now belongs to gen-2 and survives its own refreshes.
+        // A fresh choice under gen-2 likewise survives its refreshes.
         assert!(http_get(server.port(), "/?tab=hunt").contains("id=\"t2\" checked"));
         assert!(http_get(server.port(), "/").contains("id=\"t2\" checked"));
         let disk = TabStore::load(&tabs_path);
