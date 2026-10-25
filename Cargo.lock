@@ -423,7 +423,7 @@ dependencies = [
 
 [[package]]
 name = "fracker"
-version = "0.5.18"
+version = "0.5.19"
 dependencies = [
  "chrono",
  "clap",
