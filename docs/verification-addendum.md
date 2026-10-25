@@ -1104,3 +1104,81 @@ it refines the brief where they disagree. For the next worker pass.
     logs header samples and the debug-frame list on EVERY
     capture, not only zero-collection ones — the partial case
     is exactly where that evidence matters.
+84. **Captured part stock never reaches Hunt/Backlog
+    (Seth, 2026-10-25).** Now that capture produces a real
+    parts inventory, the plan ignores it: "Dual Zoren Prime
+    Handle" is in stock.json's parts bucket, yet Dual Zoren
+    shows no filled pips in Backlog, and Hunt gives no
+    indication a part is already collected. Mechanism
+    (Blum, code-verified): report.rs loads StockState and
+    converts it with `to_relic_stock()` — only the relics
+    bucket survives; PlanInput carries no part stock at
+    all. Downstream, part_rows_for_gear derives PartState
+    solely from the want list (in wants -> Need, else
+    Unknown); PartState::Have exists and
+    GoalCard.parts_have counts it for the Backlog pips,
+    but the goal-card builder never constructs Have — the
+    pips are unreachable, not merely unrendered. Fix
+    shape: carry part stock (name -> count) through
+    PlanInput; a part whose captured count meets its
+    required count is Have (required > 1 exists —
+    dual-wield components), a wanted part short of that
+    stays Need; render Have distinctly in Hunt part rows
+    (Need/Unknown are the only states a row can show
+    today, which is why "collected" has no denotation
+    there). QUEUED for the next build at Seth's
+    direction; not in the current capture/OCR build.
+85. **Baro pill while he is HERE (Seth, 2026-10-25).**
+    With Baro active the header pill reads "BARO
+    EarthHUB · in 0d". Two defects: (a) the countdown is
+    donow_baro's days_until on his DEPARTURE, at day
+    granularity — an active visit runs < 2 days, so its
+    last day renders the useless "in 0d"; while a trader
+    window is live the pill should state the leaving
+    time at hour granularity ("Leaves in 18h" — the
+    mins_left_label shape already exists). (b) No visual
+    distinction: the pill should PULSE while Baro is
+    active. The location shows the raw worldstate node
+    id (EarthHUB is a pinned decode gap — the app never
+    invents a name); noted, not prescribed. QUEUED for
+    the next build.
+86. **Tab still resets on refresh (Seth, 2026-10-25) —
+    #46/#52 not holding live.** Design intent: the
+    remembered tab survives a plan's own 60s refreshes
+    (#46) and resets only on a NEW generation (#52,
+    Seth's rule). Live, refreshes still land on First
+    Crack. The build must first pin which side fails:
+    (i) the generation token changes more often than "a
+    new report" — worldstate-tick regenerations and the
+    WebSocket push reloads (item 58) are each a new
+    generation by construction and indistinguishable
+    from a refresh to the reader; or (ii) scope_to
+    clears on serves it should not. If (i), the #52
+    rule itself needs revisiting: an unrequested regen
+    is not the "new report" moment #52 aimed at (that
+    was the session-start open). QUEUED for the next
+    build.
+87. **Crack queue NEXT accent still misaligned (Seth,
+    2026-10-25, with screenshot).** The accent bar for
+    the NEXT row renders offset from the row it marks
+    (screenshot: Citrine Prime heading a queue at
+    Adrastea (Jupiter) Steel Path; the bar sits up/left
+    of the row's box). The accent is `.ch.next` in the
+    render.rs style block (background gradient +
+    `box-shadow: inset 3px 0 var(--cy)`) — the same
+    accent #72(a) already fixed once for a different
+    cause (a padding-left asymmetry, since removed).
+    Root cause to be pinned against the live DOM in the
+    build; the mock's alignment is the reference.
+    QUEUED for the next build.
+88. **Varzia supersedes the vault badge in Hunt (Seth,
+    2026-10-25).** A vaulted goal that is live at Varzia
+    shows BOTH the "V" badge and the "◆ In Varzia"
+    footer. Rule: when a goal is resurgence_live, the
+    Varzia marker replaces the V — never both.
+    Mechanism (Blum, code-verified): the goal-card
+    renderer emits the V badge on `g.vaulted`
+    unconditionally, independently of the Varzia footer
+    below it; the Backlog section split already treats
+    Varzia-live as its own class — the badge never got
+    the same condition. QUEUED for the next build.
