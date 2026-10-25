@@ -1345,3 +1345,80 @@ it refines the brief where they disagree. For the next worker pass.
     census showing the refusal class growing, or a
     remedy shape that provably cannot flip the
     destroyed-gear-word counter-class).
+    REOPENED AND RESOLVED the same day: an external
+    review proposed exactly that remedy shape —
+    bounded-distance (radius) decoding on the gear
+    word — Seth commissioned the gated build, and
+    it shipped as pass 29 (v0.5.24) after the re-gate.
+    See #92.
+92. **Radius decoder for refused parts reads
+    (pass 29, v0.5.24, 2026-10-25; resolves #91).**
+    A bounded-distance decoder runs ONLY on parts
+    reads the margin matcher refused, and can only
+    add holds. The refused read's best candidate
+    nominates a suffix class (trusted only when the
+    candidate scored >= 0.50, the parts min_score);
+    the read's tail must verify against the class
+    suffix with EVERY suffix token witnessed by a
+    distinct read token within distance 2 under the
+    metric closure of the confusable relation
+    (total alignment budget 4, pre-registered); the
+    fragment before the split is decoded against the
+    class heads, each with radius
+    floor((D_A - 1)/2). A line-1 strip second read
+    (PSM 7) serves cells whose band fragment does not
+    decode, batched through the engine's region-class
+    batch path. The metric closure is required, not
+    decorative: the pairwise confusable relation is
+    non-transitive (1~i, 1~l, i!~l), its distance
+    violates the triangle inequality, and radius
+    balls under it overlap (witness "1aros", one
+    pairwise edit from both Inaros and Lavos; under
+    the closure their distance is 2, both radii 0,
+    and the fragment refuses). The margin matcher
+    keeps the pairwise relation bit-identically.
+    GATE, attempt 1: the stress test passed
+    (403,142 decodes over 26 real classes; 227,907
+    in-radius corruptions 100% decoded to the truth),
+    but the census A/B FAILED — 149 union correct
+    with 2 false accepts, both on the frame-11
+    mid-scroll composite via the band path
+    ("Nezh rime" -> Nezha Prime Chassis, best 0.47;
+    "Nova Prime" -> Nova Prime Chassis, best 0.56;
+    truths were the Systems Blueprints). Mechanism:
+    the alignment charged a flat 3 for a wholly
+    deleted suffix token, so a tail witnessing only
+    "prime" "verified" a class whose distinguishing
+    token was never seen. Not shipped.
+    FIX (structural, budget unchanged at 4 — tuning
+    it to 2 also scored 142/0, but on the data that
+    judged it, and was rejected as post-hoc): the
+    witnessed-token rule above, plus the
+    best-candidate score floor. Both gate-failing
+    reads are pinned as regression tests (asserted
+    at budget 8 as well, so the refusal is structural
+    and not a threshold), as are a missing-final-token
+    refusal with a perfect fragment and a truncated
+    final token ("...bluepri") that still decodes.
+    RE-GATE (fresh, identical protocol): full suite
+    277 tests green, stress test green with identical
+    coverage; all-495 A/B — decoder off reproduces
+    the pass-27 baseline exactly (union 127, 0 false;
+    Neuroptics 24/61 instances, 13/28 distinct) and
+    decoder on gives union 146, 0 FALSE ACCEPTS,
+    Neuroptics 40/61 instances, 20/28 distinct;
+    frame 11 holds 0 (both former false accepts
+    refuse). Per-frame and subset detail in
+    docs/twenty-ninth-pass.md. Cost: release-profile
+    replay mean 3,687 -> 4,805 ms/frame (+1.1 s) with
+    the strip reads batched (attempt 1's unbatched
+    per-cell spawns measured +7.2 s/frame in a debug
+    build). Honest limits, unchanged: heads at
+    distance 3 have radius 1, so 2-edit corruptions
+    still refuse — Chroma ("Bhioma", Khora at D=3)
+    stays refused BY DESIGN, pinned in tests; the
+    witnessed rule also refuses some reads attempt 1
+    decoded whose tails had dropped a whole suffix
+    token (union 146 vs attempt 1's 147 correct +
+    2 false). The decoder recovers the <=1-edit
+    population; that is the price of the proof.
