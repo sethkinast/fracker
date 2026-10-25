@@ -2414,6 +2414,17 @@ pub struct StockState {
     /// arcane state, so this screen is the steady-state source.
     #[serde(default)]
     pub arcanes: BTreeMap<String, ArcaneStacks>,
+    /// Seth-asserted part holdings the capture has NOT verified
+    /// (thirtieth pass, addendum #93): toggled from the Hunt tab,
+    /// keyed by ROSTER part name, count stored as 1. The planner
+    /// treats membership as a hold (progress-identical to a verified
+    /// hold) but every surface renders it ⍻ (U+237B), never ✓.
+    /// Capture finalize preserves this section verbatim except that
+    /// entries the fresh capture verifies are pruned (see
+    /// `CaptureSession::finalize_into`). Files written before this
+    /// section existed load it as empty.
+    #[serde(default)]
+    pub unverified: BTreeMap<String, u32>,
 }
 
 impl StockState {
@@ -2560,6 +2571,32 @@ impl StockState {
 
     pub fn held_parts(&self) -> HashMap<String, u32> {
         self.parts.iter().map(|(k, v)| (k.clone(), *v)).collect()
+    }
+
+    /// Unverified (Seth-asserted, ⍻) part holdings in planner shape:
+    /// roster part name -> count (stored as 1). Keys are already
+    /// canonical roster part names (the toggle endpoint validates
+    /// against the roster), so no canonicalisation applies here —
+    /// unlike `parts`, whose raw screen names need it (#84/#89).
+    pub fn unverified_part_counts(&self) -> HashMap<String, u32> {
+        self.unverified
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect()
+    }
+
+    /// Toggle one part's unverified membership (thirtieth pass):
+    /// absent -> asserted held (count 1), present -> removed.
+    /// Returns the membership state AFTER the toggle. Name
+    /// validation against the roster is the caller's job (the
+    /// toggle endpoint); this is the pure state transition.
+    pub fn toggle_unverified(&mut self, name: &str) -> bool {
+        if self.unverified.remove(name).is_some() {
+            false
+        } else {
+            self.unverified.insert(name.to_owned(), 1);
+            true
+        }
     }
 
     /// Held arcane counts (stopgap or captured) for the bootstrap.
@@ -2906,6 +2943,57 @@ mod tests {
             "blueprint 1 + built 2 sum onto the roster part"
         );
         assert_eq!(counts.len(), 1, "own-blueprint built form and junk drop out");
+    }
+
+    #[test]
+    fn unverified_section_round_trips_and_old_files_load_empty() {
+        // Thirtieth pass (#93): the unverified (⍻) section survives
+        // a stock.json round-trip under its own top-level key...
+        let mut stock = StockState::default();
+        stock.parts.insert("Protea Prime Systems".to_owned(), 1);
+        stock
+            .unverified
+            .insert("Protea Prime Systems Blueprint".to_owned(), 1);
+        let json = stock.to_json().unwrap();
+        assert!(
+            json.contains("\"unverified\""),
+            "the section serialises as its own top-level key: {json}"
+        );
+        let back = StockState::from_json(&json).unwrap();
+        assert_eq!(back.unverified, stock.unverified, "round-trip preserves the section");
+        assert_eq!(back.parts, stock.parts);
+        assert_eq!(
+            back.unverified_part_counts()
+                .get("Protea Prime Systems Blueprint"),
+            Some(&1)
+        );
+        // ...and a pre-pass-30 stock file (no section at all) loads
+        // with the section empty — every existing stock.json stays
+        // valid.
+        let old = StockState::from_json(
+            r#"{"relics": {}, "parts": {"Protea Prime Systems": 1}, "arcanes": {}}"#,
+        )
+        .unwrap();
+        assert!(old.unverified.is_empty(), "missing section defaults empty");
+        assert_eq!(old.parts.get("Protea Prime Systems"), Some(&1));
+    }
+
+    #[test]
+    fn toggle_unverified_flips_membership() {
+        // Thirtieth pass (#93): the pure state transition behind the
+        // Hunt-tab click — on at count 1, off removes entirely.
+        let mut stock = StockState::default();
+        assert!(stock.toggle_unverified("Protea Prime Systems Blueprint"));
+        assert_eq!(
+            stock.unverified.get("Protea Prime Systems Blueprint"),
+            Some(&1),
+            "toggle-on asserts the hold at count 1"
+        );
+        assert!(!stock.toggle_unverified("Protea Prime Systems Blueprint"));
+        assert!(
+            !stock.unverified.contains_key("Protea Prime Systems Blueprint"),
+            "toggle-off removes the entry, not a zero count"
+        );
     }
 
     #[test]

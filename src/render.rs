@@ -185,6 +185,7 @@ fn refinement_abbrev(r: &str) -> String {
 fn part_state_class(state: &crate::plan::PartState) -> &'static str {
     match state {
         crate::plan::PartState::Have => "have",
+        crate::plan::PartState::HaveUnverified => "uvhave",
         crate::plan::PartState::Need => "need",
         crate::plan::PartState::Unknown => "unk",
     }
@@ -293,7 +294,22 @@ fn seg_html(g: &crate::plan::GoalCard) -> String {
         ));
     }
     h.push_str("</span>");
-    h.push_str(&format!("<i>{}/{}</i>", g.parts_have, g.parts_total));
+    // Thirtieth pass (#93): a card holding any part only via the
+    // unverified assertion says so beside the count, on Hunt and
+    // Backlog alike — unverified progress never reads as verified.
+    let uv_mark = if g
+        .parts
+        .iter()
+        .any(|p| p.state == crate::plan::PartState::HaveUnverified)
+    {
+        " ⍻"
+    } else {
+        ""
+    };
+    h.push_str(&format!(
+        "<i>{}/{}{}</i>",
+        g.parts_have, g.parts_total, uv_mark
+    ));
     h
 }
 
@@ -803,17 +819,52 @@ fn hunt_card_html(
         // Addendum #84: a part already in hand (captured stock) is
         // denoted on the row itself — gold name with a check mark,
         // matching the Backlog pips' Have treatment.
+        // Thirtieth pass (#93): an unverified-held part (Seth's
+        // Hunt-tab assertion, capture has not verified it) is
+        // denoted the same way but with ⍻ (U+237B) and a dimmed
+        // gold name — never the ✓ of verified stock.
         let have = p.state == crate::plan::PartState::Have;
-        let have_class = if have { " have" } else { "" };
+        let uvhave = p.state == crate::plan::PartState::HaveUnverified;
+        let have_class = if have {
+            " have"
+        } else if uvhave {
+            " uvhave"
+        } else {
+            ""
+        };
         let part_label = if have {
             format!("✓ {part}")
+        } else if uvhave {
+            format!("⍻ {part}")
         } else {
             part.clone()
         };
+        // Mutation affordance (Hunt ONLY — this renderer is the
+        // Hunt card; Backlog renders pips through seg_html and
+        // never emits these attributes): every row that is not
+        // verified-Have toggles the part's unverified membership on
+        // click. The full roster part name rides in data-uv for the
+        // POST /unverified endpoint; verified rows get no handler.
+        let uv_class = if have { "" } else { " uv" };
+        let uv_attrs = if have {
+            String::new()
+        } else {
+            format!(
+                " data-uv=\"{}\" title=\"{}\" role=\"button\"",
+                esc(&p.name),
+                if uvhave {
+                    "Unverified stock (⍻) — click to withdraw the assertion"
+                } else {
+                    "Click to assert unverified stock (⍻): I hold this — capture has not verified it"
+                },
+            )
+        };
         h.push_str(&format!(
-            "<div class=\"r{dead_class}{have_class}\">\n<span class=\"pn\">{part}</span>\n<span class=\"rc {rarity}{vault_class}\">{relic}</span>\n<span class=\"pc {rarity}\">{refine}</span>\n</div>\n",
+            "<div class=\"r{dead_class}{have_class}{uv_class}\"{uv_attrs}>\n<span class=\"pn\">{part}</span>\n<span class=\"rc {rarity}{vault_class}\">{relic}</span>\n<span class=\"pc {rarity}\">{refine}</span>\n</div>\n",
             dead_class = dead_class,
             have_class = have_class,
+            uv_class = uv_class,
+            uv_attrs = uv_attrs,
             part = esc(&part_label),
             rarity = rarity,
             vault_class = vault_class,
@@ -1206,7 +1257,7 @@ h3{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--mut)
 .gh{display:flex;align-items:center;gap:9px;margin-bottom:8px}.gh>b{font-size:18px;white-space:nowrap}
 .bd{font-style:normal;font-size:10px;letter-spacing:.1em;padding:0 5px;border:1px solid var(--mut);color:var(--mut)}.bd.z{color:var(--gold);border-color:var(--gold)}
 .gc{margin-left:auto;display:flex;align-items:center;gap:8px;color:var(--mut);font-size:12px}.gc i,.bc i{font-style:normal}
-.segs{display:inline-flex;gap:2px}.seg{width:13px;height:5px;background:#252e3d}.seg.have{background:var(--gold)}.seg.unk{height:3px;background:none;border:1px dashed var(--mut)}
+.segs{display:inline-flex;gap:2px}.seg{width:13px;height:5px;background:#252e3d}.seg.have{background:var(--gold)}.seg.uvhave{background:var(--gold);opacity:.45}.seg.unk{height:3px;background:none;border:1px dashed var(--mut)}
 .r{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:center;padding:4px 0;border-top:1px solid #1c2330;font-size:13px}
 .pn{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pn em{font-style:normal;color:var(--gold)}
 .rc{border:1px solid;padding:0 7px;font-size:12px;white-space:nowrap}.rc.v{opacity:.7}.pc{font-size:12px;text-align:right;font-variant-numeric:tabular-nums}
@@ -1234,6 +1285,9 @@ input[type=checkbox]:checked::after{content:"";width:9px;height:5px;border:2px s
 .row.dead .rl,.row.dead>div{opacity:.55;text-decoration:line-through}
 .g .r.dead{opacity:.75}
 .g .r.have .pn{color:var(--gold)}
+.g .r.uvhave .pn{color:var(--gold);opacity:.75}
+.g .r.uv{cursor:pointer}
+.g .r.uv:hover .pn{text-decoration:underline dotted}
 label.row{cursor:pointer}
 .row.ch.tick{grid-template-columns:auto 40px 1fr auto auto}
 .row.ch.tick input[type=checkbox]{align-self:center}
@@ -1334,6 +1388,24 @@ const JS: &str = r#"
     x.addEventListener('click', function () { filt(x.dataset.f); });
   });
   try { filt(sessionStorage.getItem('fracker:f') || 'all'); } catch (e) {}
+  // Unverified stock (thirtieth pass): Hunt part rows that are not
+  // verified-Have carry data-uv with the full roster part name.
+  // Clicking POSTs the toggle to the loopback server, which
+  // persists stock.json and regenerates the plan — the new ⍻ state
+  // lands through the usual WebSocket push / meta-refresh, like
+  // every other regeneration. Only Hunt renders these rows, so
+  // only Hunt can mutate the unverified set.
+  document.querySelectorAll('.r.uv[data-uv]').forEach(function (row) {
+    row.addEventListener('click', function () {
+      try {
+        fetch('/unverified', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: row.getAttribute('data-uv') })
+        });
+      } catch (e) {}
+    });
+  });
 })();
 "#;
 
@@ -1661,6 +1733,75 @@ mod tests {
         let p3 = page(&html, "p3");
         assert!(p3.contains("<i class=\"seg have\"></i>"), "Backlog Have pip fills");
         assert!(p3.contains("<i>1/4</i>"), "have count beside the pips");
+    }
+
+    #[test]
+    fn unverified_part_denoted_with_not_check_and_toggles_only_on_hunt() {
+        // Thirtieth pass (#93): an unverified-held part renders ⍻
+        // (U+237B, never ✓) on its Hunt row and as a dimmed pip +
+        // ⍻ count on Backlog; the click-to-toggle attributes exist
+        // ONLY on Hunt rows that are not verified-Have.
+        let t = crate::tuning::Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let ctx = empty_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
+        let mut card = goal("Dual Zoren Prime", "Dual Zoren Prime Handle", true, false);
+        card.parts[0].state = crate::plan::PartState::HaveUnverified;
+        card.parts_have = 1;
+        let row = |name: &str, state: PartState| PartRow {
+            name: name.to_owned(),
+            state,
+            relics: vec![],
+            best_odds: String::new(),
+            rarity: Rarity::Rare,
+            deal: None,
+        };
+        card.parts.push(row("Dual Zoren Prime Blade", PartState::Have));
+        card.parts.push(row("Dual Zoren Prime Grip", PartState::Need));
+        let plan = Plan {
+            goals: vec![card],
+            ..Default::default()
+        };
+        let html = render_plan(&plan, &ctx);
+        let p2 = page(&html, "p2");
+        assert!(p2.contains("⍻ Handle"), "Hunt row shows ⍻ + part name");
+        assert!(!p2.contains("✓ Handle"), "unverified never earns the ✓");
+        assert!(
+            p2.contains("data-uv=\"Dual Zoren Prime Handle\""),
+            "unverified row carries the toggle (click withdraws it)"
+        );
+        assert!(p2.contains("✓ Blade"), "verified row keeps its ✓");
+        assert!(
+            !p2.contains("data-uv=\"Dual Zoren Prime Blade\""),
+            "verified-Have rows are NOT clickable"
+        );
+        assert!(
+            p2.contains("data-uv=\"Dual Zoren Prime Grip\""),
+            "a Need row carries the toggle (click asserts the hold)"
+        );
+        assert!(
+            html.contains("fetch('/unverified'"),
+            "the page script posts toggles to the endpoint"
+        );
+        let p3 = page(&html, "p3");
+        assert!(
+            p3.contains("<i class=\"seg uvhave\"></i>"),
+            "Backlog unverified pip lights, dimmed from a verified pip"
+        );
+        assert!(p3.contains("1/4 ⍻"), "Backlog count carries the ⍻ mark");
+        // (Attribute form `data-uv="..."`: the page script itself
+        // names the bare attribute in its selector, so only the
+        // valued form pins an actual row handler.)
+        assert!(!p3.contains("data-uv=\""), "Backlog emits NO toggle handlers");
+        for id in ["p1", "p4"] {
+            assert!(
+                !page(&html, id).contains("data-uv=\""),
+                "no toggle handlers off the Hunt page ({id})"
+            );
+        }
     }
 
     /// Twelfth pass §1: backlog component-progress pips sit beside the
@@ -2087,7 +2228,10 @@ mod tests {
             },
             &ctx,
         );
-        assert!(html.contains("<div class=\"r dead\">"));
+        // The class list continues past `dead` since the thirtieth
+        // pass: a non-verified Hunt row also carries the unverified
+        // toggle class/attributes (#93). The pin here is the strike.
+        assert!(html.contains("<div class=\"r dead"));
         assert!(html.contains("Axi Vanguard M1"));
         assert!(!html.contains("25.33%"), "chance text stays out of the row");
     }

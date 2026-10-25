@@ -37,6 +37,12 @@ pub struct PlanInput<'a> {
     /// blueprint forms summed — addendum #84/#89). Drives
     /// PartState::Have in part rows and the Backlog pips.
     pub part_stock: &'a HashMap<String, u32>,
+    /// Seth-asserted part holdings capture has not verified
+    /// (thirtieth pass, addendum #93), keyed by roster part name
+    /// (already canonical — the toggle validates against the
+    /// roster). Drives PartState::HaveUnverified where the part is
+    /// not also verified-held; verified stock takes precedence.
+    pub unverified_parts: &'a HashMap<String, u32>,
     pub pins: &'a [String],
     /// Normalized gear names of the last two prime releases (radshare gate).
     pub recent_gear: &'a HashSet<String>,
@@ -56,8 +62,25 @@ pub struct PlanInput<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PartState {
     Have,
+    /// Asserted held by Seth from the Hunt tab but NOT verified by
+    /// capture (thirtieth pass, addendum #93). Progress-identical
+    /// to `Have` — the part is not a farming target and lights its
+    /// pip — but every surface renders it ⍻ (U+237B), never ✓, so
+    /// unverified progress is never indistinguishable from
+    /// verified progress.
+    HaveUnverified,
     Need,
     Unknown,
+}
+
+impl PartState {
+    /// Held in hand, by either evidence class (verified capture or
+    /// Seth's unverified assertion). Progress counts, pip lighting
+    /// and farming-target exclusion use this; rendering picks its
+    /// marker from the variant itself.
+    pub fn is_held(&self) -> bool {
+        matches!(self, PartState::Have | PartState::HaveUnverified)
+    }
 }
 
 /// Where a relic's copies can come from, in the order the planner
@@ -815,6 +838,7 @@ fn part_rows_for_gear(
     relics: &RelicTables,
     stock: &RelicStock,
     part_stock: &HashMap<String, u32>,
+    unverified_parts: &HashMap<String, u32>,
     varzia: &VarziaAvailability,
     want_set: &HashSet<String>,
     tuning: &Tuning,
@@ -844,8 +868,13 @@ fn part_rows_for_gear(
             // canonical count >= 1 (blueprint or built form, #89)
             // means the part is in hand; the roster carries no
             // required-quantity data, so the threshold is 1.
+            // Thirtieth pass (#93): below verified stock, Seth's
+            // unverified assertion (Hunt-tab toggle) also holds the
+            // part — precedence verified > unverified > want/unknown.
             let state = if part_stock.get(&part).copied().unwrap_or(0) >= 1 {
                 PartState::Have
+            } else if unverified_parts.get(&part).copied().unwrap_or(0) >= 1 {
+                PartState::HaveUnverified
             } else if want_set.contains(&part) {
                 PartState::Need
             } else {
@@ -951,15 +980,16 @@ fn goal_cards(
                 input.relics,
                 input.stock,
                 input.part_stock,
+                input.unverified_parts,
                 varzia,
                 &want_set,
                 input.tuning,
             );
             let parts_total = parts.len();
-            let parts_have = parts
-                .iter()
-                .filter(|p| p.state == PartState::Have)
-                .count();
+            // Held = verified Have + unverified-held (thirtieth
+            // pass): progress counts both; the card stays
+            // distinguishable through the rows'/pips' ⍻ rendering.
+            let parts_have = parts.iter().filter(|p| p.state.is_held()).count();
             let partially_unobtainable = parts.iter().any(|p| {
                 p.state == PartState::Need
                     && p.relics
@@ -1902,6 +1932,14 @@ mod tests {
         EMPTY.get_or_init(HashMap::new)
     }
 
+    /// Shared empty unverified-parts map for PlanInput literals that
+    /// do not exercise addendum #93.
+    fn no_unverified() -> &'static HashMap<String, u32> {
+        static EMPTY: std::sync::OnceLock<HashMap<String, u32>> =
+            std::sync::OnceLock::new();
+        EMPTY.get_or_init(HashMap::new)
+    }
+
     fn syn_fissure(node: &str, mtype: &str, tier: &str, expiry: &str) -> Fissure {
         Fissure {
             id: node.to_owned(),
@@ -2108,6 +2146,7 @@ mod tests {
             relics: &tables,
             stock: &stock,
             part_stock: no_part_stock(),
+            unverified_parts: no_unverified(),
             pins: &[],
             recent_gear: &recent,
             steel_path_tiebreak: true,
@@ -2204,6 +2243,7 @@ mod tests {
             relics: &tables,
             stock: &stock,
             part_stock: no_part_stock(),
+            unverified_parts: no_unverified(),
             pins: &[],
             recent_gear: &recent,
             steel_path_tiebreak: true,
@@ -2249,6 +2289,7 @@ mod tests {
             relics: &tables,
             stock: &stock,
             part_stock: no_part_stock(),
+            unverified_parts: no_unverified(),
             pins: &[],
             recent_gear: &recent,
             steel_path_tiebreak: true,
@@ -2267,6 +2308,7 @@ mod tests {
             relics: &tables,
             stock: &stock,
             part_stock: no_part_stock(),
+            unverified_parts: no_unverified(),
             pins: &pins,
             recent_gear: &recent,
             steel_path_tiebreak: true,
@@ -2447,6 +2489,7 @@ mod tests {
                 relics: &relics,
                 stock: &stock,
                 part_stock: no_part_stock(),
+                unverified_parts: no_unverified(),
                 pins: &[],
                 recent_gear: &recent,
                 steel_path_tiebreak: true,
@@ -2522,6 +2565,7 @@ mod tests {
                 relics: &tables,
                 stock: &stock,
                 part_stock: no_part_stock(),
+                unverified_parts: no_unverified(),
                 pins: &pins,
                 recent_gear: &recent,
                 steel_path_tiebreak: true,
@@ -2609,6 +2653,7 @@ mod tests {
             relics: &tables,
             stock: &stock,
             part_stock: no_part_stock(),
+            unverified_parts: no_unverified(),
             pins: &pins,
             recent_gear: &recent,
             steel_path_tiebreak: true,
@@ -2634,6 +2679,7 @@ mod tests {
             relics: &tables,
             stock: &stock,
             part_stock: no_part_stock(),
+            unverified_parts: no_unverified(),
             pins: &pins,
             recent_gear: &recent,
             steel_path_tiebreak: true,
@@ -2687,6 +2733,7 @@ mod tests {
             relics: &tables,
             stock: &stock,
             part_stock: &part_stock,
+            unverified_parts: no_unverified(),
             pins: &pins,
             recent_gear: &recent,
             steel_path_tiebreak: true,
@@ -2708,6 +2755,96 @@ mod tests {
         assert_eq!(state_of("Dual Zoren Prime Handle"), Some(&PartState::Have));
         assert_eq!(state_of("Dual Zoren Prime Blade"), Some(&PartState::Need));
         assert_eq!(card.parts_have, 1, "the held Handle lights one pip");
+    }
+
+    #[test]
+    fn unverified_stock_marks_rows_have_unverified_below_verified() {
+        // Thirtieth pass (#93): Seth's unverified assertion holds a
+        // part (PartState::HaveUnverified — progress counts it, it
+        // is not a farming target), and verified capture stock
+        // outranks the assertion where both exist.
+        let tables = mini_tables();
+        let roster = Roster::from_json(
+            r#"[{"name": "Dual Zoren Prime", "vaulted": true, "type": "melee",
+                 "parts": [{"name": "Dual Zoren Prime Blueprint"},
+                           {"name": "Dual Zoren Prime Blade"},
+                           {"name": "Dual Zoren Prime Handle"}]}]"#,
+        )
+        .unwrap();
+        let now: DateTime<Utc> = "2026-10-16T02:55:00Z".parse().unwrap();
+        let world = WorldState::default();
+        let owned = OwnedEquipment::empty();
+        let stock = RelicStock::Unknown;
+        let wants = vec!["Dual Zoren Prime Blade".to_owned()];
+        let pins: Vec<String> = Vec::new();
+        let recent: HashSet<String> = HashSet::new();
+        let t = tuning();
+        let unverified: HashMap<String, u32> = [
+            ("Dual Zoren Prime Handle".to_owned(), 1),
+            ("Dual Zoren Prime Blade".to_owned(), 1),
+        ]
+        .into_iter()
+        .collect();
+        let build = |part_stock: &HashMap<String, u32>| {
+            plan(&PlanInput {
+                now,
+                world: &world,
+                owned: &owned,
+                wants: &wants,
+                roster: &roster,
+                relics: &tables,
+                stock: &stock,
+                part_stock,
+                unverified_parts: &unverified,
+                pins: &pins,
+                recent_gear: &recent,
+                steel_path_tiebreak: true,
+                completed_missions: &[],
+                item_names: test_item_names(),
+                tuning: &t,
+            })
+        };
+        let state_of = |p: &crate::plan::Plan, name: &str| {
+            p.goals
+                .iter()
+                .find(|g| g.gear == "Dual Zoren Prime")
+                .and_then(|c| c.parts.iter().find(|r| r.name == name))
+                .map(|r| r.state.clone())
+        };
+
+        // Assertion only: Handle is unverified-held; the Blade is
+        // asserted too, so it leaves Need (not a farming target)
+        // even though it is wanted.
+        let p = build(no_part_stock());
+        assert_eq!(
+            state_of(&p, "Dual Zoren Prime Handle"),
+            Some(PartState::HaveUnverified)
+        );
+        assert_eq!(
+            state_of(&p, "Dual Zoren Prime Blade"),
+            Some(PartState::HaveUnverified),
+            "an asserted want is held, not a target"
+        );
+        let card = p
+            .goals
+            .iter()
+            .find(|g| g.gear == "Dual Zoren Prime")
+            .expect("goal card");
+        assert_eq!(card.parts_have, 2, "unverified holds count toward progress");
+
+        // Verified capture of the Handle outranks its assertion.
+        let verified: HashMap<String, u32> =
+            [("Dual Zoren Prime Handle".to_owned(), 1)].into_iter().collect();
+        let p = build(&verified);
+        assert_eq!(
+            state_of(&p, "Dual Zoren Prime Handle"),
+            Some(PartState::Have),
+            "verified > unverified precedence"
+        );
+        assert_eq!(
+            state_of(&p, "Dual Zoren Prime Blade"),
+            Some(PartState::HaveUnverified)
+        );
     }
 
     /// Ninth pass §4: a log-proven completion strikes exactly the alert
@@ -2755,6 +2892,7 @@ mod tests {
             relics: &tables,
             stock: &stock,
             part_stock: no_part_stock(),
+            unverified_parts: no_unverified(),
             pins: &pins,
             recent_gear: &recent,
             steel_path_tiebreak: true,
@@ -2778,6 +2916,7 @@ mod tests {
             relics: &tables,
             stock: &stock,
             part_stock: no_part_stock(),
+            unverified_parts: no_unverified(),
             pins: &pins,
             recent_gear: &recent,
             steel_path_tiebreak: true,

@@ -298,16 +298,22 @@ pub async fn generate(
     // Addendum #84: the parsed capture state feeds BOTH planner
     // shapes — relic stock as before, plus the canonical part-stock
     // map (built + blueprint forms summed per roster part, #89) that
-    // lights the Hunt/Backlog part states.
-    let (stock, part_stock) = match std::fs::read_to_string(&cfg.stock_path) {
+    // lights the Hunt/Backlog part states. Addendum #93 adds the
+    // third shape: Seth's unverified (⍻) assertions, already keyed
+    // by roster part name, driving PartState::HaveUnverified.
+    let (stock, part_stock, unverified_parts) = match std::fs::read_to_string(&cfg.stock_path) {
         Ok(text) => match crate::ocr::StockState::from_json(&text) {
-            Ok(s) => (s.to_relic_stock(), s.canonical_part_counts(&roster)),
+            Ok(s) => (
+                s.to_relic_stock(),
+                s.canonical_part_counts(&roster),
+                s.unverified_part_counts(),
+            ),
             Err(e) => {
                 endpoint_failures.push(format!("stock {}: {e}", cfg.stock_path.display()));
-                (RelicStock::Unknown, HashMap::new())
+                (RelicStock::Unknown, HashMap::new(), HashMap::new())
             }
         },
-        Err(_) => (RelicStock::Unknown, HashMap::new()),
+        Err(_) => (RelicStock::Unknown, HashMap::new(), HashMap::new()),
     };
 
     let (cfg_file, _) = config::Config::load(&cfg.config_path)
@@ -324,6 +330,7 @@ pub async fn generate(
         relics: &relics,
         stock: &stock,
         part_stock: &part_stock,
+        unverified_parts: &unverified_parts,
         pins: &cfg_file.pins,
         recent_gear: &HashSet::new(),
         steel_path_tiebreak: cfg_file.steel_path_tiebreak,

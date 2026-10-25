@@ -192,12 +192,28 @@ pub async fn run(
     // server-side so the 60s meta-refresh (and a restart) lands back where
     // Seth was, not on First Crack.
     let tab_path = tabs::TabStore::file(&opts.state_dir);
+    // Thirtieth pass (#93): the Hunt tab's unverified-stock toggle.
+    // The loopback server mutates stock.json through this context
+    // (validating against the roster seed); the regen hook is a
+    // Manual trigger — a regeneration like the tray verb's, which
+    // never auto-opens the page.
+    let unverified_toggle = {
+        let tx = trigger_tx.clone();
+        Arc::new(server::UnverifiedToggle::new(
+            opts.report.stock_path.clone(),
+            opts.report.data_dir.join("cache/wishlist.json"),
+            Arc::new(move || {
+                let _ = tx.send(Trigger::Manual);
+            }),
+        ))
+    };
     let plan_server = match server::serve(
         opts.serve_port,
         opts.report.out.clone(),
         tick_path.clone(),
         tab_path,
         tick_store.clone(),
+        Some(unverified_toggle),
     ) {
         Ok(s) => {
             println!("resident: serving the plan at {}", s.url());

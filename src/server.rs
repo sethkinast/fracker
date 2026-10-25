@@ -17,6 +17,10 @@
 //!   the 60s meta-refresh no longer resets to First Crack);
 //! - `POST /tick` records one checkbox change server-side, keyed by item
 //!   id + in-game day;
+//! - `POST /unverified` toggles one part's unverified (⍻) stock
+//!   membership in `stock.json` (thirtieth pass) — validated against
+//!   the roster parts universe, persisted through the stock writer,
+//!   and followed by a regeneration request so the plan re-renders;
 //! - `GET /tab/<slug>` records the active plan tab (the tab links carry
 //!   `?tab=<slug>`, which `GET /` also honours);
 //! - `GET /ws` upgrades to a WebSocket and pushes the plan generation the
@@ -157,18 +161,107 @@ impl Drop for PlanServer {
     }
 }
 
+/// The unverified-stock toggle wiring (thirtieth pass, addendum
+/// #93): everything `POST /unverified` needs to mutate `stock.json`
+/// from a Hunt-row click. The resident supplies it; a server
+/// without it (tests, headless tools) answers the route 404.
+pub struct UnverifiedToggle {
+    /// The stock file to mutate — the same `stock.json` capture
+    /// finalize rewrites and the report reads.
+    pub stock_path: PathBuf,
+    /// The roster seed (`<data_dir>/cache/wishlist.json`); its part
+    /// names are the only legal toggle targets.
+    pub wishlist_path: PathBuf,
+    /// Invoked after a toggle has been persisted, so the resident
+    /// regenerates the plan and the generation push carries the new
+    /// ⍻ state to open pages (the resident passes a
+    /// `Trigger::Manual` send; a toggle never auto-opens the page).
+    pub regen: Arc<dyn Fn() + Send + Sync>,
+    /// Serialises read-modify-write cycles across connection
+    /// threads (the TickStore's shared-Mutex pattern, for a file
+    /// that is otherwise rewritten whole).
+    gate: Mutex<()>,
+}
+
+impl UnverifiedToggle {
+    pub fn new(
+        stock_path: PathBuf,
+        wishlist_path: PathBuf,
+        regen: Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
+        Self {
+            stock_path,
+            wishlist_path,
+            regen,
+            gate: Mutex::new(()),
+        }
+    }
+
+    /// Toggle one part's unverified membership and persist it.
+    /// Returns the membership state after the toggle. The name is
+    /// validated against the roster parts universe first: an
+    /// unknown name changes nothing (and never regenerates). An
+    /// unreadable roster or an unparseable stock file is
+    /// `Unavailable` — like capture finalize, a stock file we
+    /// cannot read is never clobbered.
+    pub fn toggle(&self, name: &str) -> Result<bool, ToggleError> {
+        let _gate = self.gate.lock().unwrap_or_else(|p| p.into_inner());
+        let wish_text = std::fs::read_to_string(&self.wishlist_path)
+            .map_err(|_| ToggleError::Unavailable)?;
+        let roster = crate::model::Roster::from_json(&wish_text)
+            .map_err(|_| ToggleError::Unavailable)?;
+        if !roster_part_names(&roster).contains(name) {
+            return Err(ToggleError::UnknownPart);
+        }
+        let mut stock = match std::fs::read_to_string(&self.stock_path) {
+            Ok(text) => crate::ocr::StockState::from_json(&text)
+                .map_err(|_| ToggleError::Unavailable)?,
+            Err(_) => crate::ocr::StockState::default(),
+        };
+        let on = stock.toggle_unverified(name);
+        stock
+            .write_to(&self.stock_path)
+            .map_err(|_| ToggleError::Unavailable)?;
+        (self.regen)();
+        Ok(on)
+    }
+}
+
+/// Why a toggle did not happen (thirtieth pass).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToggleError {
+    /// The submitted name is not a roster part name.
+    UnknownPart,
+    /// The roster or stock file could not be read/parsed/written.
+    Unavailable,
+}
+
+/// Every roster part name — the toggle endpoint's validation
+/// universe, the same keys the planner's canonical part-stock map
+/// uses (addendum #84).
+fn roster_part_names(roster: &crate::model::Roster) -> std::collections::HashSet<&str> {
+    roster
+        .items
+        .iter()
+        .flat_map(|item| item.parts.iter().map(|p| p.name.as_str()))
+        .collect()
+}
+
 /// Bind `127.0.0.1` and start serving `report_path`. `preferred_port` is
 /// the configured port; when it is already taken (or 0) an ephemeral
 /// port is used so the resident always comes up — the live URL is
 /// returned for the tray's Open action to read. `ticks_path` is where a
 /// checkbox change is persisted (the store of record); `tabs_path` is
 /// where the active plan tab is persisted (thirteenth pass §2).
+/// `toggle` wires `POST /unverified` (thirtieth pass); `None` leaves
+/// the route answering 404.
 pub fn serve(
     preferred_port: u16,
     report_path: PathBuf,
     ticks_path: PathBuf,
     tabs_path: PathBuf,
     ticks: Arc<Mutex<TickStore>>,
+    toggle: Option<Arc<UnverifiedToggle>>,
 ) -> Result<PlanServer, String> {
     let listener = bind(preferred_port)?;
     let port = listener
@@ -193,6 +286,7 @@ pub fn serve(
             tabs,
             hub_thread,
             stop_thread,
+            toggle,
         )
     });
     Ok(PlanServer {
@@ -224,6 +318,7 @@ fn accept_loop(
     tabs: Arc<Mutex<TabStore>>,
     hub: Arc<GenerationHub>,
     stop: Arc<AtomicBool>,
+    toggle: Option<Arc<UnverifiedToggle>>,
 ) {
     let _ = listener.set_nonblocking(true);
     while !stop.load(Ordering::Relaxed) {
@@ -236,6 +331,7 @@ fn accept_loop(
                 let tab_store = tabs.clone();
                 let push = hub.clone();
                 let stopped = stop.clone();
+                let toggle_thread = toggle.clone();
                 std::thread::spawn(move || {
                     let _ = handle(
                         stream,
@@ -246,6 +342,7 @@ fn accept_loop(
                         &tab_store,
                         &push,
                         &stopped,
+                        toggle_thread.as_ref(),
                     );
                 });
             }
@@ -268,6 +365,7 @@ fn handle(
     tabs: &Arc<Mutex<TabStore>>,
     hub: &Arc<GenerationHub>,
     stop: &Arc<AtomicBool>,
+    toggle: Option<&Arc<UnverifiedToggle>>,
 ) -> std::io::Result<()> {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
@@ -344,6 +442,10 @@ fn handle(
             "application/json",
             &tick_ok(),
         ),
+        ("POST", "/unverified") => {
+            let (status, resp_body) = apply_unverified(toggle, &body);
+            respond(&mut stream, status, "application/json", resp_body.as_bytes())
+        }
         ("GET", "/ws") => match ws_key.as_deref() {
             Some(key) => ws_upgrade(&mut stream, key, report_path, hub, stop),
             None => respond(
@@ -525,6 +627,56 @@ fn apply_tick(
 
 fn tick_ok() -> Vec<u8> {
     b"{\"ok\":true}".to_vec()
+}
+
+/// Apply one unverified-stock toggle (thirtieth pass). Accepts JSON
+/// (`{"name": "..."}`) or form encoding, mirroring `/tick`. The
+/// endpoint is view-agnostic by necessity — only the Hunt tab
+/// renders rows that call it; the control here is validation:
+/// unknown part names are a 404 with no state change, and a
+/// successful toggle persists stock.json and fires the regen hook
+/// so the ⍻ lands through the standard generation push.
+fn apply_unverified(
+    toggle: Option<&Arc<UnverifiedToggle>>,
+    body: &str,
+) -> (&'static str, String) {
+    let Some(toggle) = toggle else {
+        return ("404 Not Found", "{\"ok\":false}".to_owned());
+    };
+    let Some(name) = parse_unverified_name(body) else {
+        return ("400 Bad Request", "{\"ok\":false}".to_owned());
+    };
+    match toggle.toggle(&name) {
+        Ok(on) => (
+            "200 OK",
+            format!("{{\"ok\":true,\"unverified\":{on}}}"),
+        ),
+        Err(ToggleError::UnknownPart) => (
+            "404 Not Found",
+            "{\"ok\":false,\"error\":\"unknown part\"}".to_owned(),
+        ),
+        Err(ToggleError::Unavailable) => (
+            "500 Internal Server Error",
+            "{\"ok\":false}".to_owned(),
+        ),
+    }
+}
+
+/// Parse `{"name": "..."}` (JSON) or `name=...` (form).
+fn parse_unverified_name(body: &str) -> Option<String> {
+    let trimmed = body.trim();
+    if trimmed.starts_with('{') {
+        let v: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+        return v.get("name")?.as_str().map(str::to_owned);
+    }
+    for pair in trimmed.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            if k == "name" {
+                return Some(url_decode(v));
+            }
+        }
+    }
+    None
 }
 
 /// Parse `{"id","day","done"}` (JSON) or `id=..&day=..&done=1|0` (form).
@@ -876,6 +1028,110 @@ mod tests {
     }
 
     #[test]
+    fn parse_unverified_name_accepts_json_and_form() {
+        assert_eq!(
+            parse_unverified_name(r#"{"name":"Protea Prime Systems Blueprint"}"#),
+            Some("Protea Prime Systems Blueprint".to_owned())
+        );
+        assert_eq!(
+            parse_unverified_name("name=Protea%20Prime%20Systems%20Blueprint"),
+            Some("Protea Prime Systems Blueprint".to_owned())
+        );
+        assert_eq!(parse_unverified_name("{}"), None);
+        assert_eq!(parse_unverified_name("id=chunk-1"), None);
+    }
+
+    #[test]
+    fn unverified_endpoint_toggles_stock_and_rejects_unknown_parts() {
+        // Thirtieth pass (#93): POST /unverified toggles membership
+        // in stock.json's unverified section — validated against the
+        // roster seed, persisted through the stock writer, and each
+        // successful toggle fires the regen hook exactly once.
+        let dir = std::env::temp_dir().join(format!(
+            "fracker-unverified-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let report = dir.join("plan.html");
+        std::fs::write(&report, "<!DOCTYPE html><html><body></body></html>").unwrap();
+        let wishlist = dir.join("wishlist.json");
+        std::fs::write(
+            &wishlist,
+            r#"[{"name": "Protea Prime", "type": "Warframe",
+                 "parts": [{"name": "Protea Prime Blueprint"},
+                           {"name": "Protea Prime Systems Blueprint"}]}]"#,
+        )
+        .unwrap();
+        let stock_path = dir.join("stock.json");
+        let regens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let regens_hook = regens.clone();
+        let toggle = Arc::new(UnverifiedToggle::new(
+            stock_path.clone(),
+            wishlist.clone(),
+            Arc::new(move || {
+                regens_hook.fetch_add(1, Ordering::Relaxed);
+            }),
+        ));
+        let server = serve(
+            0,
+            report.clone(),
+            TickStore::file(&dir),
+            TabStore::file(&dir),
+            Arc::new(Mutex::new(TickStore::default())),
+            Some(toggle),
+        )
+        .expect("server binds");
+        let post = |body: &str| -> String {
+            let mut s = TcpStream::connect(("127.0.0.1", server.port())).unwrap();
+            write!(
+                s,
+                "POST /unverified HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+            let mut out = String::new();
+            s.read_to_string(&mut out).unwrap();
+            out
+        };
+        let on_disk = |path: &std::path::Path| {
+            crate::ocr::StockState::from_json(&std::fs::read_to_string(path).unwrap())
+                .unwrap()
+        };
+
+        // Toggle ON: 200, the membership lands in stock.json's
+        // unverified section at count 1, regen fired once.
+        let resp = post(r#"{"name":"Protea Prime Systems Blueprint"}"#);
+        assert!(resp.contains("200 OK"), "{resp}");
+        assert!(resp.contains("\"unverified\":true"), "{resp}");
+        assert_eq!(
+            on_disk(&stock_path)
+                .unverified
+                .get("Protea Prime Systems Blueprint"),
+            Some(&1)
+        );
+        assert_eq!(regens.load(Ordering::Relaxed), 1);
+
+        // Toggle OFF: membership removed (not zeroed), regen again.
+        let resp = post(r#"{"name":"Protea Prime Systems Blueprint"}"#);
+        assert!(resp.contains("\"unverified\":false"), "{resp}");
+        assert!(on_disk(&stock_path).unverified.is_empty());
+        assert_eq!(regens.load(Ordering::Relaxed), 2);
+
+        // Unknown part name: 404, no state change, no regen.
+        let resp = post(r#"{"name":"Excalibur Prime Systems Blueprint"}"#);
+        assert!(resp.contains("404"), "{resp}");
+        assert!(on_disk(&stock_path).unverified.is_empty());
+        assert_eq!(regens.load(Ordering::Relaxed), 2, "rejections never regenerate");
+
+        // Unparseable body: a visible 400, like /tick.
+        let resp = post("not a toggle");
+        assert!(resp.contains("400"), "{resp}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn serve_round_trips_get_plan_and_post_tick() {
         let dir = std::env::temp_dir().join(format!("fracker-server-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -894,6 +1150,7 @@ mod tests {
             ticks_path.clone(),
             TabStore::file(&dir),
             ticks.clone(),
+            None,
         )
         .expect("server binds");
         let get = |path: &str| -> String {
@@ -947,6 +1204,7 @@ mod tests {
             TickStore::file(&dir),
             TabStore::file(&dir),
             Arc::new(Mutex::new(TickStore::default())),
+            None,
         )
         .expect("falls back");
         assert_ne!(
@@ -1015,6 +1273,7 @@ mod tests {
             TickStore::file(&dir),
             tabs_path.clone(),
             Arc::new(Mutex::new(TickStore::default())),
+            None,
         )
         .expect("server binds");
 
@@ -1046,6 +1305,7 @@ mod tests {
             TickStore::file(&dir),
             tabs_path,
             Arc::new(Mutex::new(TickStore::default())),
+            None,
         )
         .expect("restart binds");
         assert!(http_get(server2.port(), "/").contains("id=\"t3\" checked"));
@@ -1082,6 +1342,7 @@ mod tests {
             TickStore::file(&dir),
             tabs_path.clone(),
             Arc::new(Mutex::new(TickStore::default())),
+            None,
         )
         .expect("server binds");
 
@@ -1226,6 +1487,7 @@ mod tests {
             TickStore::file(&dir),
             TabStore::file(&dir),
             Arc::new(Mutex::new(TickStore::default())),
+            None,
         )
         .expect("server binds");
 
@@ -1303,6 +1565,7 @@ mod tests {
             TickStore::file(&dir),
             TabStore::file(&dir),
             Arc::new(Mutex::new(TickStore::default())),
+            None,
         )
         .expect("server binds");
 
@@ -1341,6 +1604,7 @@ mod tests {
             TickStore::file(&dir),
             TabStore::file(&dir),
             Arc::new(Mutex::new(TickStore::default())),
+            None,
         )
         .expect("server binds");
         let response = http_get(server.port(), "/ws");

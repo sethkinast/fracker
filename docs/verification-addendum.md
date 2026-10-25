@@ -1422,6 +1422,49 @@ it refines the brief where they disagree. For the next worker pass.
     token (union 146 vs attempt 1's 147 correct +
     2 false). The decoder recovers the <=1-edit
     population; that is the price of the proof.
+93. **Unverified stock: Hunt-tab assertions for
+    parts capture cannot verify (pass 30, v0.5.25,
+    2026-10-25; Seth's spec).** Even at 146/495
+    census cells the capture refuses what it cannot
+    prove, and Seth holds parts the camera never
+    verified. Rather than weaken the never-guess
+    rule, the assertion becomes Seth's own, kept
+    structurally distinct: stock.json gains a
+    top-level "unverified" map (roster part name ->
+    1), written only by toggling a Hunt part row.
+    A part not verified-held shows ⍻ (U+237B) state
+    (PartState::HaveUnverified): progress-identical
+    to Have (counts in parts_have, lights Backlog
+    pips dimmed, never a farming target), but no
+    surface renders it ✓ — Hunt rows read "⍻ name",
+    pips take a distinct uvhave class, and the
+    have/total count carries a ⍻ mark whenever any
+    part of the card is unverified-held. Precedence
+    verified > unverified > Need/Unknown, pinned by
+    tests. Capture finalize preserves the section
+    verbatim and prunes entries the fresh capture
+    verifies — by exact name or built-component
+    form, the two forms #89 sums — because the
+    assertion is spent once capture confirms the
+    part; a capture that never saw parts prunes
+    nothing. Mutation is Hunt-only BY RENDERING:
+    only hunt_card_html emits the data-uv click
+    attributes (verified-Have rows never do), the
+    page script POSTs to /unverified on the
+    loopback server, which validates the name
+    against the roster parts universe (unknown =
+    404, no change), persists through the atomic
+    stock writer under a mutex, and fires the
+    resident's Manual regeneration trigger so the
+    ⍻ lands via the standard generation push. The
+    endpoint itself is view-agnostic — the UI
+    gating is the specified control; the server's
+    defence is the roster validation. Old stock
+    files (no section) load it empty. 285 tests
+    (277 baseline + 8 new), all pinned behaviours
+    covered: round-trip + legacy load, finalize
+    preserve/prune, precedence, Hunt-only handlers,
+    endpoint toggle on/off/unknown.
 94. **Required quantities > 1 per part (Seth,
     2026-10-25; QUEUED — not in pass 30).** Some
     items require multiple units of a single part:

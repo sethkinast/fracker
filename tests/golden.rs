@@ -94,6 +94,8 @@ fn golden_plan_recompute() -> Golden {
     let stock: &'static RelicStock = Box::leak(Box::new(RelicStock::Unknown));
     let part_stock: &'static std::collections::HashMap<String, u32> =
         Box::leak(Box::new(std::collections::HashMap::new()));
+    let unverified_parts: &'static std::collections::HashMap<String, u32> =
+        Box::leak(Box::new(std::collections::HashMap::new()));
     let pins: &'static Vec<String> = Box::leak(Box::new(Vec::new()));
     let recent: &'static HashSet<String> = Box::leak(Box::new(HashSet::new()));
     let item_names: &'static std::collections::HashMap<String, String> =
@@ -109,6 +111,7 @@ fn golden_plan_recompute() -> Golden {
         relics,
         stock,
         part_stock,
+        unverified_parts,
         pins,
         recent_gear: recent,
         steel_path_tiebreak: true,

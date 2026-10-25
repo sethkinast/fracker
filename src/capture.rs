@@ -688,6 +688,12 @@ impl CaptureSession {
     /// Finalise into an existing stock file: REPLACE only the buckets that
     /// saw classified frames. A bucket with zero classified frames is left
     /// untouched, never zeroed (partial captures are safe).
+    ///
+    /// The unverified (⍻) section is not a capture bucket: it is
+    /// preserved verbatim across finalise, except that when the
+    /// parts bucket is replaced, entries the fresh capture VERIFIES
+    /// are pruned — the assertion is spent once capture confirms the
+    /// part (thirtieth pass, addendum #93).
     pub fn finalize_into(&self, existing: &mut StockState) {
         if self.saw_relics {
             existing.relics = self.captured.relics.clone();
@@ -697,7 +703,33 @@ impl CaptureSession {
         }
         if self.saw_parts {
             existing.parts = self.captured.parts.clone();
+            existing
+                .unverified
+                .retain(|part, _| !part_verified_in_bucket(part, &self.captured.parts));
         }
+    }
+}
+
+/// Is a roster part name verified by a captured parts bucket
+/// (thirtieth pass prune rule)? The bucket holds raw screen names,
+/// so a part is verified when the bucket carries the part's own
+/// name OR its built-component form (the name minus a trailing
+/// " Blueprint") at count >= 1 — the same two forms
+/// `StockState::canonical_part_counts` sums onto the roster part
+/// (#89). The gear's own "<Gear> Blueprint" strips to "<Gear>",
+/// which is never a captured part name, so it cannot false-prune;
+/// a parts bucket that never saw the part leaves the assertion
+/// standing.
+fn part_verified_in_bucket(
+    part: &str,
+    bucket: &std::collections::BTreeMap<String, u32>,
+) -> bool {
+    if bucket.get(part).copied().unwrap_or(0) >= 1 {
+        return true;
+    }
+    match part.strip_suffix(" Blueprint") {
+        Some(built) => bucket.get(built).copied().unwrap_or(0) >= 1,
+        None => false,
     }
 }
 
@@ -1532,6 +1564,76 @@ mod tests {
         assert!(!existing.relics.contains_key("Axi A1"));
         assert_eq!(existing.parts.get("Forma Blueprint"), Some(&9), "parts untouched");
         assert!(existing.arcanes.contains_key("Arcane Guardian"), "arcanes untouched");
+    }
+
+    #[test]
+    fn finalize_preserves_unverified_and_prunes_verified() {
+        // Thirtieth pass (#93): a parts capture replaces the parts
+        // bucket; the unverified (⍻) section survives EXCEPT the
+        // entries the fresh capture verifies — by exact name or by
+        // built-component form — whose assertions are spent.
+        let mut session = CaptureSession::new();
+        session.saw_parts = true;
+        session
+            .captured
+            .parts
+            .insert("Protea Prime Systems".to_owned(), 1); // built form
+        session
+            .captured
+            .parts
+            .insert("Khora Prime Chassis Blueprint".to_owned(), 2); // exact name
+
+        let mut existing = StockState::default();
+        existing.parts.insert("Stale Part".to_owned(), 7);
+        existing
+            .unverified
+            .insert("Protea Prime Systems Blueprint".to_owned(), 1);
+        existing
+            .unverified
+            .insert("Khora Prime Chassis Blueprint".to_owned(), 1);
+        existing
+            .unverified
+            .insert("Wisp Prime Neuroptics Blueprint".to_owned(), 1);
+
+        session.finalize_into(&mut existing);
+        assert_eq!(
+            existing.parts.get("Protea Prime Systems"),
+            Some(&1),
+            "parts bucket replaced"
+        );
+        assert!(!existing.parts.contains_key("Stale Part"));
+        assert_eq!(
+            existing.unverified.len(),
+            1,
+            "both verified assertions pruned (exact + built form)"
+        );
+        assert!(
+            existing.unverified.contains_key("Wisp Prime Neuroptics Blueprint"),
+            "the part the capture never saw keeps its assertion"
+        );
+    }
+
+    #[test]
+    fn finalize_without_parts_keeps_unverified_verbatim() {
+        // A relic-only capture verifies nothing about parts, so no
+        // unverified assertion is pruned (thirtieth pass).
+        let mut session = CaptureSession::new();
+        session.saw_relics = true;
+        session
+            .captured
+            .relics
+            .entry("Lith G6".to_owned())
+            .or_default()
+            .merge(RefinementTier::Intact, 3);
+        let mut existing = StockState::default();
+        existing
+            .unverified
+            .insert("Protea Prime Systems Blueprint".to_owned(), 1);
+        session.finalize_into(&mut existing);
+        assert_eq!(
+            existing.unverified.get("Protea Prime Systems Blueprint"),
+            Some(&1)
+        );
     }
 
     #[test]
