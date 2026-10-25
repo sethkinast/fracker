@@ -1990,6 +1990,25 @@ pub fn validate_read(
 //    own fragment. Radii derive from the universe at runtime —
 //    there is no tuned threshold to drift.
 //
+//    The acceptance test also carries a MINIMUM-EVIDENCE FLOOR
+//    (pass 32, addendum #95): a fragment decodes to head H only
+//    when |F| >= max(3, |H| - t_H) — see
+//    [`RADIUS_MIN_FRAGMENT_CHARS`]. The radius geometry bounds
+//    how FAR a fragment may sit from its head; it says nothing
+//    about how little of the head was observed at all. The HC
+//    evaluation showed why that matters: the strip phase read
+//    2-char artefacts off class-icon edges — identical fragments
+//    across cells whose gear words were destroyed — and a 2-char
+//    fragment is one deletion from the 3-char head "lex",
+//    formally in-radius. The floor is inert on band fragments
+//    (long by construction) and binds exactly where the evidence
+//    is thinnest: short fragments against short heads. It costs
+//    the genuine sub-3-char fragment (a "ma" that really was
+//    Mag's) its decode — two observed characters cannot
+//    identify a head among dozens of siblings, so the refusal
+//    is the honest outcome, paid deliberately like the radius
+//    ceiling itself.
+//
 //    All decoder distances use the METRIC CLOSURE of the confusable
 //    relation ([`levenshtein_confusable_metric`]), not the pairwise
 //    distance the margin matcher uses: the pairwise relation is
@@ -2047,6 +2066,20 @@ pub const RADIUS_TAIL_BUDGET: usize = 4;
 /// ("Nezh rime", 0.47) never nominates at all under the floor.
 pub const RADIUS_MIN_CANDIDATE_SCORE: f32 = 0.50;
 
+/// Minimum-evidence floor for a decode (pass 32, addendum #95):
+/// a fragment decodes to head H only when
+/// `|F| >= max(RADIUS_MIN_FRAGMENT_CHARS, |H| - t_H)`. The
+/// absolute term is the binding constraint for short heads —
+/// distance alone cannot express it, because a 2-char artefact
+/// sits one deletion from the 3-char head "lex", formally
+/// in-radius, yet two observed characters cannot identify a
+/// head among dozens of siblings. The length-relative term is
+/// already implied by `decode`'s length-difference check (a
+/// fragment shorter than `|H| - t_H` is more than t_H deletions
+/// away); it is stated in the rule so the floor reads as one
+/// acceptance test, not two accidents.
+const RADIUS_MIN_FRAGMENT_CHARS: usize = 3;
+
 /// One suffix class of the universe, with the decoding radius of
 /// every member's head precomputed. Built by
 /// [`Universe::radius_class`].
@@ -2082,6 +2115,12 @@ impl RadiusClass {
     /// fragment, or `None`. The geometry guarantees at most one
     /// in-radius head; if an implementation defect ever produced
     /// two, this refuses rather than picking one (never guess).
+    ///
+    /// A candidate is considered only when the fragment also
+    /// clears the minimum-evidence floor (pass 32, addendum
+    /// #95): `|F| >= max(RADIUS_MIN_FRAGMENT_CHARS, |H| - t_H)`.
+    /// This is the one place both fragment sources (band and
+    /// strip) are judged, so the floor applies uniformly.
     pub fn decode(&self, fragment: &str) -> Option<String> {
         if fragment.is_empty() {
             return None;
@@ -2094,6 +2133,18 @@ impl RadiusClass {
             .zip(self.head_chars.iter())
             .zip(self.radii.iter())
         {
+            // Minimum evidence (pass 32, addendum #95): the
+            // fragment must carry at least
+            // RADIUS_MIN_FRAGMENT_CHARS characters and account
+            // for the head to within its radius in length. The
+            // HC evaluation's strip phase returned 2-char
+            // icon-edge artefacts ("le", "ie") that sit one
+            // deletion from the 3-char head "lex" and minted
+            // false accepts; a fragment that short is not
+            // evidence, whatever its distance.
+            if frag.len() < RADIUS_MIN_FRAGMENT_CHARS.max(chars.len().saturating_sub(*t)) {
+                continue;
+            }
             // Length alone settles most candidates: a fragment
             // whose length differs from the head's by more than
             // the radius cannot be within it.
@@ -3927,6 +3978,77 @@ mod tests {
     }
 
     #[test]
+    fn radius_decoder_evidence_floor_boundary() {
+        let u = parts_universe();
+        // Lex is the shortest head of the Prime Receiver class
+        // (t = 1 per the HC probes): its floor is max(3, 3 - 1)
+        // = 3, so the clean head decodes while its 2-char
+        // deletions — distance 1, formally in-radius — refuse.
+        let receiver = u.radius_class("Lex Prime Receiver").expect("class exists");
+        assert_eq!(
+            receiver.decode("lex").as_deref(),
+            Some("Lex Prime Receiver")
+        );
+        assert_eq!(receiver.decode("le"), None);
+        assert_eq!(receiver.decode("lx"), None);
+        assert_eq!(receiver.decode("ie"), None);
+        // The same boundary on the tuned class: "mag" decodes,
+        // "xmag" (the census's genuine junk-affixed fragment)
+        // still decodes, "ma" refuses.
+        let neuro = u
+            .radius_class("Mag Prime Neuroptics Blueprint")
+            .unwrap();
+        assert_eq!(
+            neuro.decode("mag").as_deref(),
+            Some("Mag Prime Neuroptics Blueprint")
+        );
+        assert_eq!(
+            neuro.decode("xmag").as_deref(),
+            Some("Mag Prime Neuroptics Blueprint")
+        );
+        assert_eq!(neuro.decode("ma"), None);
+    }
+
+    #[test]
+    fn radius_decoder_hc_artefact_fragments_now_refuse() {
+        let u = parts_universe();
+        // Addendum #95 (HC_REPORT.md §3): the shipped decoder's
+        // first false accepts — five strip-phase cells in the
+        // Prime Receiver class. The band reads' gear words are
+        // destroyed (margin matcher refuses; the band decode
+        // refuses), and the strip phase returned a 2-char
+        // icon-edge artefact — identical across Knell, Hystrix
+        // and Velox cells — that sat inside Lex's radius. Every
+        // one of these shapes must now end REFUSED through the
+        // public strip path.
+        for (band, strip) in [
+            ("Uo Prime Receiver", "Le"), // Knell, parts-05 #27
+            ("a Prime Receiver", "Le"),  // Knell, parts-06 #27
+            ("a Prime Receiver", "le"),  // Knell, parts-09 #27
+            ("x Prime Receiver", "le"),  // Velox, parts-27 #24
+            // Hystrix, parts-08 #16 — the worst case: the margin
+            // best was the truth at 0.955, refused at margin
+            // 0.098, and the strip converted that correct
+            // refusal into a wrong hold.
+            ("— H st ystrix Prime Receiver", "ie"),
+        ] {
+            assert_eq!(
+                u.radius_decode_strip(band, strip, RADIUS_TAIL_BUDGET),
+                None,
+                "band {band:?} + strip {strip:?} must refuse (addendum #95)"
+            );
+        }
+        // The genuine article through the same path and class: a
+        // clean strip fragment of the short head still decodes —
+        // the floor prices evidence, it does not ban short heads.
+        assert_eq!(
+            u.radius_decode_strip("x Prime Receiver", "Lex Prime", RADIUS_TAIL_BUDGET)
+                .as_deref(),
+            Some("Lex Prime Receiver")
+        );
+    }
+
+    #[test]
     fn radius_tail_alignment_requires_witnessed_suffix_tokens() {
         let u = parts_universe();
         let class = u
@@ -4141,15 +4263,20 @@ mod tests {
     /// The gate's stress test (pass 29): for every multi-member
     /// suffix class of the real parts universe, corrupt fixture
     /// heads and assert the decoder's contract — a corruption
-    /// within the truth's radius ALWAYS decodes to the truth
-    /// (never a sibling, never a refusal: the balls are disjoint
-    /// by construction, so an in-radius fragment has exactly one
-    /// legal decode, and this test proves the implementation
-    /// realises the geometry). Out-of-radius corruptions carry no
-    /// promise (a corruption that lands inside a sibling's ball is
-    /// information-theoretically indistinguishable from that
-    /// sibling read cleanly); their sibling-accept count is
-    /// printed for the record.
+    /// within the truth's radius decodes to the truth (never a
+    /// sibling: the balls are disjoint by construction, so an
+    /// in-radius fragment has exactly one legal decode, and this
+    /// test proves the implementation realises the geometry).
+    /// Pass 32 adds the one designed exception: an in-radius
+    /// variant shorter than the minimum-evidence floor
+    /// (`max(3, |H| - t)`) must REFUSE — the floor is part of
+    /// the shipped decoder, so the contract asserted here
+    /// includes it. Such cases are counted and printed, never
+    /// silently dropped from the battery. Out-of-radius
+    /// corruptions carry no promise (a corruption that lands
+    /// inside a sibling's ball is information-theoretically
+    /// indistinguishable from that sibling read cleanly); their
+    /// sibling-accept count is printed for the record.
     #[test]
     fn radius_decoder_stress_never_decodes_a_sibling_in_radius() {
         let u = parts_universe();
@@ -4175,7 +4302,8 @@ mod tests {
             "prime chassis blueprint",
         ];
         let mut state = 0xC0FF_EE15_600D_F00Du64;
-        let (mut decodes, mut in_radius, mut sibling_accepts) = (0u64, 0u64, 0u64);
+        let (mut decodes, mut in_radius, mut sibling_accepts, mut floor_refusals) =
+            (0u64, 0u64, 0u64, 0u64);
         for class in &classes {
             let suffix = class.suffix().join(" ");
             let members: Vec<(&str, &str, usize)> = class.members().collect();
@@ -4226,11 +4354,30 @@ mod tests {
                     let got = decode(class, &mut memo, v);
                     if levenshtein_confusable_metric(v, head) <= *t {
                         in_radius += 1;
-                        assert_eq!(
-                            got.as_deref(),
-                            Some(*name),
-                            "in-radius corruption {v:?} of head {head:?} (t={t}) must decode to the truth"
-                        );
+                        // Minimum-evidence floor (pass 32): an
+                        // in-radius variant below
+                        // max(3, |H| - t) refuses BY DESIGN.
+                        // (Within radius the length-relative term
+                        // can never bind — distance <= t bounds
+                        // the length difference — so this fires
+                        // exactly on sub-3-char fragments of short
+                        // heads.) Counted and printed below.
+                        if v.chars().count()
+                            < RADIUS_MIN_FRAGMENT_CHARS
+                                .max(head.chars().count().saturating_sub(*t))
+                        {
+                            floor_refusals += 1;
+                            assert_eq!(
+                                got, None,
+                                "below-floor in-radius corruption {v:?} of head {head:?} (t={t}) must refuse (pass 32 evidence floor)"
+                            );
+                        } else {
+                            assert_eq!(
+                                got.as_deref(),
+                                Some(*name),
+                                "in-radius corruption {v:?} of head {head:?} (t={t}) must decode to the truth"
+                            );
+                        }
                     } else if let Some(g) = &got {
                         if g != name {
                             sibling_accepts += 1;
@@ -4253,11 +4400,23 @@ mod tests {
                     let got = decode(class, &mut memo, &v);
                     if levenshtein_confusable_metric(&v, head) <= t {
                         in_radius += 1;
-                        assert_eq!(
-                            got.as_deref(),
-                            Some(name),
-                            "in-radius random corruption {v:?} of {head:?} must decode to the truth"
-                        );
+                        // Pass 32 evidence floor, as in the
+                        // per-member battery above.
+                        if v.chars().count()
+                            < RADIUS_MIN_FRAGMENT_CHARS.max(head.chars().count().saturating_sub(t))
+                        {
+                            floor_refusals += 1;
+                            assert_eq!(
+                                got, None,
+                                "below-floor in-radius random corruption {v:?} of {head:?} (t={t}) must refuse (pass 32 evidence floor)"
+                            );
+                        } else {
+                            assert_eq!(
+                                got.as_deref(),
+                                Some(name),
+                                "in-radius random corruption {v:?} of {head:?} must decode to the truth"
+                            );
+                        }
                     } else if let Some(g) = &got {
                         if g != name {
                             sibling_accepts += 1;
@@ -4267,10 +4426,12 @@ mod tests {
             }
         }
         eprintln!(
-            "radius stress: {} classes, {} decodes, {} in-radius (all decoded to truth), {} out-of-radius sibling accepts",
+            "radius stress: {} classes, {} decodes, {} in-radius ({} decoded to truth, {} below-floor refusals by design), {} out-of-radius sibling accepts",
             classes.len(),
             decodes,
             in_radius,
+            in_radius - floor_refusals,
+            floor_refusals,
             sibling_accepts
         );
         assert!(in_radius > 10_000, "the battery exercised the radii");
