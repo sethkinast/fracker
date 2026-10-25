@@ -1443,7 +1443,12 @@ it refines the brief where they disagree. For the next worker pass.
     required -> N slots, filled per canonical count
     capped at N); Have only at count >= required,
     with a distinct partial denotation in Hunt rows
-    (e.g. the count shown as 1/2). Open design point
+    (e.g. the count shown as 1/2). Representation
+    (Seth, 2026-10-25): a multi-unit part keeps its
+    SINGLE pip slot, divided into per-unit segments
+    — two half-pips for a x2 part — filled per unit
+    held, rather than additional full-sized pips;
+    the one-slot-per-part layout width is preserved. Open design point
     for that build, NOT decided here: what an
     unverified click (pass 30, #93) asserts on a
     multi-unit part — the full requirement or one
