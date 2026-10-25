@@ -25,6 +25,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 // ---------------------------------------------------------------------------
 // Refinement tier (eighth pass §1)
@@ -605,6 +606,30 @@ fn crop_region(cell: &GrayImage, region: [f32; 4]) -> GrayImage {
     cell.crop(x0, y0, (x1 - x0).max(1), (y1 - y0).max(1))
 }
 
+/// Cache key for one cropped region: dimensions + a caller salt,
+/// hashed over pixels quantised to 4 bits (`p >> 4` tolerates the
+/// sub-quantisation noise a re-render can introduce; a genuinely
+/// different glyph changes high nibbles somewhere). Used by the
+/// batched tesseract engine (addendum #81) and the capture header
+/// cache — a scroll step re-shows most crops pixel-identical.
+pub fn crop_key(sub: &GrayImage, salt: u32) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (sub.width, sub.height, salt).hash(&mut h);
+    sub.pixels
+        .iter()
+        .map(|p| p >> 4)
+        .collect::<Vec<u8>>()
+        .hash(&mut h);
+    h.finish()
+}
+
+/// [`crop_key`] of an arbitrary `[x0,y0,x1,y1]` fraction-of-image
+/// region (e.g. the capture header strip).
+pub fn region_key(image: &GrayImage, region: [f32; 4]) -> u64 {
+    crop_key(&crop_region(image, region), 0x4845_4144)
+}
+
 /// Pluggable OCR engine. Implementations must be conservative:
 /// anything uncertain comes back low-confidence (the pipeline records
 /// those cells as NOT held, never guessed).
@@ -619,6 +644,23 @@ pub trait OcrEngine {
     /// default keeps geometry-free engines (template/stub) unchanged.
     fn ocr_cell_in(&self, cell: &GrayImage, _layout: &Layout) -> OcrRead {
         self.ocr_cell(cell)
+    }
+
+    /// OCR a whole page of cells with one layout. The default reads
+    /// cell-by-cell through [`Self::ocr_cell_in`]; engines with a
+    /// per-call process cost (the tesseract CLI) override this to
+    /// cache by crop hash and batch the misses into a single process
+    /// (addendum #81 — a scroll step re-shows most cells
+    /// pixel-identical, so only the new row should cost anything).
+    fn ocr_cells_in(
+        &self,
+        cells: &[Option<GrayImage>],
+        layout: &Layout,
+    ) -> Vec<Option<OcrRead>> {
+        cells
+            .iter()
+            .map(|c| c.as_ref().map(|c| self.ocr_cell_in(c, layout)))
+            .collect()
     }
 
     /// OCR an arbitrary `[x0,y0,x1,y1]` fraction-of-IMAGE region (a header
@@ -663,6 +705,21 @@ pub struct TesseractCliEngine {
     /// Where the binary came from (provenance for the summary).
     pub origin: &'static str,
     pub layout: Layout,
+    /// Crop-hash read cache for the batched path (addendum #81):
+    /// names/uppers keyed by name-region crop, counts by count-region
+    /// crop (already parsed; `None` = no label, i.e. exactly one).
+    cache: Mutex<OcrCache>,
+}
+
+/// Cached region reads for [`TesseractCliEngine::ocr_cells_in`].
+/// Entries are keyed by [`crop_key`], which folds in the layout's
+/// PSM/upscale salts, so the same pixels under a different layout
+/// never alias. Bounded by a blunt reset in the batched reader.
+#[derive(Default)]
+struct OcrCache {
+    names: HashMap<u64, String>,
+    uppers: HashMap<u64, String>,
+    counts: HashMap<u64, Option<u32>>,
 }
 
 /// Candidate sidecar locations, in probe order, before `$PATH`.
@@ -709,6 +766,7 @@ impl TesseractCliEngine {
                     binary: bin,
                     origin,
                     layout,
+                    cache: Mutex::new(OcrCache::default()),
                 });
             }
         }
@@ -717,6 +775,7 @@ impl TesseractCliEngine {
                 binary: "tesseract".to_owned(),
                 origin: "PATH",
                 layout,
+                cache: Mutex::new(OcrCache::default()),
             });
         }
         None
@@ -742,6 +801,13 @@ impl TesseractCliEngine {
         whitelist: Option<&str>,
     ) -> String {
         let sub = crop_region(cell, region).upscale(upscale);
+        self.read_prepared(&sub, psm, whitelist)
+    }
+
+    /// Run tesseract over one already cropped+upscaled image — the
+    /// body `read_region` used to run inline, now also the per-image
+    /// fallback for [`Self::read_batch`].
+    fn read_prepared(&self, sub: &GrayImage, psm: u32, whitelist: Option<&str>) -> String {
         let dir = std::env::temp_dir().join(format!(
             "fracker-ocr-{}-{:?}",
             std::process::id(),
@@ -753,7 +819,11 @@ impl TesseractCliEngine {
             return String::new();
         }
         let mut cmd = std::process::Command::new(&self.binary);
-        cmd.arg(&path).arg("stdout").arg("--psm").arg(psm.to_string());
+        cmd.arg(&path)
+            .arg("stdout")
+            .arg("--psm")
+            .arg(psm.to_string())
+            .env("OMP_THREAD_LIMIT", "1");
         if let Some(wl) = whitelist {
             cmd.arg("-c").arg(format!("tessedit_char_whitelist={wl}"));
         }
@@ -768,6 +838,77 @@ impl TesseractCliEngine {
                 .join(" "),
             _ => String::new(),
         }
+    }
+
+    /// One tesseract process for many already-upscaled images: the
+    /// images are written as a batch dir plus a list file (tesseract's
+    /// multi-image mode), the language model loads once, and pages
+    /// come back `\f`-separated in list order. Any mismatch — spawn
+    /// failure, non-zero exit, page count != image count — falls back
+    /// to per-image reads, so a batch failure can never lose a read
+    /// the old path would have made (addendum #81).
+    fn read_batch(&self, subs: &[GrayImage], psm: u32, whitelist: Option<&str>) -> Vec<String> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        if subs.is_empty() {
+            return vec![];
+        }
+        let fallback = |s: &[GrayImage]| -> Vec<String> {
+            s.iter().map(|i| self.read_prepared(i, psm, whitelist)).collect()
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "fracker-ocr-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        if std::fs::create_dir_all(&dir).is_err() {
+            return fallback(subs);
+        }
+        let mut list = String::new();
+        for (i, s) in subs.iter().enumerate() {
+            let p = dir.join(format!("{i}.pgm"));
+            if std::fs::write(&p, s.to_pgm_bytes()).is_err() {
+                let _ = std::fs::remove_dir_all(&dir);
+                return fallback(subs);
+            }
+            list.push_str(&format!("{}\n", p.display()));
+        }
+        let lp = dir.join("list.txt");
+        if std::fs::write(&lp, list).is_err() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return fallback(subs);
+        }
+        let mut cmd = std::process::Command::new(&self.binary);
+        cmd.arg(&lp)
+            .arg("stdout")
+            .arg("--psm")
+            .arg(psm.to_string())
+            .env("OMP_THREAD_LIMIT", "1");
+        if let Some(w) = whitelist {
+            cmd.arg("-c").arg(format!("tessedit_char_whitelist={w}"));
+        }
+        let out = cmd.output();
+        let _ = std::fs::remove_dir_all(&dir);
+        let Ok(o) = out else { return fallback(subs) };
+        if !o.status.success() {
+            return fallback(subs);
+        }
+        let text = String::from_utf8_lossy(&o.stdout);
+        let pages: Vec<String> = text
+            .split('\x0c')
+            .take(subs.len())
+            .map(|p| {
+                p.lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect();
+        if pages.len() != subs.len() {
+            return fallback(subs);
+        }
+        pages
     }
 
     fn read_count(&self, cell: &GrayImage, layout: &Layout) -> Option<u32> {
@@ -849,9 +990,155 @@ impl OcrEngine for TesseractCliEngine {
     fn ocr_cell_in(&self, cell: &GrayImage, layout: &Layout) -> OcrRead {
         self.read_cell(cell, layout)
     }
+
+    /// Batched page read (addendum #81): crop every cell's name /
+    /// upper-name / count regions, key them by [`crop_key`], serve
+    /// repeats from the cache, and batch each region class's misses
+    /// into ONE tesseract process per class (see [`Self::read_batch`]).
+    /// A frame costs ~3 process launches; a scroll step re-shows most
+    /// cells pixel-identical, so it costs ~2 (the new row's names +
+    /// counts) instead of 60–90 per-cell launches. Semantics mirror
+    /// [`Self::read_cell`] exactly: same regions, same upper-band rule,
+    /// same count parsing (`> 1` or `None`), same confidence shape.
+    fn ocr_cells_in(
+        &self,
+        cells: &[Option<GrayImage>],
+        layout: &Layout,
+    ) -> Vec<Option<OcrRead>> {
+        let mut cache = self.cache.lock().unwrap();
+        if cache.names.len() > 4096 {
+            *cache = OcrCache::default();
+        }
+        // Salts fold the OCR parameters into the crop keys, so the
+        // same pixels read under different settings never alias.
+        let ns = layout.name_psm ^ (layout.name_upscale << 8);
+        let cs = layout.count_psm
+            ^ (layout.count_upscale << 8)
+            ^ ((matches!(layout.count_style, CountStyle::XPrefix) as u32) << 16);
+        let crop = |c: &GrayImage, r: [f32; 4], salt: u32| {
+            let s = crop_region(c, r);
+            (crop_key(&s, salt), s)
+        };
+
+        let live: Vec<&GrayImage> = cells.iter().flatten().collect();
+        let names: Vec<(u64, GrayImage)> =
+            live.iter().map(|c| crop(c, layout.name, ns)).collect();
+        Self::fill_cache(
+            self,
+            &names,
+            layout.name_psm,
+            layout.name_upscale,
+            None,
+            &mut cache.names,
+        );
+
+        // Upper band only for cells whose lower read is a bare label
+        // (or empty) — the same rule `read_cell` pays a second read for.
+        if let Some(u) = layout.name_upper {
+            let uppers: Vec<(u64, GrayImage)> = live
+                .iter()
+                .zip(&names)
+                .filter(|(_, (k, _))| {
+                    let t = &cache.names[k];
+                    t.trim().is_empty() || t.contains('[')
+                })
+                .map(|(c, _)| crop(c, u, ns ^ 0x5555))
+                .collect();
+            Self::fill_cache(
+                self,
+                &uppers,
+                layout.name_psm,
+                layout.name_upscale,
+                None,
+                &mut cache.uppers,
+            );
+        }
+
+        let counts: Vec<(u64, GrayImage)> =
+            live.iter().map(|c| crop(c, layout.count, cs)).collect();
+        let wl = match layout.count_style {
+            CountStyle::XPrefix => "xX0123456789",
+            CountStyle::Badge => "0123456789",
+        };
+        let todo: Vec<(u64, GrayImage)> = counts
+            .iter()
+            .filter(|(k, _)| !cache.counts.contains_key(k))
+            .cloned()
+            .collect();
+        let mut raw_counts: HashMap<u64, String> = HashMap::new();
+        Self::fill_cache(
+            self,
+            &todo,
+            layout.count_psm,
+            layout.count_upscale,
+            Some(wl),
+            &mut raw_counts,
+        );
+        for (k, t) in raw_counts {
+            let digits: String = t.chars().filter(|c| c.is_ascii_digit()).collect();
+            cache
+                .counts
+                .insert(k, digits.parse::<u32>().ok().filter(|&n| n > 1));
+        }
+
+        let mut i = 0usize;
+        cells
+            .iter()
+            .map(|c| {
+                c.as_ref().map(|cell| {
+                    let (nk, _) = &names[i];
+                    let mut text = cache.names[nk].clone();
+                    if let Some(u) = layout.name_upper {
+                        if text.trim().is_empty() || text.contains('[') {
+                            let uk = crop_key(&crop_region(cell, u), ns ^ 0x5555);
+                            if let Some(up) = cache.uppers.get(&uk) {
+                                if !up.trim().is_empty() {
+                                    text = format!("{} {}", up.trim(), text.trim());
+                                }
+                            }
+                        }
+                    }
+                    let read = OcrRead {
+                        confidence: if text.is_empty() { 0.0 } else { 0.85 },
+                        text,
+                        count: cache.counts[&counts[i].0],
+                        rank: self.read_rank(cell, layout),
+                    };
+                    i += 1;
+                    read
+                })
+            })
+            .collect()
+    }
 }
 
 impl TesseractCliEngine {
+    /// Fill one cache map from the crops it does not have yet, in a
+    /// single [`Self::read_batch`] (addendum #81). Duplicate keys in
+    /// `crops` are read once. Crops are upscaled here, matching what
+    /// `read_region` feeds tesseract on the per-cell path.
+    fn fill_cache(
+        &self,
+        crops: &[(u64, GrayImage)],
+        psm: u32,
+        upscale: u32,
+        whitelist: Option<&str>,
+        map: &mut HashMap<u64, String>,
+    ) {
+        let mut seen = HashSet::new();
+        let miss: Vec<&(u64, GrayImage)> = crops
+            .iter()
+            .filter(|(k, _)| !map.contains_key(k) && seen.insert(*k))
+            .collect();
+        if miss.is_empty() {
+            return;
+        }
+        let imgs: Vec<GrayImage> = miss.iter().map(|(_, s)| s.upscale(upscale)).collect();
+        for ((k, _), t) in miss.iter().zip(self.read_batch(&imgs, psm, whitelist)) {
+            map.insert(*k, t);
+        }
+    }
+
     /// Read one cell's name/count/rank with an explicit layout (so the
     /// capture flow can route relics/parts/arcanes to the right regions
     /// with a single engine).
@@ -1673,28 +1960,20 @@ pub fn ingest_folder(
         let bytes =
             std::fs::read(page_path).map_err(|e| format!("ocr read {}: {e}", page_path.display()))?;
         let img = GrayImage::from_bytes(&bytes)?;
-        for cell in layout.split(&img) {
+        // One batched call per page (addendum #81), as in capture.
+        let cells = layout.split(&img);
+        let reads = engine.ocr_cells_in(&cells, layout);
+        for read in reads {
             let index = results.len();
-            match cell {
-                Some(cell) => {
-                    let read = engine.ocr_cell_in(&cell, layout);
-                    results.push(validate_read(
-                        &read,
-                        universe,
-                        min_confidence,
-                        layout.min_score,
-                        index,
-                    ));
-                }
-                // Partial cell at the page edge: never read, never held.
-                None => results.push(validate_read(
-                    &OcrRead::empty(),
-                    universe,
-                    min_confidence,
-                    layout.min_score,
-                    index,
-                )),
-            }
+            // Partial cell at the page edge: never read, never held.
+            let read = read.unwrap_or_else(OcrRead::empty);
+            results.push(validate_read(
+                &read,
+                universe,
+                min_confidence,
+                layout.min_score,
+                index,
+            ));
         }
     }
     let stock = StockState::from_results(&results, relic_names, arcane_names);
@@ -1957,6 +2236,77 @@ mod tests {
             TesseractCliEngine::probe(default_layout()).is_some(),
             sidecar_configured || on_path
         );
+    }
+
+    #[test]
+    fn crop_key_is_stable_and_discriminates() {
+        // Addendum #81 cache keys: identical crops key identically, a
+        // sub-quantisation nudge (every pixel +1) still keys the same
+        // (the `>> 4` tolerance), and a genuinely different crop does not.
+        let a = GrayImage::blank(10, 4, 100);
+        let mut nudged = a.clone();
+        for p in nudged.pixels.iter_mut() {
+            *p = p.saturating_add(1);
+        }
+        let different = GrayImage::blank(10, 4, 200);
+        assert_eq!(crop_key(&a, 7), crop_key(&a.clone(), 7));
+        assert_eq!(crop_key(&a, 7), crop_key(&nudged, 7));
+        assert_ne!(crop_key(&a, 7), crop_key(&different, 7));
+        assert_ne!(crop_key(&a, 7), crop_key(&a, 8), "salt separates settings");
+    }
+
+    #[test]
+    fn batched_reads_match_per_cell_reads() {
+        // Addendum #81 gate: the batched path must return EXACTLY what
+        // the per-cell path returns for the same cells — same text,
+        // same count, same rank — whatever tesseract makes of the
+        // pixels. Skips when no tesseract is available (as the fixture
+        // tests do). The layout exercises the upper-band rule too.
+        let Some(engine) = TesseractCliEngine::probe(default_layout()) else {
+            eprintln!("skip batched equivalence: no tesseract available");
+            return;
+        };
+        let mut layout = flat_layout(1, 1, 200, 60);
+        layout.name = [0.0, 0.3, 1.0, 1.0];
+        layout.name_upper = Some([0.0, 0.0, 1.0, 0.3]);
+        layout.count = [0.0, 0.0, 0.4, 0.3];
+        layout.name_upscale = 2;
+        layout.count_upscale = 2;
+
+        let labelled = bitmap_font::render_text("NEO C5", 2);
+        let mut noise = GrayImage::blank(200, 60, 18);
+        for (i, p) in noise.pixels.iter_mut().enumerate() {
+            *p = ((i * 37 + 11) % 251) as u8;
+        }
+        let cells: Vec<Option<GrayImage>> = vec![
+            Some(labelled.clone()),
+            Some(GrayImage::blank(200, 60, 18)),
+            Some(noise),
+            None,
+            Some(labelled),
+        ];
+        let batched = engine.ocr_cells_in(&cells, &layout);
+        assert_eq!(batched.len(), cells.len());
+        for (cell, batch) in cells.iter().zip(&batched) {
+            match (cell, batch) {
+                (None, None) => {}
+                (Some(c), Some(b)) => {
+                    let single = engine.ocr_cell_in(c, &layout);
+                    assert_eq!(b.text, single.text, "text must agree");
+                    assert_eq!(b.count, single.count, "count must agree");
+                    assert_eq!(b.rank, single.rank, "rank must agree");
+                    assert_eq!(b.confidence, single.confidence);
+                }
+                other => panic!("None cells must stay None, got {other:?}"),
+            }
+        }
+        // A second identical call is served from the crop cache and
+        // must return the same reads again.
+        let again = engine.ocr_cells_in(&cells, &layout);
+        for (a, b) in batched.iter().zip(&again) {
+            assert_eq!(a.as_ref().map(|r| &r.text), b.as_ref().map(|r| &r.text));
+            assert_eq!(a.as_ref().and_then(|r| r.count), b.as_ref().and_then(|r| r.count));
+        }
     }
 
     /// A layout with no sub-region cropping: the whole cell is the name

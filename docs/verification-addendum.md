@@ -1029,3 +1029,26 @@ it refines the brief where they disagree. For the next worker pass.
     aarch64 box (a single capture-sequence test
     exceeds 150 s alone) — gate them on CI, not by
     watching a box suite and calling it hung.
+81. **Batched OCR (pass 24, Seth's brief 2026-10-24;
+    implemented by Blum).** The #80(b) durable fix, in the
+    shape Seth specified — NOT the TSV word-box idea #80
+    sketched: per-region crops are keyed by a crop hash
+    (dims + salt, pixels quantised `>> 4`), repeats are
+    served from an engine-side cache, and each region
+    class's cache misses go through ONE tesseract process
+    (list-file mode, pages split on `\f`, model loaded
+    once, `OMP_THREAD_LIMIT=1`). Semantics are pinned to
+    the old per-cell path by an equivalence gate
+    (batched == per-cell on text/count/rank/confidence);
+    any batch mismatch falls back to per-image reads.
+    The capture header classification is likewise cached
+    by crop hash in the session, so a scroll step pays
+    ~2 launches (new row's names + counts) instead of
+    150–230 per frame. Ships in v0.5.19. Still owed:
+    Seth's live measurement (frame stats at finalize,
+    #80) to confirm the scroll coverage fix and decide
+    whether the deferred libtesseract-via-dlopen step
+    (~20 ms/cell, model resident; needs the lib in the
+    Flatpak) is warranted. Defect #80(a) — Prime Parts
+    header classification — is untouched by this pass;
+    it waits on the v0.5.18 evidence captures.

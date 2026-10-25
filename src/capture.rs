@@ -316,6 +316,12 @@ pub struct CaptureSession {
     debug_dumped: std::collections::HashSet<&'static str>,
     last_sig: Option<u64>,
     last_class: Option<ScreenClass>,
+    /// Header-strip cache (addendum #81): (crop hash, class, raw text)
+    /// of the last classified header. The classifier's region/PSM are
+    /// fixed for a run, so identical header pixels classify identically
+    /// — a scroll step (frame changed, header did not) reuses this
+    /// instead of paying another tesseract spawn per frame.
+    last_header: Option<(u64, ScreenClass, String)>,
     idle: u64,
     frames_seen: u64,
     frames_read: u64,
@@ -393,9 +399,17 @@ impl CaptureSession {
         }
         self.last_sig = Some(sig);
 
-        let (class, header_text) = ctx.classifier.classify_detailed(engine, frame);
+        let header_key = ocr::region_key(frame, ctx.classifier.header);
+        let (class, header_text, header_fresh) = match &self.last_header {
+            Some((k, class, text)) if *k == header_key => (*class, text.clone(), false),
+            _ => {
+                let (class, text) = ctx.classifier.classify_detailed(engine, frame);
+                self.last_header = Some((header_key, class, text.clone()));
+                (class, text, true)
+            }
+        };
         self.last_class = Some(class);
-        if self.header_samples.len() < 10 {
+        if header_fresh && self.header_samples.len() < 10 {
             let flat: String = header_text
                 .split_whitespace()
                 .collect::<Vec<_>>()
@@ -467,28 +481,22 @@ fn read_frame(
     engine: &dyn OcrEngine,
     ctx: &CaptureContext<'_>,
 ) -> Vec<ocr::CellResult> {
-    let mut results = Vec::new();
-    for cell in layout.split(frame) {
-        let index = results.len();
-        match cell {
-            Some(c) => {
-                let read = engine.ocr_cell_in(&c, layout);
-                results.push(ocr::validate_read(
-                    &read,
-                    ctx.universe,
-                    ctx.min_confidence,
-                    layout.min_score,
-                    index,
-                ));
-            }
-            None => results.push(ocr::validate_read(
-                &ocr::OcrRead::empty(),
-                ctx.universe,
-                ctx.min_confidence,
-                layout.min_score,
-                index,
-            )),
-        }
+    // One batched call for the whole page (addendum #81): the
+    // tesseract engine caches by crop hash and batches cache misses
+    // into a handful of processes, instead of 2–3 spawns per cell.
+    let cells = layout.split(frame);
+    let reads = engine.ocr_cells_in(&cells, layout);
+    let mut results = Vec::with_capacity(reads.len());
+    for (index, read) in reads.into_iter().enumerate() {
+        // A `None` cell (partial, at the viewport edge) is never read.
+        let read = read.unwrap_or_else(ocr::OcrRead::empty);
+        results.push(ocr::validate_read(
+            &read,
+            ctx.universe,
+            ctx.min_confidence,
+            layout.min_score,
+            index,
+        ));
     }
     results
 }
@@ -896,6 +904,81 @@ mod tests {
             assert!(cls.layout_key().is_some());
         }
         assert!(!shipped.relic_keywords.is_empty());
+    }
+
+    /// Engine that counts header reads and always reports a relic
+    /// header — the seam for the addendum #81 header-cache test.
+    struct CountingEngine {
+        header_reads: std::sync::Mutex<usize>,
+    }
+
+    impl crate::ocr::OcrEngine for CountingEngine {
+        fn name(&self) -> &str {
+            "counting"
+        }
+
+        fn ocr_cell(&self, _cell: &GrayImage) -> crate::ocr::OcrRead {
+            crate::ocr::OcrRead::empty()
+        }
+
+        fn read_text(
+            &self,
+            _image: &GrayImage,
+            _region: [f32; 4],
+            _psm: u32,
+            _upscale: u32,
+        ) -> String {
+            *self.header_reads.lock().unwrap() += 1;
+            "VOID RELICS REFINEMENT".to_owned()
+        }
+    }
+
+    #[test]
+    fn header_is_reread_only_when_its_pixels_change() {
+        // Addendum #81: a scroll step changes the frame but not the
+        // header strip — classification must reuse the cached header
+        // read instead of spawning tesseract again. A changed header
+        // is re-read.
+        let engine = CountingEngine {
+            header_reads: std::sync::Mutex::new(0),
+        };
+        let universe = Universe::from_names(&[]);
+        let layouts = HashMap::new();
+        let relic_names = HashSet::new();
+        let arcane_names = HashSet::new();
+        let classifier = classifier();
+        let ctx = CaptureContext {
+            layouts: &layouts,
+            universe: &universe,
+            relic_names: &relic_names,
+            arcane_names: &arcane_names,
+            classifier: &classifier,
+            min_confidence: 0.5,
+            debug_dir: None,
+        };
+        let mut session = CaptureSession::new();
+
+        // 100x100 frames; the header strip is the top 12 rows.
+        let frame = |header_v: u8, body_v: u8| {
+            let mut img = GrayImage::blank(100, 100, body_v);
+            for y in 0..12 {
+                for x in 0..100 {
+                    img.set(x, y, header_v);
+                }
+            }
+            img
+        };
+        session.process_frame(&ctx, &engine, &frame(200, 10));
+        assert_eq!(*engine.header_reads.lock().unwrap(), 1);
+        // Body scrolls, header identical: no second header read.
+        session.process_frame(&ctx, &engine, &frame(200, 90));
+        session.process_frame(&ctx, &engine, &frame(200, 160));
+        assert_eq!(*engine.header_reads.lock().unwrap(), 1);
+        // Header changes: re-read.
+        session.process_frame(&ctx, &engine, &frame(40, 160));
+        assert_eq!(*engine.header_reads.lock().unwrap(), 2);
+        // Only fresh classifications land in the evidence samples.
+        assert_eq!(session.header_samples.len(), 2);
     }
 
     #[test]
