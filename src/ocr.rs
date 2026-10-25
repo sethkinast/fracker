@@ -25,7 +25,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 // ---------------------------------------------------------------------------
 // Refinement tier (eighth pass §1)
@@ -708,6 +708,24 @@ pub trait OcrEngine {
     ) -> String {
         String::new()
     }
+
+    /// Batch variant of [`Self::read_text`]: many region reads in
+    /// one call, results in request order. The default loops;
+    /// engines with a per-call process cost override it to batch
+    /// (addendum #81/#92) — the pass-29 line-1 strip reads go
+    /// through here, so a frame's refused cells cost one batched
+    /// read instead of one process spawn apiece.
+    fn read_text_batch(
+        &self,
+        requests: &[(&GrayImage, [f32; 4], u32, u32)],
+    ) -> Vec<String> {
+        requests
+            .iter()
+            .map(|(image, region, psm, upscale)| {
+                self.read_text(image, *region, *psm, *upscale)
+            })
+            .collect()
+    }
 }
 
 /// No engine available: every read is empty at zero confidence, so the
@@ -750,6 +768,10 @@ struct OcrCache {
     names: HashMap<u64, String>,
     uppers: HashMap<u64, String>,
     counts: HashMap<u64, Option<u32>>,
+    /// Line-1 strip reads served through
+    /// [`OcrEngine::read_text_batch`] (pass 29 re-gate), keyed like
+    /// the name crops with a strip salt.
+    strips: HashMap<u64, String>,
 }
 
 /// Candidate sidecar locations, in probe order, before `$PATH`.
@@ -1011,6 +1033,53 @@ impl OcrEngine for TesseractCliEngine {
         upscale: u32,
     ) -> String {
         self.read_region(image, region, psm, upscale, None)
+    }
+
+    /// Batched region reads (pass 29 re-gate): group the requests
+    /// by (psm, upscale), crop each region, and serve the group
+    /// through the same crop-hash cache + single-process batch
+    /// reader as the cell path ([`Self::fill_cache`] /
+    /// [`Self::read_batch`]) — a frame's strip reads cost ~one
+    /// tesseract launch, and a scroll step re-showing a cell
+    /// serves its strip from the cache. Semantics mirror
+    /// [`Self::read_region`] exactly: same crop, same upscale, no
+    /// whitelist.
+    fn read_text_batch(
+        &self,
+        requests: &[(&GrayImage, [f32; 4], u32, u32)],
+    ) -> Vec<String> {
+        let mut out: Vec<String> = vec![String::new(); requests.len()];
+        let mut groups: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+        for (i, (_, _, psm, upscale)) in requests.iter().enumerate() {
+            groups.entry((*psm, *upscale)).or_default().push(i);
+        }
+        if groups.is_empty() {
+            return out;
+        }
+        let mut cache = self.cache.lock().unwrap();
+        if cache.strips.len() > 4096 {
+            cache.strips.clear();
+        }
+        for ((psm, upscale), idxs) in groups {
+            // The salt folds the OCR parameters plus a strip
+            // marker into the crop keys, in the same style as the
+            // cell path's salts, so strip crops key distinctly
+            // from any other region class read at these settings.
+            let salt = psm ^ (upscale << 8) ^ (0x57 << 16);
+            let crops: Vec<(u64, GrayImage)> = idxs
+                .iter()
+                .map(|&i| {
+                    let (image, region, _, _) = requests[i];
+                    let s = crop_region(image, region);
+                    (crop_key(&s, salt), s)
+                })
+                .collect();
+            Self::fill_cache(self, &crops, psm, upscale, None, &mut cache.strips);
+            for (j, &i) in idxs.iter().enumerate() {
+                out[i] = cache.strips[&crops[j].0].clone();
+            }
+        }
+        out
     }
 
     fn ocr_cell(&self, cell: &GrayImage) -> OcrRead {
@@ -1499,6 +1568,11 @@ impl OcrEngine for FakeEngine {
 pub struct Universe {
     names: Vec<String>,
     folded: Vec<String>,
+    /// Built suffix classes for the radius decoder (pass 29), keyed
+    /// by suffix. Building a class costs a pairwise pass over its
+    /// members' heads; a capture session refuses the same stacks
+    /// frame after frame, so each class is computed once and shared.
+    radius_cache: Arc<Mutex<HashMap<String, RadiusClass>>>,
 }
 
 impl Universe {
@@ -1506,11 +1580,17 @@ impl Universe {
         Self {
             names: names.to_vec(),
             folded: names.iter().map(|n| fold(n)).collect(),
+            radius_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     pub fn len(&self) -> usize {
         self.names.len()
+    }
+
+    /// All canonical names (diagnostics and tests).
+    pub fn names(&self) -> &[String] {
+        &self.names
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1635,10 +1715,49 @@ fn confusable(a: char, b: char) -> bool {
     )
 }
 
-/// Levenshtein with [`confusable`] substitutions costing zero.
-pub fn levenshtein_confusable(a: &str, b: &str) -> usize {
+/// Substitution predicate for the metric closure of [`confusable`]
+/// (pass 29): two characters substitute at zero cost when they are
+/// equal or in the same CONNECTED COMPONENT of the confusability
+/// graph. The pairwise relation is not transitive — `1` is
+/// confusable with both `i` and `l`, but `i` and `l` are not
+/// pairwise confusable — so the pairwise distance is NOT a metric
+/// (witness: d("inaros","1aros") = d("1aros","lavos") = 1 but
+/// d("inaros","lavos") = 3), and bounded-distance balls under it
+/// can overlap. The component closure is the smallest enlargement
+/// that restores the triangle inequality; the radius decoder uses
+/// it for ALL its distances (radii and fragment alike). The margin
+/// matcher keeps the pairwise relation — `i` vs `l` must stay
+/// distinct there (both are real relic prefixes).
+fn confusable_metric(a: char, b: char) -> bool {
+    fn component(c: char) -> u8 {
+        match c.to_ascii_lowercase() {
+            '0' | 'o' => 1,
+            '1' | 'i' | 'l' | '|' => 2,
+            '5' | 's' | '$' => 3,
+            '8' | 'b' => 4,
+            '2' | 'z' => 5,
+            '6' | 'g' => 6,
+            '£' | 'e' => 7,
+            _ => 0,
+        }
+    }
+    let a = a.to_ascii_lowercase();
+    let b = b.to_ascii_lowercase();
+    a == b || (component(a) != 0 && component(a) == component(b))
+}
+
+/// Levenshtein DP over a zero-cost substitution predicate.
+fn lev_pred(a: &str, b: &str, pred: fn(char, char) -> bool) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
+    lev_chars(&a, &b, pred)
+}
+
+/// [`lev_pred`] over pre-collected char slices (the radius
+/// decoder decodes one fragment against every head in a class;
+/// collecting each head's chars once at class build keeps the
+/// per-decode loop allocation-free).
+fn lev_chars(a: &[char], b: &[char], pred: fn(char, char) -> bool) -> usize {
     if a.is_empty() {
         return b.len();
     }
@@ -1650,12 +1769,92 @@ pub fn levenshtein_confusable(a: &str, b: &str) -> usize {
     for (i, &ca) in a.iter().enumerate() {
         cur[0] = i + 1;
         for (j, &cb) in b.iter().enumerate() {
-            let sub = prev[j] + usize::from(!confusable(ca, cb));
+            let sub = prev[j] + usize::from(!pred(ca, cb));
             cur[j + 1] = sub.min(prev[j + 1] + 1).min(cur[j] + 1);
         }
         std::mem::swap(&mut prev, &mut cur);
     }
     prev[b.len()]
+}
+
+/// Bounded variant of [`lev_chars`] (see [`lev_pred_bounded`]).
+/// Banded: only cells within `limit` of the diagonal are computed
+/// — a within-limit alignment path never leaves that band — and
+/// the DP aborts as soon as a whole band row exceeds `limit`.
+fn lev_chars_bounded(
+    a: &[char],
+    b: &[char],
+    limit: usize,
+    pred: fn(char, char) -> bool,
+) -> usize {
+    if a.len().abs_diff(b.len()) > limit {
+        return limit + 1;
+    }
+    if a.is_empty() {
+        return b.len();
+    }
+    if b.is_empty() {
+        return a.len();
+    }
+    const INF: usize = usize::MAX / 4;
+    let mut prev: Vec<usize> = (0..=b.len()).map(|j| if j <= limit { j } else { INF }).collect();
+    let mut cur = vec![INF; b.len() + 1];
+    for (i, &ca) in a.iter().enumerate() {
+        let i = i + 1;
+        cur[0] = if i <= limit { i } else { INF };
+        let j0 = i.saturating_sub(limit).max(1);
+        let j1 = (i + limit).min(b.len());
+        let mut row_min = cur[0];
+        for j in j0..=j1 {
+            let sub = prev[j - 1] + usize::from(!pred(ca, b[j - 1]));
+            cur[j] = sub.min(prev[j] + 1).min(cur[j - 1] + 1);
+            row_min = row_min.min(cur[j]);
+        }
+        if j1 < b.len() {
+            cur[j1 + 1] = INF;
+        }
+        if row_min > limit {
+            return limit + 1;
+        }
+        std::mem::swap(&mut prev, &mut cur);
+        cur.fill(INF);
+    }
+    prev[b.len()]
+}
+
+/// Bounded variant of [`lev_pred`]: exact when the true distance
+/// is `<= limit`, otherwise some value `> limit` (callers testing
+/// `d <= limit` cannot tell the difference). A length difference
+/// beyond `limit` settles it without any DP, and the DP aborts as
+/// soon as a whole row exceeds `limit` (the final distance is
+/// bounded below by every row's minimum).
+fn lev_pred_bounded(a: &str, b: &str, limit: usize, pred: fn(char, char) -> bool) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    lev_chars_bounded(&a, &b, limit, pred)
+}
+
+/// Levenshtein with [`confusable`] substitutions costing zero.
+pub fn levenshtein_confusable(a: &str, b: &str) -> usize {
+    lev_pred(a, b, confusable)
+}
+
+/// [`levenshtein_confusable`] with an early exit (see
+/// [`lev_pred_bounded`]).
+pub fn levenshtein_confusable_bounded(a: &str, b: &str, limit: usize) -> usize {
+    lev_pred_bounded(a, b, limit, confusable)
+}
+
+/// Levenshtein under the metric closure [`confusable_metric`] —
+/// a true metric, and the only distance the radius decoder's
+/// disjointness guarantee is stated in.
+pub fn levenshtein_confusable_metric(a: &str, b: &str) -> usize {
+    lev_pred(a, b, confusable_metric)
+}
+
+/// [`levenshtein_confusable_metric`] with an early exit.
+pub fn levenshtein_confusable_metric_bounded(a: &str, b: &str, limit: usize) -> usize {
+    lev_pred_bounded(a, b, limit, confusable_metric)
 }
 
 /// Plain edit distance (no confusable folding), kept for callers/tests
@@ -1742,6 +1941,426 @@ pub fn validate_read(
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Radius (bounded-distance) decoder (pass 29, addendum #92)
+// ---------------------------------------------------------------------------
+//
+// The margin matcher measures a read against the WHOLE name, but on
+// shared-suffix part names ("... Prime Neuroptics Blueprint") ~23 of
+// ~31 characters are common to every sibling, so one or two glyph
+// errors in the short leading HEAD (the gear/weapon word — the only
+// discriminative segment) collapse the margin and the never-guess
+// guard refuses reads a human would call certain (census: 20 of 37
+// winner-config Neuroptics misses were margin refusals with
+// best = truth). This decoder is the bounded-distance alternative,
+// applied ONLY to reads the margin matcher refused:
+//
+// 1. The refused read's best candidate names a SUFFIX CLASS: every
+//    universe name sharing the candidate's longest trailing token
+//    run that at least one other name also ends with. The class is
+//    a hypothesis, verified in step 2 — and it is only considered
+//    at all when the candidate itself scored at or above
+//    [`RADIUS_MIN_CANDIDATE_SCORE`], the matcher's own plausibility
+//    floor: the decoder builds on the nomination only when the
+//    matcher considers its best guess a plausible name.
+// 2. The read's tail must fuzzy-align to that suffix: EVERY suffix
+//    token must be witnessed by a distinct read token within
+//    [`RADIUS_TOKEN_WITNESS`] (a truncated form counts — "pri"
+//    witnesses "prime"), with the total alignment cost within
+//    [`RADIUS_TAIL_BUDGET`]. A suffix token with no witness fails
+//    the alignment outright, at any budget — the first gate's two
+//    false accepts were exactly that shape (mid-scroll composite
+//    cells whose tails witnessed only "prime" "verified" a class
+//    whose distinguishing token was never seen; the re-gate's fix
+//    is this witnessed rule, not a retuned budget). A read whose
+//    tail does not actually carry the class suffix never reaches
+//    the decoder, which is what stops a fragment from decoding in
+//    a WRONG class whose heads happen to collide ("mag" heads
+//    exist in several classes). The tokens before the split are
+//    the FRAGMENT, squashed to alphanumerics so junk glyphs
+//    (`"`, `*`, `”`) cost no edit budget.
+// 3. The fragment is decoded against the class HEADS alone. Each
+//    head A has radius t_A = floor((D_A - 1)/2), where D_A is its
+//    distance to the nearest sibling head. By the triangle
+//    inequality the balls of radius t_A around the heads are
+//    disjoint, so at most one head can accept, and a false accept
+//    requires more than t_truth edits of corruption in the truth's
+//    own fragment. Radii derive from the universe at runtime —
+//    there is no tuned threshold to drift.
+//
+//    All decoder distances use the METRIC CLOSURE of the confusable
+//    relation ([`levenshtein_confusable_metric`]), not the pairwise
+//    distance the margin matcher uses: the pairwise relation is
+//    not transitive (`1` ~ `i` and `1` ~ `l` but `i` !~ `l`), its
+//    distance violates the triangle inequality, and under it the
+//    balls above DO overlap — the stress test's witness is
+//    "1aros", one pairwise edit from both "inaros" and "lavos"
+//    whose pairwise distance is 3 (their metric distance is 2,
+//    so both radii are 0 and "1aros" refuses). The closure costs
+//    a little coverage wherever a bridge exists; soundness is
+//    not negotiable.
+//
+// The honest limit (pinned in tests): heads at distance 3 give
+// t = 1, so a 2-edit corruption does NOT decode — Chroma's nearest
+// sibling is Khora (D = 3), and the census's "Bhioma" read stays
+// refused. The decoder recovers the ≤1-edit population only; that
+// is the price of the proof, and it is paid deliberately.
+
+/// Token-edit cost of skipping one read token (junk) during tail
+/// alignment (see [`Universe::radius_fragment`]). Suffix tokens are
+/// never skipped — each must be witnessed (see
+/// [`RADIUS_TOKEN_WITNESS`]) — so this prices only the junk tokens
+/// a bleed-damaged tail carries alongside the real suffix tokens.
+const RADIUS_TOKEN_EDIT: usize = 3;
+
+/// Witness cap for tail alignment: a suffix token counts as
+/// present only when some distinct read token, in order, sits
+/// within this metric-closure distance of it. A truncated token
+/// ("pri" for "prime") sits at exactly 2; anything more distant
+/// is not evidence the suffix token is there, and the suffix token
+/// goes unwitnessed — which fails the alignment at any budget.
+const RADIUS_TOKEN_WITNESS: usize = 2;
+
+/// Judgement call (pass 29): the largest total token-alignment cost
+/// at which a read's tail still counts as carrying the class suffix,
+/// charged as the sum of witnessed-token distances plus
+/// [`RADIUS_TOKEN_EDIT`] per skipped junk token. Pre-registered at
+/// 4 and KEPT at 4 for the re-gate: the first gate's false accepts
+/// came from unwitnessed suffix-token deletions priced at 3, and
+/// the fix is the witnessed rule, not a retuned budget (budget 2
+/// also scored clean on the first gate, but on the same data that
+/// judged it — see docs/twenty-ninth-pass.md). This is the
+/// decoder's one chosen constant; the radii themselves are
+/// derived, not tuned.
+pub const RADIUS_TAIL_BUDGET: usize = 4;
+
+/// Score floor for class nomination: the decoder considers a
+/// refused read's best candidate only when it scored at or above
+/// the parts layout's validation `min_score`
+/// (data/capture/layouts.toml) — the decoder trusts a nomination
+/// only from a candidate the matcher itself considers plausible.
+/// Second line of defence, not the primary fix: the first gate's
+/// "Nova Prime" false accept scored 0.56, above this floor, and
+/// is stopped by the witnessed-token rule; its sibling read
+/// ("Nezh rime", 0.47) never nominates at all under the floor.
+pub const RADIUS_MIN_CANDIDATE_SCORE: f32 = 0.50;
+
+/// One suffix class of the universe, with the decoding radius of
+/// every member's head precomputed. Built by
+/// [`Universe::radius_class`].
+#[derive(Debug, Clone)]
+pub struct RadiusClass {
+    /// Folded suffix tokens shared by every member.
+    suffix: Vec<String>,
+    /// (canonical name, folded head) per member.
+    members: Vec<(String, String)>,
+    /// Decoding radius t_A per member (same order as `members`).
+    radii: Vec<usize>,
+    /// Member heads as char vectors (same order), collected once
+    /// so `decode` runs allocation-free per candidate.
+    head_chars: Vec<Vec<char>>,
+}
+
+impl RadiusClass {
+    /// The folded suffix tokens every member shares.
+    pub fn suffix(&self) -> &[String] {
+        &self.suffix
+    }
+
+    /// (canonical name, folded head, radius) per member.
+    pub fn members(&self) -> impl Iterator<Item = (&str, &str, usize)> {
+        self.members
+            .iter()
+            .zip(self.radii.iter())
+            .map(|((n, h), t)| (n.as_str(), h.as_str(), *t))
+    }
+
+    /// Decode a squashed fragment against the class heads: the
+    /// unique member whose head lies within its own radius of the
+    /// fragment, or `None`. The geometry guarantees at most one
+    /// in-radius head; if an implementation defect ever produced
+    /// two, this refuses rather than picking one (never guess).
+    pub fn decode(&self, fragment: &str) -> Option<String> {
+        if fragment.is_empty() {
+            return None;
+        }
+        let frag: Vec<char> = fragment.chars().collect();
+        let mut hit: Option<&str> = None;
+        for (((name, _), chars), t) in self
+            .members
+            .iter()
+            .zip(self.head_chars.iter())
+            .zip(self.radii.iter())
+        {
+            // Length alone settles most candidates: a fragment
+            // whose length differs from the head's by more than
+            // the radius cannot be within it.
+            if frag.len().abs_diff(chars.len()) > *t {
+                continue;
+            }
+            if lev_chars_bounded(&frag, chars, *t, confusable_metric) <= *t {
+                if hit.is_some() {
+                    return None;
+                }
+                hit = Some(name.as_str());
+            }
+        }
+        hit.map(str::to_owned)
+    }
+}
+
+/// Squash read tokens into a decoder fragment: lowercase
+/// alphanumerics only, single spaces between surviving tokens.
+/// Junk glyphs the icon bleed injects (`"`, `*`, `”`, `¥`) vanish
+/// instead of consuming the fragment's edit budget; digits survive
+/// (the confusable metric folds 5/S, 0/O, ... at zero cost).
+fn squash_fragment(tokens: &[&str]) -> String {
+    tokens
+        .iter()
+        .map(|t| {
+            t.chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect::<String>()
+        })
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Witnessed-alignment cost between a read's tail and a class
+/// suffix. Every suffix token must be WITNESSED: matched, in
+/// order, to a distinct read token whose metric-closure distance
+/// ([`levenshtein_confusable_metric`]) is at most
+/// [`RADIUS_TOKEN_WITNESS`], costing that distance. Read tokens
+/// may be skipped as junk at [`RADIUS_TOKEN_EDIT`] each (before,
+/// between, or after the witnesses). A suffix token with no
+/// witness fails the alignment outright — the cost comes back
+/// effectively infinite, so the caller's budget comparison refuses
+/// at any budget. This is the structural fix from the pass-29
+/// re-gate: the first gate's alignment charged a flat
+/// [`RADIUS_TOKEN_EDIT`] for a wholly deleted suffix token, so a
+/// composite cell whose tail witnessed only "prime" could
+/// "verify" the chassis class (delete "chassis" for 3, substitute
+/// "rime"→"prime" for 1) and decode. A substitution more distant
+/// than the witness cap is likewise forbidden: a token that
+/// distant is not evidence the suffix token is present.
+fn token_align_cost(tail: &[&str], suffix: &[String]) -> usize {
+    const INF: usize = usize::MAX / 4;
+    let n = suffix.len();
+    // prev[j]: cost of aligning the read tokens consumed so far
+    // against suffix[..j] with every one of those suffix tokens
+    // witnessed. Prefixes with an unwitnessed suffix token start
+    // at INF and can never become finite.
+    let mut prev: Vec<usize> = vec![INF; n + 1];
+    prev[0] = 0;
+    let mut cur = vec![INF; n + 1];
+    for tok in tail {
+        // Skipping this read token (junk) preserves every
+        // witnessed prefix at insertion cost.
+        cur[0] = prev[0].saturating_add(RADIUS_TOKEN_EDIT);
+        for (j, want) in suffix.iter().enumerate() {
+            let skip = prev[j + 1].saturating_add(RADIUS_TOKEN_EDIT);
+            let d = levenshtein_confusable_metric_bounded(tok, want, RADIUS_TOKEN_WITNESS);
+            let witness = if d <= RADIUS_TOKEN_WITNESS {
+                prev[j].saturating_add(d)
+            } else {
+                INF
+            };
+            cur[j + 1] = skip.min(witness);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[n]
+}
+
+/// The fragment of a line-1 strip read (band-relative top strip,
+/// PSM 7): everything before the first token resembling "prime"
+/// (the head is the only content above the shared suffix on line 1;
+/// the strip may also carry bleed junk after it). Falls back to the
+/// whole squashed read when no token resembles "prime" — the
+/// decoder's radius then decides, and an inflated fragment simply
+/// refuses.
+pub fn radius_strip_fragment(read: &str) -> String {
+    let cleaned = strip_tier_label(read);
+    let folded = fold(&cleaned);
+    let tokens: Vec<&str> = folded.split(' ').filter(|t| !t.is_empty()).collect();
+    let cut = tokens
+        .iter()
+        .position(|t| levenshtein_confusable(t, "prime") <= 2 && t.len() >= 3)
+        .filter(|&i| i > 0)
+        .unwrap_or(tokens.len());
+    squash_fragment(&tokens[..cut])
+}
+
+impl Universe {
+    /// The suffix class of a canonical universe name: the longest
+    /// trailing token run of the name that at least one OTHER
+    /// universe name also ends with (leaving every member at least
+    /// a one-token head). `None` when no such run exists — a name
+    /// whose every suffix is unique has no siblings to confuse it
+    /// with, and the margin matcher already owns its reads.
+    pub fn radius_class(&self, candidate: &str) -> Option<RadiusClass> {
+        let (suffix, members) = self.derive_class_parts(candidate)?;
+        let key = suffix.join(" ");
+        if let Ok(cache) = self.radius_cache.lock() {
+            if let Some(hit) = cache.get(&key) {
+                return Some(hit.clone());
+            }
+        }
+        // D_A: distance from each head to the nearest OTHER member's
+        // head (a duplicate head — impossible for distinct names in
+        // one class — yields D = 0, radius 0, and `decode`'s two-hit
+        // refusal covers the collision). The pairwise pass is the
+        // expensive part of a class build, so it runs once per
+        // suffix, not once per candidate (every member of a class
+        // derives the same suffix).
+        let head_chars: Vec<Vec<char>> =
+            members.iter().map(|(_, h)| h.chars().collect()).collect();
+        let radii = head_chars
+            .iter()
+            .enumerate()
+            .map(|(i, head)| {
+                let d = head_chars
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| *j != i)
+                    .map(|(_, other)| lev_chars(head, other, confusable_metric))
+                    .min()
+                    .unwrap_or(0);
+                d.saturating_sub(1) / 2
+            })
+            .collect();
+        let built = RadiusClass {
+            suffix,
+            members,
+            radii,
+            head_chars,
+        };
+        if let Ok(mut cache) = self.radius_cache.lock() {
+            cache.insert(key, built.clone());
+        }
+        Some(built)
+    }
+
+    /// The cheap half of class derivation: the candidate's suffix
+    /// and the class membership, with no radii. Returns `None` when
+    /// no trailing token run is shared with another name.
+    fn derive_class_parts(
+        &self,
+        candidate: &str,
+    ) -> Option<(Vec<String>, Vec<(String, String)>)> {
+        let folded = fold(candidate);
+        let ctoks: Vec<&str> = folded.split(' ').filter(|t| !t.is_empty()).collect();
+        if ctoks.len() < 2 {
+            return None;
+        }
+        // Tokenised universe names, computed once per call (the
+        // caller pays this only for refused reads).
+        let tokenised: Vec<Vec<&str>> = self
+            .folded
+            .iter()
+            .map(|f| f.split(' ').collect())
+            .collect();
+        for k in (1..ctoks.len()).rev() {
+            let suffix: Vec<String> =
+                ctoks[ctoks.len() - k..].iter().map(|s| s.to_string()).collect();
+            let mut members: Vec<(String, String)> = Vec::new();
+            for (name, toks) in self.names.iter().zip(tokenised.iter()) {
+                if toks.len() > k && toks[toks.len() - k..] == suffix[..] {
+                    let head = toks[..toks.len() - k].join(" ");
+                    if !members.iter().any(|(n, _)| n == name) {
+                        members.push((name.clone(), head));
+                    }
+                }
+            }
+            if members.len() >= 2 {
+                return Some((suffix, members));
+            }
+        }
+        None
+    }
+
+    /// Verify a read's tail against a class suffix and return its
+    /// fragment: the split of the (cleaned, folded) read minimising
+    /// [`token_align_cost`] against the suffix — with every suffix
+    /// token witnessed — must land within `budget`, and the
+    /// squashed fragment before the split must be non-empty. This
+    /// is the class-evidence check — a read whose tail does not
+    /// carry the suffix yields `None` even when its fragment would
+    /// decode somewhere.
+    pub fn radius_fragment(
+        &self,
+        read: &str,
+        class: &RadiusClass,
+        budget: usize,
+    ) -> Option<String> {
+        let cleaned = strip_tier_label(read);
+        let cleaned = strip_relic_suffix(&cleaned);
+        let folded = fold(&cleaned);
+        let tokens: Vec<&str> = folded.split(' ').filter(|t| !t.is_empty()).collect();
+        if tokens.is_empty() {
+            return None;
+        }
+        let mut best: Option<(usize, usize)> = None; // (cost, split)
+        for m in 0..=tokens.len() {
+            let cost = token_align_cost(&tokens[m..], &class.suffix);
+            if best.map_or(true, |(c, _)| cost < c) {
+                best = Some((cost, m));
+            }
+        }
+        let (cost, m) = best?;
+        if cost > budget {
+            return None;
+        }
+        let fragment = squash_fragment(&tokens[..m]);
+        if fragment.is_empty() {
+            None
+        } else {
+            Some(fragment)
+        }
+    }
+
+    /// Full band-read decode at an explicit tail budget: class from
+    /// the read's best margin candidate (trusted only at or above
+    /// [`RADIUS_MIN_CANDIDATE_SCORE`]), tail verified against the
+    /// class suffix, fragment decoded within the class. Returns the
+    /// canonical name on a decode, `None` on any refusal.
+    pub fn radius_decode_budget(&self, read: &str, budget: usize) -> Option<String> {
+        let (name, score, _) = self.best_match_margin(read)?;
+        if score < RADIUS_MIN_CANDIDATE_SCORE {
+            return None;
+        }
+        let class = self.radius_class(name)?;
+        let fragment = self.radius_fragment(read, &class, budget)?;
+        class.decode(&fragment)
+    }
+
+    /// [`Self::radius_decode_budget`] at the production budget.
+    pub fn radius_decode(&self, read: &str) -> Option<String> {
+        self.radius_decode_budget(read, RADIUS_TAIL_BUDGET)
+    }
+
+    /// Second-chance decode from a line-1 strip read: the class and
+    /// its tail verification come from the BAND read (the strip
+    /// carries no suffix evidence), the fragment from the strip.
+    /// Returns `None` when the band read cannot establish the class
+    /// or its tail does not verify — a strip fragment alone never
+    /// picks a class.
+    pub fn radius_decode_strip(&self, band_read: &str, strip_read: &str, budget: usize) -> Option<String> {
+        let (name, score, _) = self.best_match_margin(band_read)?;
+        if score < RADIUS_MIN_CANDIDATE_SCORE {
+            return None;
+        }
+        let class = self.radius_class(name)?;
+        // Tail verification on the band read is the class evidence;
+        // its own fragment may be too damaged to decode (that is
+        // why the strip exists), but the suffix must check out.
+        self.radius_fragment(band_read, &class, budget)?;
+        let fragment = radius_strip_fragment(strip_read);
+        class.decode(&fragment)
+    }
 }
 
 /// Per-relic refinement breakdown: one count per tier. Totals are sums.
@@ -3008,4 +3627,568 @@ mod tests {
             session.frames_skipped(),
         );
     }
+
+    // -----------------------------------------------------------------
+    // Radius decoder (pass 29, addendum #92)
+    // -----------------------------------------------------------------
+
+    /// The REAL scoped parts universe from the committed data dir —
+    /// the stress fixture is the shipped name set itself, so the
+    /// radii and classes under test are the production ones.
+    fn parts_universe() -> Universe {
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        crate::capture::load_universe(&base.join("data"))
+            .expect("load universe")
+            .parts
+    }
+
+    #[test]
+    fn radius_class_derives_the_neuroptics_blueprint_class() {
+        let u = parts_universe();
+        let class = u
+            .radius_class("Mag Prime Neuroptics Blueprint")
+            .expect("class exists");
+        assert_eq!(class.suffix().join(" "), "prime neuroptics blueprint");
+        assert_eq!(class.members().count(), 51);
+        let get = |name: &str| {
+            class
+                .members()
+                .find(|(n, _, _)| *n == name)
+                .map(|(_, h, t)| (h.to_owned(), t))
+        };
+        // Distances measured on the real universe (NEUROPTICS_BRIEF
+        // appendix): Mag's nearest head is Ash at 3, Chroma's is
+        // Khora at 3, Ember's is Gyre at 4 — all radii 1.
+        assert_eq!(get("Mag Prime Neuroptics Blueprint"), Some(("mag".into(), 1)));
+        assert_eq!(
+            get("Chroma Prime Neuroptics Blueprint"),
+            Some(("chroma".into(), 1))
+        );
+        assert_eq!(
+            get("Ember Prime Neuroptics Blueprint"),
+            Some(("ember".into(), 1))
+        );
+        // Ball-disjointness inputs hold by construction: 2t + 1 <= D.
+        for (name, head, t) in class.members() {
+            let d = class
+                .members()
+                .filter(|(n2, _, _)| *n2 != name)
+                .map(|(_, h2, _)| levenshtein_confusable_metric(head, h2))
+                .min()
+                .unwrap();
+            assert!(2 * t + 1 <= d, "{name}: radius {t} but nearest head at {d}");
+        }
+        // A name with no shared suffix has no class.
+        let solo = Universe::from_names(&["Unique Snowflake".to_string()]);
+        assert!(solo.radius_class("Unique Snowflake").is_none());
+    }
+
+    #[test]
+    fn radius_decoder_pinned_census_rows() {
+        let u = parts_universe();
+        // Margin refusals with best = truth whose fragments sit
+        // inside the truth's radius (NEUROPTICS_BRIEF table).
+        assert_eq!(
+            u.radius_decode("Xmag Prime Neuroptics Blueprint").as_deref(),
+            Some("Mag Prime Neuroptics Blueprint")
+        );
+        assert_eq!(
+            u.radius_decode("Xnova Pritr Neuroptics Blueprint").as_deref(),
+            Some("Nova Prime Neuroptics Blueprint")
+        );
+        assert_eq!(
+            u.radius_decode("“Ember Pri Neuroptics Blueprint").as_deref(),
+            Some("Ember Prime Neuroptics Blueprint")
+        );
+        // The Chroma/Khora limit, pinned honestly: "Bhioma" is a
+        // 2-edit corruption of "chroma", whose radius is 1 (Khora
+        // sits at distance 3). It stays refused — the decoder does
+        // NOT recover this row, by design.
+        assert_eq!(u.radius_decode("Bhioma Prime Neuroptics Blueprint"), None);
+        // The counter-class: gear word destroyed, best margin
+        // candidate a sibling (Nyx). Refused at tail alignment,
+        // and the fragment decodes under NEITHER candidacy.
+        assert_eq!(u.radius_decode("Inox Pring * europtics ” Blueprint"), None);
+        let nyx = u.radius_class("Nyx Prime Neuroptics Blueprint").unwrap();
+        assert_eq!(nyx.decode("inox"), None);
+        let equinox = u
+            .radius_class("Equinox Prime Neuroptics Blueprint")
+            .unwrap();
+        assert_eq!(equinox.decode("inox"), None);
+        // The non-metric witness (the stress test's find): "1aros"
+        // is ONE pairwise edit from both "inaros" and "lavos"
+        // (`1` bridges `i` and `l`), so under the pairwise
+        // distance their radius-1 balls would overlap. Under the
+        // metric closure d(inaros, lavos) = 2, both radii are 0,
+        // and the bridging fragment refuses — pinned so the
+        // closure is never "simplified" back away.
+        let class = u
+            .radius_class("Inaros Prime Neuroptics Blueprint")
+            .unwrap();
+        let t_of = |name: &str| {
+            class
+                .members()
+                .find(|(n, _, _)| *n == name)
+                .map(|(_, _, t)| t)
+                .unwrap()
+        };
+        assert_eq!(t_of("Inaros Prime Neuroptics Blueprint"), 0);
+        assert_eq!(t_of("Lavos Prime Neuroptics Blueprint"), 0);
+        assert_eq!(class.decode("1aros"), None);
+        assert_eq!(
+            class.decode("inaros").as_deref(),
+            Some("Inaros Prime Neuroptics Blueprint")
+        );
+    }
+
+    #[test]
+    fn radius_fragment_requires_the_class_suffix() {
+        let u = parts_universe();
+        let neuro = u.radius_class("Mag Prime Neuroptics Blueprint").unwrap();
+        // A chassis tail does not carry the neuroptics suffix: no
+        // fragment, even though the head would decode — this is
+        // the wrong-class guard (a "mag" head exists in both
+        // classes; only the tail tells them apart).
+        assert_eq!(
+            u.radius_fragment("Mag Prime Chassis Blueprint", &neuro, RADIUS_TAIL_BUDGET),
+            None
+        );
+        // The same read decodes in its OWN class.
+        assert_eq!(
+            u.radius_decode("Mag Prime Chassis Blueprint").as_deref(),
+            Some("Mag Prime Chassis Blueprint")
+        );
+    }
+
+    #[test]
+    fn radius_strip_fragment_cuts_at_prime() {
+        assert_eq!(radius_strip_fragment("“Mag Prime ¥"), "mag");
+        assert_eq!(radius_strip_fragment("Dual Zoren Prine"), "dual zoren");
+        assert_eq!(radius_strip_fragment("Xnova Pritr"), "xnova");
+        assert_eq!(radius_strip_fragment("auinox"), "auinox");
+        // Junk glyphs never survive the squash.
+        assert_eq!(radius_strip_fragment("* Mag * Prime"), "mag");
+    }
+
+    #[test]
+    fn radius_strip_decode_needs_the_band_class() {
+        let u = parts_universe();
+        // Band tail garbled beyond budget: the strip is never
+        // consulted (a strip fragment alone cannot pick a class).
+        assert_eq!(
+            u.radius_decode_strip(
+                "Inox Pring * europtics ” Blueprint",
+                "Inox Prime",
+                RADIUS_TAIL_BUDGET
+            ),
+            None
+        );
+        // Band read establishes + verifies the class; the strip
+        // fragment decodes inside it.
+        assert_eq!(
+            u.radius_decode_strip(
+                "Xmag Prime Neuroptics Blueprint",
+                "“Mag Prime ¥",
+                RADIUS_TAIL_BUDGET
+            )
+            .as_deref(),
+            Some("Mag Prime Neuroptics Blueprint")
+        );
+    }
+
+    #[test]
+    fn radius_decoder_frame11_false_accepts_now_refuse() {
+        let u = parts_universe();
+        // Pass-29 gate, attempt 1: the only two false accepts in
+        // 495 cells, both from the frame-parts-11 mid-scroll
+        // composite, whose cells carry another item's line 1 only
+        // (truths: Nezha / Nova Prime Systems Blueprint). The tail
+        // witnesses "prime" and nothing else; the old alignment
+        // charged a flat 3 for the wholly deleted distinguishing
+        // token, "verified" the chassis class, and the fragment
+        // decoded. The witnessed-token rule refuses both — asserted
+        // at the production budget AND at a lax 8, pinning the
+        // refusal as structural rather than a tuned threshold.
+        for budget in [RADIUS_TAIL_BUDGET, 8] {
+            assert_eq!(u.radius_decode_budget("Nezh rime", budget), None);
+            assert_eq!(u.radius_decode_budget("Nova Prime", budget), None);
+        }
+        // Through the strip path too: the band tail never
+        // verifies, so a strip fragment is never consulted.
+        assert_eq!(
+            u.radius_decode_strip("Nova Prime", "Nova Prime", RADIUS_TAIL_BUDGET),
+            None
+        );
+        // The two reads exercise the two defences separately, and
+        // both facts are pinned: "Nezh rime"'s best candidate
+        // scores 0.47 — below the plausibility floor, so it never
+        // nominates a class — while "Nova Prime"'s best candidate
+        // is "Nova Prime Chassis" at 0.56, ABOVE the floor, and is
+        // stopped by witnessing alone.
+        let (_, nezh_score, _) = u.best_match_margin("Nezh rime").unwrap();
+        assert!(
+            nezh_score < RADIUS_MIN_CANDIDATE_SCORE,
+            "Nezh rime best scores {nezh_score}, expected below the floor"
+        );
+        let (nova_name, nova_score, _) = u.best_match_margin("Nova Prime").unwrap();
+        assert_eq!(nova_name, "Nova Prime Chassis");
+        assert!(
+            nova_score >= RADIUS_MIN_CANDIDATE_SCORE,
+            "Nova Prime best scores {nova_score}, expected at/above the floor"
+        );
+    }
+
+    #[test]
+    fn radius_tail_alignment_requires_witnessed_suffix_tokens() {
+        let u = parts_universe();
+        let class = u
+            .radius_class("Mag Prime Neuroptics Blueprint")
+            .expect("class exists");
+        // Missing final suffix token: the fragment is perfect and
+        // would decode, but "blueprint" is witnessed by nothing,
+        // so there is no fragment at all.
+        assert_eq!(
+            u.radius_fragment("Mag Prime Neuroptics", &class, RADIUS_TAIL_BUDGET),
+            None
+        );
+        // A missing MIDDLE token fails the same way ("neuroptics"
+        // unwitnessed; the trailing "blueprint" cannot substitute
+        // for it — witnesses are ordered).
+        assert_eq!(
+            u.radius_fragment("Mag Prime Blueprint", &class, RADIUS_TAIL_BUDGET),
+            None
+        );
+        // A truncated final token within the witness cap still
+        // verifies ("bluepri" sits at distance 2 from "blueprint")
+        // and the read decodes through the public path.
+        assert_eq!(
+            u.radius_fragment("Mag Prime Neuroptics Bluepri", &class, RADIUS_TAIL_BUDGET)
+                .as_deref(),
+            Some("mag")
+        );
+        assert_eq!(
+            u.radius_decode("Mag Prime Neuroptics Bluepri").as_deref(),
+            Some("Mag Prime Neuroptics Blueprint")
+        );
+        // One junk token inside the tail is priced
+        // (RADIUS_TOKEN_EDIT) but allowed: the suffix tokens
+        // around it are all witnessed.
+        assert_eq!(
+            u.radius_fragment(
+                "Mag Prime x9 Neuroptics Blueprint",
+                &class,
+                RADIUS_TAIL_BUDGET
+            )
+            .as_deref(),
+            Some("mag")
+        );
+    }
+
+    /// Tiny deterministic RNG (xorshift64*) for seeded corruptions —
+    /// the stress test must be reproducible in CI.
+    fn xorshift(state: &mut u64) -> u64 {
+        let mut x = *state;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        *state = x;
+        x.wrapping_mul(0x2545F4914F6CDD1D)
+    }
+
+    #[test]
+    fn bounded_levenshtein_agrees_with_unbounded() {
+        let alpha: Vec<char> = "abcde01sbg£$|".chars().collect();
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut mk = |state: &mut u64| -> String {
+            let n = (xorshift(state) % 15) as usize;
+            (0..n)
+                .map(|_| alpha[(xorshift(state) as usize) % alpha.len()])
+                .collect()
+        };
+        for _ in 0..3000 {
+            let a = mk(&mut state);
+            let b = mk(&mut state);
+            for (d, bd) in [
+                (
+                    levenshtein_confusable(&a, &b),
+                    Box::new(|l: usize| levenshtein_confusable_bounded(&a, &b, l))
+                        as Box<dyn Fn(usize) -> usize>,
+                ),
+                (
+                    levenshtein_confusable_metric(&a, &b),
+                    Box::new(|l: usize| levenshtein_confusable_metric_bounded(&a, &b, l))
+                        as Box<dyn Fn(usize) -> usize>,
+                ),
+            ] {
+                for limit in 0..=6usize {
+                    let bd = bd(limit);
+                    assert_eq!(
+                        bd <= limit,
+                        d <= limit,
+                        "a={a:?} b={b:?} d={d} limit={limit} bounded={bd}"
+                    );
+                    if d <= limit {
+                        assert_eq!(bd, d, "a={a:?} b={b:?} limit={limit}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Alphabet for synthetic corruptions: a–z plus the junk glyphs
+    /// and digit confusions the census actually observed.
+    const STRESS_ALPHABET: &[char] = &[
+        'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r',
+        's', 't', 'u', 'v', 'w', 'x', 'y', 'z', '"', '“', '”', '‘', '*', '¥', '0', '1', '5', '8',
+    ];
+
+    fn one_edit_variants(head: &str) -> Vec<String> {
+        let chars: Vec<char> = head.chars().collect();
+        let mut out = Vec::new();
+        for i in 0..chars.len() {
+            let mut v = chars.clone();
+            v.remove(i);
+            out.push(v.iter().collect());
+        }
+        for i in 0..chars.len() {
+            for &c in STRESS_ALPHABET {
+                if c != chars[i] {
+                    let mut v = chars.clone();
+                    v[i] = c;
+                    out.push(v.iter().collect());
+                }
+            }
+        }
+        for i in 0..=chars.len() {
+            for &c in STRESS_ALPHABET {
+                let mut v = chars.clone();
+                v.insert(i, c);
+                out.push(v.iter().collect());
+            }
+        }
+        out
+    }
+
+    /// All substitutions of confusable twins (the zero-cost pairs of
+    /// [`confusable`]) over subsets of the applicable positions.
+    fn confusable_variants(head: &str) -> Vec<String> {
+        fn twins(c: char) -> &'static [char] {
+            match c {
+                'o' => &['0'],
+                'i' | 'l' => &['1', '|'],
+                's' => &['5', '$'],
+                'b' => &['8'],
+                'z' => &['2'],
+                'g' => &['6'],
+                'e' => &['£'],
+                '0' => &['o'],
+                '1' => &['i', 'l'],
+                '5' => &['s'],
+                '8' => &['b'],
+                '2' => &['z'],
+                '6' => &['g'],
+                _ => &[],
+            }
+        }
+        let chars: Vec<char> = head.chars().collect();
+        let positions: Vec<usize> = (0..chars.len())
+            .filter(|&i| !twins(chars[i]).is_empty())
+            .collect();
+        let mut out = Vec::new();
+        // Singles with every twin.
+        for &i in &positions {
+            for &t in twins(chars[i]) {
+                let mut v = chars.clone();
+                v[i] = t;
+                out.push(v.iter().collect());
+            }
+        }
+        // All subsets (first twin each) when the subset space is small.
+        if positions.len() <= 6 {
+            for mask in 1u32..(1 << positions.len()) {
+                let mut v = chars.clone();
+                for (bit, &i) in positions.iter().enumerate() {
+                    if mask & (1 << bit) != 0 {
+                        v[i] = twins(chars[i])[0];
+                    }
+                }
+                out.push(v.iter().collect());
+            }
+        }
+        out
+    }
+
+    fn junk_affix_variants(head: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for j in ['"', '“', '”', '*', '¥', 'x'] {
+            out.push(format!("{j}{head}"));
+            out.push(format!("{head}{j}"));
+            out.push(format!("{j}{head}{j}"));
+        }
+        out
+    }
+
+    fn random_corruption(head: &str, edits: usize, state: &mut u64) -> String {
+        let mut chars: Vec<char> = head.chars().collect();
+        for _ in 0..edits {
+            if chars.is_empty() {
+                break;
+            }
+            let op = xorshift(state) % 3;
+            let pos = (xorshift(state) as usize) % chars.len();
+            match op {
+                0 => chars[pos] = STRESS_ALPHABET[(xorshift(state) as usize) % STRESS_ALPHABET.len()],
+                1 => {
+                    chars.remove(pos);
+                }
+                _ => {
+                    let c = STRESS_ALPHABET[(xorshift(state) as usize) % STRESS_ALPHABET.len()];
+                    chars.insert(pos, c);
+                }
+            }
+        }
+        chars.iter().collect()
+    }
+
+    /// The gate's stress test (pass 29): for every multi-member
+    /// suffix class of the real parts universe, corrupt fixture
+    /// heads and assert the decoder's contract — a corruption
+    /// within the truth's radius ALWAYS decodes to the truth
+    /// (never a sibling, never a refusal: the balls are disjoint
+    /// by construction, so an in-radius fragment has exactly one
+    /// legal decode, and this test proves the implementation
+    /// realises the geometry). Out-of-radius corruptions carry no
+    /// promise (a corruption that lands inside a sibling's ball is
+    /// information-theoretically indistinguishable from that
+    /// sibling read cleanly); their sibling-accept count is
+    /// printed for the record.
+    #[test]
+    fn radius_decoder_stress_never_decodes_a_sibling_in_radius() {
+        let u = parts_universe();
+        // Distinct classes, keyed by suffix (membership is a
+        // function of the suffix alone).
+        let mut classes: Vec<RadiusClass> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for name in u.names() {
+            if let Some(class) = u.radius_class(name) {
+                if seen.insert(class.suffix().join(" ")) {
+                    classes.push(class);
+                }
+            }
+        }
+        assert!(classes.len() >= 20, "fixture covers the real class structure");
+        // The brief's named sibling classes get exhaustive 1-edit
+        // coverage of EVERY member; small classes likewise; other
+        // classes get exhaustive coverage of a seeded member sample
+        // plus the full cheap battery on every member.
+        const EXHAUSTIVE_SUFFIXES: &[&str] = &[
+            "prime neuroptics blueprint",
+            "prime systems blueprint",
+            "prime chassis blueprint",
+        ];
+        let mut state = 0xC0FF_EE15_600D_F00Du64;
+        let (mut decodes, mut in_radius, mut sibling_accepts) = (0u64, 0u64, 0u64);
+        for class in &classes {
+            let suffix = class.suffix().join(" ");
+            let members: Vec<(&str, &str, usize)> = class.members().collect();
+            // Construction invariant, asserted per class.
+            for (name, head, t) in &members {
+                let d = members
+                    .iter()
+                    .filter(|(n2, _, _)| n2 != name)
+                    .map(|(_, h2, _)| levenshtein_confusable_metric(head, h2))
+                    .min()
+                    .unwrap();
+                assert!(2 * t + 1 <= d, "{name}: radius {t}, nearest head {d}");
+            }
+            let exhaustive_all =
+                EXHAUSTIVE_SUFFIXES.contains(&suffix.as_str()) || members.len() <= 12;
+            // Decodes repeat heavily across members (junk and
+            // confusable variants collide); memoise per class.
+            let mut memo: HashMap<String, Option<String>> = HashMap::new();
+            let mut decode = |class: &RadiusClass, memo: &mut HashMap<String, Option<String>>, v: &str| {
+                memo.entry(v.to_owned())
+                    .or_insert_with(|| class.decode(v))
+                    .clone()
+            };
+            for (mi, (name, head, t)) in members.iter().enumerate() {
+                let mut variants: Vec<String> = Vec::new();
+                variants.extend(confusable_variants(head));
+                variants.extend(junk_affix_variants(head));
+                let sample = if members.len() > 100 { mi % 11 == 0 } else { mi % 5 == 0 };
+                if exhaustive_all || sample {
+                    variants.extend(one_edit_variants(head));
+                }
+                // Seeded random 2–3-edit corruptions.
+                let random_n = if members.len() >= 30 { 60 } else { 40 };
+                for _ in 0..random_n {
+                    let edits = 2 + (xorshift(&mut state) % 2) as usize;
+                    variants.push(random_corruption(head, edits, &mut state));
+                }
+                for v in &variants {
+                    decodes += 1;
+                    if v.is_empty() {
+                        // The empty fragment is no evidence at
+                        // all: decode refuses it by design, even
+                        // when a short head's radius would
+                        // formally contain it.
+                        assert_eq!(decode(class, &mut memo, v), None);
+                        continue;
+                    }
+                    let got = decode(class, &mut memo, v);
+                    if levenshtein_confusable_metric(v, head) <= *t {
+                        in_radius += 1;
+                        assert_eq!(
+                            got.as_deref(),
+                            Some(*name),
+                            "in-radius corruption {v:?} of head {head:?} (t={t}) must decode to the truth"
+                        );
+                    } else if let Some(g) = &got {
+                        if g != name {
+                            sibling_accepts += 1;
+                        }
+                    }
+                }
+            }
+            // Large classes additionally take a flat 10k seeded
+            // random battery across random members.
+            if members.len() >= 30 {
+                for _ in 0..10_000 {
+                    let (name, head, t) =
+                        members[(xorshift(&mut state) as usize) % members.len()];
+                    let edits = 2 + (xorshift(&mut state) % 2) as usize;
+                    let v = random_corruption(head, edits, &mut state);
+                    decodes += 1;
+                    if v.is_empty() {
+                        continue;
+                    }
+                    let got = decode(class, &mut memo, &v);
+                    if levenshtein_confusable_metric(&v, head) <= t {
+                        in_radius += 1;
+                        assert_eq!(
+                            got.as_deref(),
+                            Some(name),
+                            "in-radius random corruption {v:?} of {head:?} must decode to the truth"
+                        );
+                    } else if let Some(g) = &got {
+                        if g != name {
+                            sibling_accepts += 1;
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "radius stress: {} classes, {} decodes, {} in-radius (all decoded to truth), {} out-of-radius sibling accepts",
+            classes.len(),
+            decodes,
+            in_radius,
+            sibling_accepts
+        );
+        assert!(in_radius > 10_000, "the battery exercised the radii");
+    }
 }
+
+
+
+

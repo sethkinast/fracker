@@ -276,6 +276,9 @@ impl CaptureData {
             arcane_names: &self.arcane_names,
             classifier: &self.classifier,
             min_confidence: 0.5,
+            radius_decoder: true,
+            radius_strip: true,
+            radius_tail_budget: ocr::RADIUS_TAIL_BUDGET,
             debug_dir: Some(self.debug_dir.clone()),
         }
     }
@@ -400,6 +403,17 @@ pub struct CaptureContext<'a> {
     pub arcane_names: &'a HashSet<String>,
     pub classifier: &'a ScreenClassifier,
     pub min_confidence: f32,
+    /// Pass 29 (addendum #92): the radius decoder runs on refused
+    /// parts reads (see `ocr::Universe::radius_decode_budget`). The
+    /// flags exist so the census replay can A/B the decoder against
+    /// the pass-27 baseline through the production path itself.
+    pub radius_decoder: bool,
+    /// Whether a refused parts cell whose band fragment does not
+    /// decode earns a line-1 strip read + strip decode.
+    pub radius_strip: bool,
+    /// Tail-alignment budget for the decoder (see
+    /// `ocr::RADIUS_TAIL_BUDGET`).
+    pub radius_tail_budget: usize,
     /// When set, capture dumps evidence frames (the first frame, and
     /// the first frame of each recognised class) here as PNGs.
     pub debug_dir: Option<PathBuf>,
@@ -729,8 +743,9 @@ fn resolve_voted_stock(
 
 /// Read every cell of one classified frame into validated results. Mirrors
 /// [`ocr::ingest_folder`]'s per-page body: a partial cell at the viewport
-/// edge is never read (never guessed).
-fn read_frame(
+/// edge is never read (never guessed). Public as the census-replay seam
+/// (the pass-29 gate drives this exact function over the census frames).
+pub fn read_frame(
     layout: &Layout,
     frame: &GrayImage,
     engine: &dyn OcrEngine,
@@ -743,9 +758,9 @@ fn read_frame(
     let cells = layout.split(frame);
     let reads = engine.ocr_cells_in(&cells, layout);
     let mut results = Vec::with_capacity(reads.len());
-    for (index, read) in reads.into_iter().enumerate() {
+    for (index, read) in reads.iter().enumerate() {
         // A `None` cell (partial, at the viewport edge) is never read.
-        let read = read.unwrap_or_else(ocr::OcrRead::empty);
+        let read = read.clone().unwrap_or_else(ocr::OcrRead::empty);
         results.push(ocr::validate_read(
             &read,
             universe,
@@ -753,6 +768,85 @@ fn read_frame(
             layout.min_score,
             index,
         ));
+    }
+    // Pass 29 (addendum #92): radius-decode the parts reads the
+    // margin matcher refused. The decoder can only ADD holds — it
+    // runs after validation, touches only unheld parts cells, and
+    // its own evidence standard (verified class suffix + fragment
+    // inside a derived radius) replaces the margin/score gates for
+    // the cells it accepts; counts ride along exactly as on the
+    // margin path. Relic and arcane frames never reach this block.
+    if ctx.radius_decoder && layout.key == "parts" {
+        // Phase 1: band decodes — pure matcher work, no OCR.
+        let mut strip_pending: Vec<usize> = Vec::new();
+        for (index, result) in results.iter_mut().enumerate() {
+            if result.held {
+                continue;
+            }
+            let Some(read) = reads.get(index).and_then(|r| r.as_ref()) else {
+                continue;
+            };
+            if read.text.trim().is_empty() {
+                continue;
+            }
+            if let Some(name) =
+                universe.radius_decode_budget(&read.text, ctx.radius_tail_budget)
+            {
+                result.matched = Some(name);
+                result.held = true;
+                result.count = read.count;
+            } else if ctx.radius_strip {
+                strip_pending.push(index);
+            }
+        }
+        // Phase 2: line-1 strip reads for the cells the band
+        // fragment could not decode, batched through the engine
+        // (pass 29 re-gate — one batched read per frame instead of
+        // one tesseract spawn per refused cell, which cost
+        // +7.2 s/frame unbatched on the first gate). The strip is
+        // the name band's top strip (band-relative y 0.00–0.40),
+        // single-line mode: the strip the verification measured at
+        // 27/39 with radius decoding (NEUROPTICS_BRIEF appendix).
+        // Acceptance logic is unchanged by the batching: a strip
+        // fragment decodes only inside the class the BAND read
+        // nominated and tail-verified.
+        if !strip_pending.is_empty() {
+            let band = layout.name;
+            let strip = [
+                band[0],
+                band[1],
+                band[2],
+                band[1] + 0.40 * (band[3] - band[1]),
+            ];
+            let pending: Vec<(usize, &GrayImage)> = strip_pending
+                .iter()
+                .filter_map(|&index| {
+                    cells
+                        .get(index)
+                        .and_then(|c| c.as_ref())
+                        .map(|cell| (index, cell))
+                })
+                .collect();
+            let requests: Vec<(&GrayImage, [f32; 4], u32, u32)> =
+                pending.iter().map(|(_, cell)| (*cell, strip, 7, 4)).collect();
+            let texts = engine.read_text_batch(&requests);
+            for ((index, _), text) in pending.iter().zip(texts.iter()) {
+                if text.trim().is_empty() {
+                    continue;
+                }
+                let Some(read) = reads.get(*index).and_then(|r| r.as_ref()) else {
+                    continue;
+                };
+                if let Some(name) =
+                    universe.radius_decode_strip(&read.text, text, ctx.radius_tail_budget)
+                {
+                    let result = &mut results[*index];
+                    result.matched = Some(name);
+                    result.held = true;
+                    result.count = read.count;
+                }
+            }
+        }
     }
     results
 }
@@ -1227,6 +1321,9 @@ mod tests {
             arcane_names: &arcane_names,
             classifier: &classifier,
             min_confidence: 0.5,
+            radius_decoder: true,
+            radius_strip: true,
+            radius_tail_budget: crate::ocr::RADIUS_TAIL_BUDGET,
             debug_dir: None,
         };
         let mut session = CaptureSession::new();
@@ -1318,6 +1415,9 @@ mod tests {
             arcane_names: &arcane_names,
             classifier: &classifier,
             min_confidence: 0.5,
+            radius_decoder: true,
+            radius_strip: true,
+            radius_tail_budget: crate::ocr::RADIUS_TAIL_BUDGET,
             debug_dir: None,
         };
         let mut session = CaptureSession::new();
@@ -1370,6 +1470,9 @@ mod tests {
             arcane_names: &arcane_names,
             classifier: &classifier,
             min_confidence: 0.5,
+            radius_decoder: true,
+            radius_strip: true,
+            radius_tail_budget: crate::ocr::RADIUS_TAIL_BUDGET,
             debug_dir: Some(dir.clone()),
         };
         let mut session = CaptureSession::new();
@@ -1511,6 +1614,9 @@ mod tests {
             arcane_names: &arcane_names,
             classifier: &classifier,
             min_confidence: 0.5,
+            radius_decoder: true,
+            radius_strip: true,
+            radius_tail_budget: crate::ocr::RADIUS_TAIL_BUDGET,
             debug_dir: None,
         };
         let read = |count: u32| crate::ocr::OcrRead {
@@ -1687,6 +1793,9 @@ mod tests {
                         arcane_names: &arcane_names,
                         classifier: &classifier,
                         min_confidence: 0.5,
+                        radius_decoder: true,
+                        radius_strip: true,
+                        radius_tail_budget: crate::ocr::RADIUS_TAIL_BUDGET,
                         debug_dir: None,
                     };
                     let session = run_capture(
