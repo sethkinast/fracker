@@ -1429,6 +1429,11 @@ it refines the brief where they disagree. For the next worker pass.
     TWO Blades and TWO Handles (five parts total);
     Akarius Prime is a second example; the pattern
     is mostly but not always melee/dual weapons.
+    Stretch case (Seth, 2026-10-25): Zhuge Prime
+    requires SIX parts in total across its
+    components — if the quantity model and the
+    segmented-pip rendering handle Zhuge, they
+    handle the roster.
     Seth could only verify this once parts started
     showing up in the planner. Current state: the
     roster's parts are name-only (no quantity field
