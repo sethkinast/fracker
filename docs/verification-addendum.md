@@ -1182,3 +1182,29 @@ it refines the brief where they disagree. For the next worker pass.
     below it; the Backlog section split already treats
     Varzia-live as its own class — the badge never got
     the same condition. QUEUED for the next build.
+89. **Built components are first-class capture stock
+    (Seth, 2026-10-25; resolves the census's open
+    product question).** A built component and its
+    blueprint are both valid evidence of progress on
+    the parent item, so capture must recognise BOTH
+    forms. The Parts screen shows them as distinct
+    stacks — e.g. "Gauss Prime Chassis Blueprint" and
+    the built "Gauss Prime Chassis" — while the roster
+    (and therefore the OCR universe built from it)
+    carries only the blueprint forms, which is why the
+    census found built components unvalidatable by
+    construction. Rules: (1) the screen-scoped Parts
+    universe in pass 27 gains the built form of every
+    roster component blueprint (a part named "<Gear>
+    <Component> Blueprint"; the gear's own "<Gear>
+    Blueprint" has no loose built counterpart — its
+    built result is the gear itself); (2) stock.json
+    keeps the two forms as separate keys under their
+    exact screen names — the dump stays literal, no
+    folding at capture time; (3) progress consumption
+    (#84) canonicalises the two forms onto the same
+    roster part and SUMS their counts toward the
+    required quantity (built x1 + blueprint x1 = two
+    component-equivalents). The Kavasa exclusion (#22)
+    is a backlog decision and is not disturbed by this
+    item. Folded into pass 27's scope.
