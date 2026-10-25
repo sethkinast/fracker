@@ -1538,3 +1538,44 @@ it refines the brief where they disagree. For the next worker pass.
     unit. Quantities are also a prerequisite input
     for #77's per-item resolution (a part at 1/2
     still needs farming).
+95. **Radius decoder strip phase mints false accepts
+    from artefact fragments (found 2026-10-25 by the
+    high-contrast evaluation; SHIPPED DEFECT in
+    v0.5.24+).** On the HC frame set the shipped
+    pipeline produced 6 false-accept cells (2 distinct
+    names) against the standard-theme gate's zero.
+    Five are strip-phase decodes in the Prime Receiver
+    class: band reads with destroyed gear words
+    ("a Prime Receiver", "x Prime Receiver") are
+    refused by the margin matcher, then the line-1
+    strip returns a 2-character artefact fragment
+    ("Le", "le", "ie" — identical across Knell,
+    Hystrix and Velox cells: the class icon's edge
+    renders deterministically in the strip crop) that
+    sits inside the radius of the 3-char head "lex"
+    (d=1 <= t=1) and is held as Lex Prime Receiver.
+    Worst case: Hystrix, whose margin best was the
+    TRUTH at 0.955, refused at margin 0.098, then
+    converted into a wrong hold by the strip. The
+    sixth false accept is a margin-path sibling win
+    (Volt Prime Systems Blueprint -> Volt Prime
+    Blueprint). Root gap: the decoder imposes no
+    minimum-evidence requirement on fragments — a
+    2-char artefact carries too little information
+    to identify a head, yet Levenshtein charges its
+    missing character as a single in-radius deletion.
+    The mechanism is theme-independent in principle
+    (the artefact is class-icon geometry in the strip
+    crop); HC made it systematic, and the standard-
+    theme census simply never produced the shape.
+    Both wrong names were items Seth owns, so this
+    run's damage was count-vote pollution, not
+    phantom stock — the minting mechanism is
+    nevertheless proven against shipped code. Fix
+    direction (not yet commissioned): a
+    minimum-evidence rule for strip fragments (e.g.
+    a length floor relative to the head), regression
+    tests from the HC cells, and a dual re-gate —
+    the standard census must stay 146/0 and the HC
+    set must reach 0 false accepts. Full data:
+    ~/workspace/fracker-frames/hc/HC_REPORT.md.
