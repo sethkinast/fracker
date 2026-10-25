@@ -1224,6 +1224,17 @@ it refines the brief where they disagree. For the next worker pass.
     pinning render test are in
     docs/twenty-eighth-pass.md — visual confirmation
     on Seth's next session is the remaining check.
+    VISUAL VERDICT (Seth, 2026-10-25, false-color
+    screenshot of the crack queue): STILL WRONG.
+    Seth's prescribed fix: take the padding off the
+    container and add it to each row item, so the
+    accent border can float away from the icon —
+    the ::before bar currently sits at the panel's
+    padded content edge, flush with the row's outer
+    box; with the padding moved onto the rows, the
+    bar sits in the row's own padding zone, visibly
+    separated from the icon. Build follows as its
+    own pass.
 88. **Varzia supersedes the vault badge in Hunt (Seth,
     2026-10-25).** A vaulted goal that is live at Varzia
     shows BOTH the "V" badge and the "◆ In Varzia"
