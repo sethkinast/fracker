@@ -1235,6 +1235,30 @@ it refines the brief where they disagree. For the next worker pass.
     bar sits in the row's own padding zone, visibly
     separated from the icon. Build follows as its
     own pass.
+    RESOLVED (pass 31, v0.5.26, 2026-10-25):
+    Seth's prescription implemented literally. The
+    crack-queue section is now <section
+    class="panel cq"> (emitted only by
+    crack_queue_panel) with .panel.cq shedding the
+    container's horizontal padding (padding-left/
+    right 0); each row item carries it instead
+    (.cq .ch{padding-left:18px;padding-right:18px}),
+    and the header keeps its inset via the same
+    18px on .cq h2. The base .panel rule is
+    untouched, so no other section shifts. The
+    pass-28 ::before construction is unchanged;
+    with the row box now starting at the panel's
+    border edge, the bar at left:0 sits in the
+    row's own padding zone, floated away from the
+    icon. Row content keeps its exact visual
+    position; the rows' border-top separators and
+    the NEXT gradient now span the panel's full
+    width, as the prescribed structure entails.
+    Pinned by the extended #87 render test; 285
+    tests green; flatpak CI 40225167567 success.
+    docs/thirty-first-pass.md. Visual confirmation
+    on Seth's next live session remains the final
+    check, as it was for pass 28.
 88. **Varzia supersedes the vault badge in Hunt (Seth,
     2026-10-25).** A vaulted goal that is live at Varzia
     shows BOTH the "V" badge and the "◆ In Varzia"
