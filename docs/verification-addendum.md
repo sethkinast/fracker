@@ -1579,3 +1579,30 @@ it refines the brief where they disagree. For the next worker pass.
     the standard census must stay 146/0 and the HC
     set must reach 0 false accepts. Full data:
     ~/workspace/fracker-frames/hc/HC_REPORT.md.
+    RESOLVED (pass 32, v0.5.27, 2026-10-25):
+    Seth commissioned the hardening and it shipped.
+    The decoder's acceptance test (RadiusClass::
+    decode — the single point both band and strip
+    fragments are judged) now carries the
+    minimum-evidence floor |F| >= max(3, |H| - t_H):
+    a fragment decodes only when it carries at least
+    3 characters and accounts for the head to within
+    its radius in length. The five HC shapes are
+    pinned as regression tests through the public
+    strip path (plus the genuine counter-case: a
+    clean "lex" strip fragment still decodes), and
+    the stress battery's assertions now include the
+    floor — of its 227,907 in-radius corruptions,
+    497 are sub-3-char fragments of short heads that
+    refuse by design (counted and printed, not
+    dropped), and out-of-radius sibling accepts fell
+    284 -> 225 on the same rule. Dual re-gate, both
+    in full: the standard census is unchanged at
+    146 union / 0 false, and the HC set reaches
+    0 decoder false accepts with distinct-held
+    unchanged at 142 (the one remaining HC false
+    accept is the pre-existing Volt margin-path
+    cell, a different mechanism, left as designed).
+    The session-level artefact-repetition layer was
+    not needed and was not built. Details:
+    docs/thirty-second-pass.md.
