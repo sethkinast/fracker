@@ -1075,3 +1075,32 @@ it refines the brief where they disagree. For the next worker pass.
     (sequence-named), and writes PNGs off the reader thread.
     Glyph/throughput work on Parts follows once the training
     frames are in hand.
+83. **The capture that ended itself (Seth, 2026-10-24,
+    v0.5.20): header misclassification, root-caused from his
+    own frames.** A parts capture finalised on its own at
+    ~34 s (161 seen / 2 read / 159 skipped, 25 parts) with no
+    tray stop. Mechanism, verified by running Seth's three
+    uploaded frames through the production classifier: the
+    header matcher used exact substring search, and the title
+    font defeats it — "INVENTORY" read back as "VENTORY" in
+    all three frames (the IN ligature drops), so Parts rode
+    entirely on "SELL"; the frame whose read split it ("SEL
+    L") classified Other. Consequences compounded: the #81
+    header cache made the bad class sticky per header-hash,
+    and the idle-stop (90 consecutive idle frames, "left the
+    inventory") counted every subsequent frame toward
+    auto-finalise. This also explains #80(a): under v0.5.18
+    the Parts header simply never won its OCR roll. Pass 26
+    (v0.5.21): (1) classify_text normalises to squashed
+    alphanumerics and adds a confusable-aware fuzzy window
+    match (allowance 1 edit, 2 for keywords >= 8 chars) —
+    all three real reads now classify Parts, pinned as
+    fixtures; (2) idle accrues only after 3 CONSECUTIVE fresh
+    Other classifications, and a fresh real classification
+    resets the streak — one misread can no longer end a
+    capture (a perfectly static exit screen no longer
+    auto-stops; animated menus/gameplay still do, and the
+    tray toggle remains the primary stop); (3) finalize now
+    logs header samples and the debug-frame list on EVERY
+    capture, not only zero-collection ones — the partial case
+    is exactly where that evidence matters.

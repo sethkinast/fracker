@@ -141,10 +141,30 @@ impl ScreenClassifier {
 
     /// Score a header string against the keyword tables. Pure + tested.
     pub fn classify_text(&self, text: &str) -> ScreenClass {
-        let up = text.to_ascii_uppercase();
+        // Normalise before matching (addendum #83): the title
+        // font loses and splits glyphs under OCR — "INVENTORY"
+        // reads back "VENTORY" (the IN ligature drops) and
+        // "SELL" as "SEL L". Squashing to alphanumerics removes
+        // the split artefacts; the fuzzy window pass forgives
+        // the dropped ones. Exact substring matching on the raw
+        // text classified by luck: all three of Seth's real
+        // 2026-10-24 header reads lost "INVENTORY", and one
+        // split "SELL" too — that frame went Other.
+        let squashed: String = text
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .map(|c| c.to_ascii_uppercase())
+            .collect();
         let score = |kws: &[String]| {
             kws.iter()
-                .filter(|k| up.contains(&k.to_ascii_uppercase()))
+                .filter(|k| {
+                    let k: String = k
+                        .chars()
+                        .filter(|c| c.is_ascii_alphanumeric())
+                        .map(|c| c.to_ascii_uppercase())
+                        .collect();
+                    squashed.contains(&k) || fuzzy_keyword_present(&squashed, &k)
+                })
                 .count()
         };
         let mut best = (ScreenClass::Other, 0usize);
@@ -177,6 +197,35 @@ impl ScreenClassifier {
         let class = self.classify_text(&text);
         (class, text)
     }
+}
+
+/// Is `keyword` present in the squashed header text up to a small
+/// edit distance? Slides windows of keyword-length ±2 over the
+/// text and takes the best confusable-aware distance; the
+/// allowance is 1 edit for short keywords, 2 for long ones (a
+/// dropped ligature like INVENTORY's "IN" costs exactly 2). The
+/// window count is tiny — this runs once per fresh header.
+fn fuzzy_keyword_present(squashed: &str, keyword: &str) -> bool {
+    let hay: Vec<char> = squashed.chars().collect();
+    let needle: Vec<char> = keyword.chars().collect();
+    if needle.len() < 4 || hay.len() < needle.len() - 2 {
+        return false;
+    }
+    let allowance = if needle.len() >= 8 { 2 } else { 1 };
+    let lo = needle.len().saturating_sub(2).max(1);
+    let hi = needle.len() + 2;
+    for wlen in lo..=hi {
+        if wlen > hay.len() {
+            break;
+        }
+        for start in 0..=(hay.len() - wlen) {
+            let window: String = hay[start..start + wlen].iter().collect();
+            if crate::ocr::levenshtein_confusable(&window, keyword) <= allowance {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// The static inputs a capture run needs (loaded once from `data/`). Built
@@ -333,6 +382,13 @@ pub struct CaptureSession {
     /// instead of paying another tesseract spawn per frame.
     last_header: Option<(u64, ScreenClass, String)>,
     idle: u64,
+    /// Consecutive FRESH header classifications that came back
+    /// Other (addendum #83). Idle only accrues once this reaches
+    /// 3: a single OCR misread — now sticky under its header-hash
+    /// cache entry — must not be able to end a capture that is
+    /// still inside the inventory. Genuinely leaving produces
+    /// fresh Other reads continuously and crosses 3 at once.
+    fresh_other_streak: u64,
     frames_seen: u64,
     frames_read: u64,
     frames_skipped: u64,
@@ -406,7 +462,7 @@ impl CaptureSession {
             self.frames_skipped += 1;
             if matches!(self.last_class, Some(c) if c != ScreenClass::Other) {
                 self.idle = 0;
-            } else {
+            } else if self.fresh_other_streak >= 3 {
                 self.idle += 1;
             }
             return;
@@ -423,6 +479,13 @@ impl CaptureSession {
             }
         };
         self.last_class = Some(class);
+        if header_fresh {
+            if class == ScreenClass::Other {
+                self.fresh_other_streak += 1;
+            } else {
+                self.fresh_other_streak = 0;
+            }
+        }
         if header_fresh && self.header_samples.len() < 10 {
             let flat: String = header_text
                 .split_whitespace()
@@ -439,7 +502,9 @@ impl CaptureSession {
         let Some(layout) = class.layout_key().and_then(|k| ctx.layouts.get(k)) else {
             // No screen recognised — pause, do not read the wrong grid.
             self.frames_skipped += 1;
-            self.idle += 1;
+            if self.fresh_other_streak >= 3 {
+                self.idle += 1;
+            }
             return;
         };
         self.idle = 0;
@@ -934,6 +999,23 @@ mod tests {
         // A menu/gameplay frame matches nothing -> Other (pause).
         assert_eq!(c.classify_text("Navigation  Star Chart"), ScreenClass::Other);
         assert_eq!(c.idle_stop_frames, 5);
+        // Addendum #83: Seth's real header reads, 2026-10-24
+        // (v0.5.20 run). The title font drops the "IN" ligature
+        // in every read; the third also splits "SELL" and went
+        // Other under the old exact-substring match — the
+        // misclassification that auto-finalised a live capture.
+        assert_eq!(
+            c.classify_text("rene (SIN V ENT O R Y / SELL ny ee # | 53,212,704 @4,004"),
+            ScreenClass::Parts
+        );
+        assert_eq!(
+            c.classify_text("i _ SI VENTOR fi SELL toca & | 53,212,704 @4,004"),
+            ScreenClass::Parts
+        );
+        assert_eq!(
+            c.classify_text("ae VENTOR Y/ SEL L Bee. $i | 453,212,704 &4,004"),
+            ScreenClass::Parts
+        );
         // The shipped file parses and covers all three classes.
         let shipped = ScreenClassifier::load(
             &Path::new(env!("CARGO_MANIFEST_DIR")).join("data/capture/screens.toml"),
@@ -1020,7 +1102,102 @@ mod tests {
         assert_eq!(session.header_samples.len(), 2);
     }
 
+    /// An engine whose header read returns scripted texts in
+    /// order (repeating the last one when the script runs out).
+    struct ScriptedEngine {
+        texts: std::sync::Mutex<std::collections::VecDeque<String>>,
+    }
+
+    impl crate::ocr::OcrEngine for ScriptedEngine {
+        fn name(&self) -> &str {
+            "scripted"
+        }
+
+        fn ocr_cell(&self, _cell: &GrayImage) -> crate::ocr::OcrRead {
+            crate::ocr::OcrRead::empty()
+        }
+
+        fn read_text(
+            &self,
+            _image: &GrayImage,
+            _region: [f32; 4],
+            _psm: u32,
+            _upscale: u32,
+        ) -> String {
+            let mut q = self.texts.lock().unwrap();
+            if q.len() > 1 {
+                q.pop_front().unwrap()
+            } else {
+                q.front().cloned().unwrap_or_default()
+            }
+        }
+    }
+
     #[test]
+    fn idle_needs_three_consecutive_fresh_other_classifications() {
+        // Addendum #83: one header misread must not be able to
+        // end a capture. Idle accrues only from the third
+        // consecutive FRESH Other classification on; a fresh real
+        // classification resets the streak.
+        let engine = ScriptedEngine {
+            texts: std::sync::Mutex::new(
+                [
+                    "INVENTORY / SELL", // fresh Parts — streak 0
+                    "unreadable banner", // fresh Other — streak 1
+                    "unreadable banner", // fresh Other — streak 2
+                    "unreadable banner", // fresh Other — streak 3: idle starts
+                    "INVENTORY / SELL", // fresh Parts — streak resets
+                    "unreadable banner", // fresh Other — streak 1 again
+                ]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            ),
+        };
+        let universe = Universe::from_names(&[]);
+        let layouts = HashMap::new();
+        let relic_names = HashSet::new();
+        let arcane_names = HashSet::new();
+        let classifier = classifier();
+        let ctx = CaptureContext {
+            layouts: &layouts,
+            universe: &universe,
+            relic_names: &relic_names,
+            arcane_names: &arcane_names,
+            classifier: &classifier,
+            min_confidence: 0.5,
+            debug_dir: None,
+        };
+        let mut session = CaptureSession::new();
+        // Header values >=16 apart => distinct header-cache keys
+        // => every frame is a FRESH classification; body steps
+        // move the coarse frame signature so no frame takes the
+        // unchanged-screen shortcut.
+        let frame = |header_v: u8, body_v: u8| {
+            let mut img = GrayImage::blank(100, 100, body_v);
+            for y in 0..12 {
+                for x in 0..100 {
+                    img.set(x, y, header_v);
+                }
+            }
+            img
+        };
+        // No layouts in ctx: even Parts frames take the no-layout
+        // branch, which is where idle used to accrue per frame.
+        session.process_frame(&ctx, &engine, &frame(32, 10));
+        assert_eq!(session.idle_frames(), 0);
+        session.process_frame(&ctx, &engine, &frame(64, 60));
+        assert_eq!(session.idle_frames(), 0, "first fresh Other must not accrue idle");
+        session.process_frame(&ctx, &engine, &frame(96, 110));
+        assert_eq!(session.idle_frames(), 0, "second fresh Other must not accrue idle");
+        session.process_frame(&ctx, &engine, &frame(128, 160));
+        assert_eq!(session.idle_frames(), 1, "third consecutive fresh Other accrues idle");
+        session.process_frame(&ctx, &engine, &frame(160, 210));
+        assert_eq!(session.idle_frames(), 1, "fresh Parts resets the streak, no accrual");
+        session.process_frame(&ctx, &engine, &frame(192, 250));
+        assert_eq!(session.idle_frames(), 1, "a lone fresh Other after reset does not accrue");
+    }
+
     #[test]
     fn debug_dumps_land_in_the_given_dir_with_sequence_names() {
         // Addendum #82: dumps go to the context's debug dir (the

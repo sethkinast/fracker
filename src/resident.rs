@@ -768,17 +768,21 @@ async fn finalize_capture(
             session.frames_skipped()
         ),
     );
+    // Header samples and the debug-frame list are evidence on
+    // EVERY finalize (addendum #83): a partial capture is exactly
+    // when the classification record matters, and gating them on
+    // zero-collection hid the 2026-10-24 misclassification run.
+    for (class, text) in &session.header_samples {
+        log.record("finalizing", &format!("header OCR [{}]: {text}", class.label()));
+    }
+    if !session.debug_files.is_empty() {
+        log.record(
+            "finalizing",
+            &format!("debug frames written: {}", session.debug_files.join(", ")),
+        );
+    }
     if !session.has_any() {
         log.record("finalizing", "nothing collected — stock untouched");
-        for (class, text) in &session.header_samples {
-            log.record("finalizing", &format!("header OCR [{}]: {text}", class.label()));
-        }
-        if !session.debug_files.is_empty() {
-            log.record(
-                "finalizing",
-                &format!("debug frames written: {}", session.debug_files.join(", ")),
-            );
-        }
         set_capture_stage(status, log, CaptureStage::Idle);
         refresh_tray(tray).await;
         return false;
