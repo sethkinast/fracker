@@ -578,7 +578,7 @@ fn crack_queue_panel(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     let cracks: Vec<&crate::plan::Chunk> =
         plan.chunks.iter().filter(|c| c.crack.is_some()).collect();
     let mut h = String::new();
-    h.push_str("<section class=\"panel\">\n");
+    h.push_str("<section class=\"panel cq\">\n");
     let small = match cracks.first().and_then(|c| c.crack.as_ref()) {
         Some(ci) => {
             let steel = if ci.steel_path {
@@ -1237,6 +1237,9 @@ h3{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--mut)
 .pill{margin-left:auto;font-style:normal;color:var(--gold);border:1px solid var(--gold);padding:0 8px;font-size:11px;letter-spacing:.08em}
 .g2{display:grid;grid-template-columns:minmax(0,.85fr) minmax(0,1.15fr);gap:14px;margin-bottom:14px}.g2.b{grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr)}
 .panel{background:var(--panel);border:1px solid var(--line);padding:16px 18px;clip-path:polygon(10px 0,100% 0,100% calc(100% - 10px),calc(100% - 10px) 100%,0 100%,0 10px)}
+.panel.cq{padding-left:0;padding-right:0}
+.cq h2{padding-left:18px;padding-right:18px}
+.cq .ch{padding-left:18px;padding-right:18px}
 .row{display:grid;align-items:center;gap:12px;padding:9px 0;border-top:1px solid #1c2330}.row:first-of-type{border-top:0}
 .ev{grid-template-columns:64px 1fr auto}.ch{grid-template-columns:40px 1fr auto auto}
 .tm{font-size:21px;font-weight:700;color:var(--tx)}.tm.hot{color:var(--amb)}.tm.warm{color:var(--gold)}
@@ -2136,6 +2139,32 @@ mod tests {
             "NEXT accent bar is pinned to the row box"
         );
         assert!(!html.contains("inset 3px 0"), "the old inset-shadow accent is gone");
+        // Addendum #87 (pass 31): the crack-queue container carries no
+        // horizontal padding; each row item carries it instead, so the
+        // bar at the row's left:0 sits in the row's own padding zone,
+        // floated away from the icon. Scoped to the crack queue via
+        // the `cq` modifier — the base .panel rule is untouched, so
+        // every other section keeps its inset.
+        assert!(
+            p1.contains("<section class=\"panel cq\">"),
+            "crack queue panel is the padding-restructured one"
+        );
+        assert!(
+            html.contains(".panel.cq{padding-left:0;padding-right:0}"),
+            "crack queue container sheds its horizontal padding"
+        );
+        assert!(
+            html.contains(".cq .ch{padding-left:18px;padding-right:18px}"),
+            "crack rows carry the horizontal padding"
+        );
+        assert!(
+            html.contains(".cq h2{padding-left:18px;padding-right:18px}"),
+            "crack queue header keeps its inset"
+        );
+        assert!(
+            html.contains(".panel{background:var(--panel);border:1px solid var(--line);padding:16px 18px;"),
+            "base panel padding is unchanged for other sections"
+        );
         assert!(p1.contains("<em class=nx>NEXT</em>"));
         assert!(p1.contains("<b class=\"cy\">Neo C8</b>"));
         assert!(p1.contains("Radiant"));
