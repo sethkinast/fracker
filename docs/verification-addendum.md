@@ -1298,3 +1298,43 @@ it refines the brief where they disagree. For the next worker pass.
     dominant residual Neuroptics loss is margin refusal
     among genuine siblings (20/37 misses), which is
     the never-guess guard working as designed.
+91. **Margin ceiling on shared-suffix part names —
+    remedy EVALUATED, not shipped (2026-10-25).** The
+    pass-27 failure analysis (production matcher,
+    winner band) and the independent Python-mirror
+    analysis agree: of the winner config's 37 missed
+    Neuroptics instances, 20 are margin refusals with
+    best = truth at 0.91-0.97 and a sibling runner-up
+    inside the 0.10 MATCH_MARGIN (Mag read "Xmag..."
+    0.97 vs 0.90; Chroma "Bhioma..." 0.94 vs 0.91;
+    Nova "Xnova Pritr..." 0.91 vs 0.84). Every
+    "... Prime Neuroptics Blueprint" name shares ~23
+    of ~31 chars, so 1-2 glyph errors in the gear word
+    collapse the margin. Candidate remedy: judge the
+    margin on the discriminative portion only (rescore
+    best vs runner-up after removing their common
+    token suffix). Ceiling if it recovered every such
+    refusal at zero cost: +20/61 instances on the
+    Neuroptics subset. NOT SHIPPED, for two reasons:
+    (1) the same subset contains the counter-class —
+    reads whose gear word is genuinely destroyed
+    (Equinox -> "Inox...", best-matching Nyx at
+    0.76-0.84 with the truth as runner-up); a margin
+    remedy that flips any of those converts a refusal
+    into a false accept, the failure mode the
+    never-guess rule exists to prevent; (2) the
+    evidence bar for touching the core validation
+    rule is before/after numbers on the FULL census
+    set (all 495 cells, false accepts counted), and
+    only the Neuroptics subset has been scored for
+    this question. The dual-PSM question closed the
+    same night on the same evidence standard:
+    same-band PSM 6+11 union = 25/61 vs 24/61 single
+    (rejected, +1). NEXT STEP, if Seth wants it: a
+    scratch-build A/B — implement the discriminative
+    margin behind the existing tests, replay all 16
+    census frames, ship only if held-correct rises
+    with false accepts still at zero. Until then the
+    margin ceiling is the known limiter on long
+    shared-suffix part names, documented here and in
+    docs/twenty-seventh-pass.md.
