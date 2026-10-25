@@ -754,9 +754,10 @@ async fn finalize_capture(
     opts: &ResidentOptions,
     status: &Arc<Mutex<TrayStatus>>,
     tray: &Option<ksni::Handle<FrackerTray>>,
-    session: CaptureSession,
+    mut session: CaptureSession,
     log: &CaptureLog,
 ) -> bool {
+    session.flush_debug_dumps();
     set_capture_stage(status, log, CaptureStage::Finalizing);
     log.record(
         "finalizing",

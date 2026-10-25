@@ -187,9 +187,15 @@ pub struct CaptureData {
     pub universe: Universe,
     pub relic_names: HashSet<String>,
     pub arcane_names: HashSet<String>,
-    /// The directory the data was loaded from; capture debug dumps
-    /// (evidence frames) land in its `capture-debug` subdirectory.
+    /// The directory the data was loaded from (the install tree in
+    /// the Flatpak — read-only there, so nothing may write into it).
     pub data_dir: PathBuf,
+    /// Where capture debug dumps (evidence frames) land:
+    /// `capture-debug` under the USER data dir (beside stock.json).
+    /// This was `data_dir/capture-debug` until addendum #82 — in
+    /// the Flatpak that path is the read-only bundle tree, so every
+    /// dump failed silently and no folder ever appeared.
+    pub debug_dir: PathBuf,
 }
 
 impl CaptureData {
@@ -208,6 +214,7 @@ impl CaptureData {
             relic_names,
             arcane_names,
             data_dir: data_dir.to_path_buf(),
+            debug_dir: crate::config::data_dir().join("capture-debug"),
         })
     }
 
@@ -220,7 +227,7 @@ impl CaptureData {
             arcane_names: &self.arcane_names,
             classifier: &self.classifier,
             min_confidence: 0.5,
-            debug_dir: Some(self.data_dir.join("capture-debug")),
+            debug_dir: Some(self.debug_dir.clone()),
         }
     }
 }
@@ -313,7 +320,10 @@ pub struct CaptureSession {
     pub header_samples: Vec<(ScreenClass, String)>,
     /// Evidence frames written to the debug dir, by file name.
     pub debug_files: Vec<String>,
-    debug_dumped: std::collections::HashSet<&'static str>,
+    debug_dumped: std::collections::HashMap<&'static str, u32>,
+    /// Detached evidence-writer threads; joined at finalize so the
+    /// logged file list is true by the time it is logged.
+    debug_writers: Vec<std::thread::JoinHandle<()>>,
     last_sig: Option<u64>,
     last_class: Option<ScreenClass>,
     /// Header-strip cache (addendum #81): (crop hash, class, raw text)
@@ -329,6 +339,10 @@ pub struct CaptureSession {
 }
 
 impl CaptureSession {
+    /// Per-name evidence-dump cap (addendum #82): enough frames
+    /// for an OCR training sample, bounded disk.
+    const MAX_DEBUG_PER_NAME: u32 = 60;
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -442,17 +456,42 @@ impl CaptureSession {
         self.captured.merge_from(&frame_stock);
     }
 
-    /// Write an evidence frame to the context's debug dir (once per
-    /// name; best-effort — a failed dump never fails a capture).
+    /// Write an evidence frame to the context's debug dir
+    /// (best-effort — a failed dump never fails a capture). Up to
+    /// [`Self::MAX_DEBUG_PER_NAME`] frames per name per session,
+    /// named `frame-<name>-<idx>.png`: since addendum #82 the dumps
+    /// double as OCR training data, so one frame per class was too
+    /// thin a sample. The PNG write runs on a detached thread — a
+    /// full-res encode on the reader thread would worsen the very
+    /// frame starvation the evidence exists to diagnose.
     fn dump_debug_frame(&mut self, ctx: &CaptureContext<'_>, frame: &GrayImage, name: &'static str) {
         let Some(dir) = &ctx.debug_dir else { return };
-        if !self.debug_dumped.insert(name) {
-            return;
-        }
-        let _ = std::fs::create_dir_all(dir);
-        let file = format!("frame-{name}.png");
-        if frame.write_png(&dir.join(&file)).is_ok() {
-            self.debug_files.push(file);
+        let idx = {
+            let n = self.debug_dumped.entry(name).or_insert(0);
+            if *n >= Self::MAX_DEBUG_PER_NAME {
+                return;
+            }
+            let idx = *n;
+            *n += 1;
+            idx
+        };
+        let file = format!("frame-{name}-{idx:02}.png");
+        self.debug_files.push(file.clone());
+        let dir = dir.clone();
+        let frame = frame.clone();
+        let handle = std::thread::spawn(move || {
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = frame.write_png(&dir.join(&file));
+        });
+        self.debug_writers.push(handle);
+    }
+
+    /// Join every outstanding evidence writer. Called at finalize:
+    /// the dumps are few and small, and the evidence log should
+    /// only name files that actually landed.
+    pub fn flush_debug_dumps(&mut self) {
+        for handle in self.debug_writers.drain(..) {
+            let _ = handle.join();
         }
     }
 
@@ -979,6 +1018,51 @@ mod tests {
         assert_eq!(*engine.header_reads.lock().unwrap(), 2);
         // Only fresh classifications land in the evidence samples.
         assert_eq!(session.header_samples.len(), 2);
+    }
+
+    #[test]
+    #[test]
+    fn debug_dumps_land_in_the_given_dir_with_sequence_names() {
+        // Addendum #82: dumps go to the context's debug dir (the
+        // caller points it at the USER data dir — the install tree
+        // is read-only in the Flatpak), sequence-named per class,
+        // capped per session.
+        let universe = Universe::from_names(&[]);
+        let layouts = HashMap::new();
+        let relic_names = HashSet::new();
+        let arcane_names = HashSet::new();
+        let classifier = classifier();
+        let dir = std::env::temp_dir().join(format!("fracker-dbg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ctx = CaptureContext {
+            layouts: &layouts,
+            universe: &universe,
+            relic_names: &relic_names,
+            arcane_names: &arcane_names,
+            classifier: &classifier,
+            min_confidence: 0.5,
+            debug_dir: Some(dir.clone()),
+        };
+        let mut session = CaptureSession::new();
+        let frame = GrayImage::blank(8, 8, 42);
+        session.dump_debug_frame(&ctx, &frame, "parts");
+        session.dump_debug_frame(&ctx, &frame, "parts");
+        assert_eq!(
+            session.debug_files,
+            vec!["frame-parts-00.png".to_string(), "frame-parts-01.png".to_string()]
+        );
+        // Writes are off-thread; finalize joins them, and the
+        // files must then be on disk — deterministically, no
+        // polling (under full-suite load the writers can be
+        // starved for seconds).
+        session.flush_debug_dumps();
+        for i in 0..2 {
+            assert!(
+                dir.join(format!("frame-parts-{i:02}.png")).exists(),
+                "evidence frame {i} should be written"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

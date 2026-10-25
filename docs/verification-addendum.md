@@ -1052,3 +1052,26 @@ it refines the brief where they disagree. For the next worker pass.
     Flatpak) is warranted. Defect #80(a) — Prime Parts
     header classification — is untouched by this pass;
     it waits on the v0.5.18 evidence captures.
+82. **Live verdict on pass 24 (Seth, 2026-10-24, v0.5.19),
+    and the missing-evidence defect.** Three captures:
+    relics 18 seen / 18 read / 0 skipped -> 528 relic stacks;
+    arcanes 7/7/0 -> 155 arcanes; parts 130/4/126 -> 77, then
+    on a deliberately slower scroll 377/12/365 -> 140 of
+    ~270 actual parts. So #80(b) is confirmed fixed at
+    relic/arcane pacing, #80(a) did NOT reproduce (Parts
+    classified and read; pass 24 changed no classification
+    code, so (a) is unconfirmed rather than closed), and the
+    residual parts loss is twofold: per-page OCR still takes
+    seconds on all-unique-cell pages (coverage is
+    scroll-pacing-bound), and this page's glyphs reject at
+    the fuzzy matcher more than the tuned screens. New
+    defect found while collecting training data: the
+    evidence dumps never landed in the Flatpak. debug_dir
+    pointed into the install tree (`tuning::data_dir()` =
+    /app/share/fracker/data, read-only in the bundle) and the
+    best-effort write swallowed the failure. Pass 25
+    (v0.5.20) moves dumps to the user data dir beside
+    stock.json, raises sampling to 60 frames per name
+    (sequence-named), and writes PNGs off the reader thread.
+    Glyph/throughput work on Parts follows once the training
+    frames are in hand.
