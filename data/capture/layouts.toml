@@ -53,19 +53,26 @@ x0 = 42.0
 cell_w = 141.0
 y0 = 340.0
 cell_h = 140.0
-# Whole cell: the one/two-line name sits directly under the item icon, and
-# tesseract's block pass (psm 6) reads the name while treating the icon as
-# noise. A fixed name band clipped tall weapon icons in testing.
-name = [0.0, 0.0, 1.0, 1.0]
+# Pass 27 (census, addendum #90): the name is read from a band BELOW the
+# icon (y 0.53-1.00 of the cell), not the whole cell. Whole-cell reads let
+# the count badge land as a junk leading token and the icon's edges spawn
+# 3-10 junk tokens, destroying or diluting the gear word of the (often
+# THREE-line) name — the census's top loss mechanism; production held 0
+# of 61 Neuroptics cell instances. The tuned band + PSM 11 (sparse text)
+# at upscale 4 held 24/61 through the production matcher; a dual-PSM
+# second read added only +1 and was rejected. The band still starts
+# below the badge (top-left) and the icon body, so neither reaches the
+# matcher.
+name = [0.0, 0.53, 1.0, 1.0]
 count = [0.06, 0.0, 0.32, 0.16]
 count_style = "badge"
-name_psm = 6
+name_psm = 11
 count_psm = 7
-name_upscale = 3
+name_upscale = 4
 count_upscale = 8
-# The part crop includes the item icon, so raw reads are noisier than the
-# relic screen; the ambiguity margin guard (not the absolute floor) is what
-# keeps the never-guess rule. See docs/fifth-pass.md.
+# Raw reads are noisier than the relic screen; the ambiguity margin
+# guard (not the absolute floor) is what keeps the never-guess rule.
+# See docs/fifth-pass.md and docs/twenty-seventh-pass.md.
 min_score = 0.5
 
 # Arcanes inventory screen (sixth pass §5, addendum #34; geometry

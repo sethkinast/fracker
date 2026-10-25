@@ -270,10 +270,15 @@ fn run_ocr_ingest(args: &Args, dir: &std::path::Path) -> Result<(), String> {
             )
         })?;
 
-    // Item universe: roster parts + gear + relic names + the arcane set,
-    // scrubbed (the same names the planner reasons about). Shared with the
-    // §2 Capture Inventory flow so the debug path and the tray flow agree.
-    let (universe, relic_names, arcane_names) = capture::load_universe(&tuning::data_dir())?;
+    // Item universes: roster parts + gear + relic names + the arcane
+    // set, scrubbed (the same names the planner reasons about). Shared
+    // with the §2 Capture Inventory flow so the debug path and the
+    // tray flow agree. Validation is scoped to the screen being
+    // ingested (pass 27): the layout key picks its universe.
+    let universes = capture::load_universe(&tuning::data_dir())?;
+    let universe = universes.for_layout(&layout.key);
+    let relic_names = &universes.relic_names;
+    let arcane_names = &universes.arcane_names;
 
     // Engine: tesseract when the binary exists, else the stub (empty
     // stock, never guesses) — status printed honestly either way.
@@ -292,9 +297,9 @@ fn run_ocr_ingest(args: &Args, dir: &std::path::Path) -> Result<(), String> {
         dir,
         engine,
         &layout,
-        &universe,
-        &relic_names,
-        &arcane_names,
+        universe,
+        relic_names,
+        arcane_names,
         0.5,
     )?;
     stock.write_to(&args.stock_out)?;

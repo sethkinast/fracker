@@ -90,17 +90,47 @@ impl RefinementTier {
     }
 }
 
-/// Remove any bracketed tier label from a raw read so fuzzy name
-/// matching sees the relic name alone.
+/// Remove bracketed tier labels from a raw read so fuzzy name
+/// matching sees the relic name alone. Only BALANCED `[...]`
+/// spans are stripped (pass 27): an unmatched `[` used to delete
+/// the rest of the read — the census case "[ Gauss Prime
+/// Blueprint" lost the whole name to the stripper — so a stray
+/// bracket now costs only the bracket character itself and the
+/// text after it stays. A stray `]` is likewise dropped alone.
 fn strip_tier_label(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len());
-    let mut depth = 0usize;
-    for ch in s.chars() {
-        match ch {
-            '[' => depth += 1,
-            ']' => depth = depth.saturating_sub(1),
-            _ if depth == 0 => out.push(ch),
-            _ => {}
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '[' => {
+                // Scan for the matching ']' (nesting counts). A
+                // balanced span drops whole; an unmatched '[' drops
+                // only itself and the scan resumes after it.
+                let mut depth = 0usize;
+                let mut j = i;
+                let mut matched = false;
+                while j < chars.len() {
+                    match chars[j] {
+                        '[' => depth += 1,
+                        ']' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                matched = true;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                i = if matched { j + 1 } else { i + 1 };
+            }
+            ']' => i += 1,
+            ch => {
+                out.push(ch);
+                i += 1;
+            }
         }
     }
     out
@@ -1502,8 +1532,10 @@ impl Universe {
     ///
     /// Icon art bleeds into a cell's name band (the arcanes screen in
     /// particular), so a read may carry leading garbage tokens. We try
-    /// the read whole and with up to a few leading tokens trimmed,
-    /// keeping the best-scoring interpretation; the margin guard still
+    /// the read whole and with EVERY leading-token suffix trim (pass
+    /// 27; the cap of 4 used to strand clean names sitting behind
+    /// 5–10 icon tokens — the census's score-dilution class), keeping
+    /// the best-scoring interpretation; the margin guard still
     /// applies, so trimming never turns noise into a confident guess.
     pub fn best_match_margin(&self, read: &str) -> Option<(&str, f32, f32)> {
         let cleaned = strip_tier_label(read);
@@ -1513,7 +1545,7 @@ impl Universe {
             return None;
         }
         let mut best: Option<(&str, f32, f32)> = None;
-        for start in 0..tokens.len().min(4) {
+        for start in 0..tokens.len() {
             let cand = fold(&tokens[start..].join(" "));
             if cand.is_empty() {
                 continue;
@@ -1875,6 +1907,38 @@ impl StockState {
         crate::model::RelicStock::Known(crate::model::KnownStock { totals, radiant })
     }
 
+    /// Addendum #84 + #89: canonical per-roster-part counts of the
+    /// captured part stock, for the planner. A roster part's count is
+    /// its raw captured count PLUS the captured count of its
+    /// built-component form (the part name minus the trailing
+    /// " Blueprint"), because a built component and its blueprint
+    /// both count toward the parent item. Stock names that are
+    /// neither roster parts nor built forms of them drop out — the
+    /// plan only reasons about roster parts.
+    pub fn canonical_part_counts(
+        &self,
+        roster: &crate::model::Roster,
+    ) -> HashMap<String, u32> {
+        let mut canonical_of: HashMap<String, String> = HashMap::new();
+        for item in &roster.items {
+            for part in &item.parts {
+                canonical_of.insert(part.name.clone(), part.name.clone());
+                if let Some(built) =
+                    crate::model::built_component_form(&item.name, &part.name)
+                {
+                    canonical_of.insert(built, part.name.clone());
+                }
+            }
+        }
+        let mut out: HashMap<String, u32> = HashMap::new();
+        for (name, count) in &self.parts {
+            if let Some(canon) = canonical_of.get(name) {
+                *out.entry(canon.clone()).or_insert(0) += count;
+            }
+        }
+        out
+    }
+
     pub fn held_parts(&self) -> HashMap<String, u32> {
         self.parts.iter().map(|(k, v)| (k.clone(), *v)).collect()
     }
@@ -2112,6 +2176,54 @@ mod tests {
     }
 
     #[test]
+    fn strip_tier_label_strips_only_balanced_spans() {
+        // Balanced labels still strip whole, as before.
+        assert_eq!(strip_tier_label("Neo C5 [Radiant]"), "Neo C5 ");
+        assert_eq!(strip_tier_label("a [b [c] d] e"), "a  e");
+        assert_eq!(strip_tier_label("[Flawless] Neo C5"), " Neo C5");
+        // Pass 27: an unmatched '[' costs only the bracket — the
+        // census case (parts-07 #0) lost the entire name before.
+        assert_eq!(
+            strip_tier_label("[ Gauss Prime Blueprint"),
+            " Gauss Prime Blueprint"
+        );
+        // A stray ']' drops alone; an unmatched span's text survives.
+        assert_eq!(strip_tier_label("x ] y"), "x  y");
+        assert_eq!(strip_tier_label("keep [this text"), "keep this text");
+    }
+
+    #[test]
+    fn unmatched_bracket_read_still_validates() {
+        // Census parts-07 #0 / parts-10 #0: the raw read carries a
+        // leading '[' (a relic tier glyph) in front of the name.
+        let u = Universe::from_names(
+            &["Gauss Prime Blueprint", "Forma Blueprint"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
+        );
+        let r = validate_read(&read("[ Gauss Prime Blueprint", 0.9, None), &u, 0.5, 0.5, 0);
+        assert!(r.held, "unmatched-bracket read validates: {r:?}");
+        assert_eq!(r.matched.as_deref(), Some("Gauss Prime Blueprint"));
+    }
+
+    #[test]
+    fn deep_suffix_trim_recovers_name_behind_junk_tokens() {
+        // Census score-dilution class: the clean name sits behind
+        // more leading junk tokens than the old 4-trim cap allowed.
+        let u = universe();
+        let r = validate_read(
+            &read("O5 zz qq rr ss tt Forma Blueprint", 0.9, None),
+            &u,
+            0.5,
+            0.5,
+            0,
+        );
+        assert!(r.held, "deep trim validates: {r:?}");
+        assert_eq!(r.matched.as_deref(), Some("Forma Blueprint"));
+    }
+
+    #[test]
     fn stock_splits_tiers_totals_sum_and_frames_union() {
         // Eighth pass §1: relics key by (relic, tier); totals are sums; a
         // repeated stack identity (the same cell seen twice) is a UNION
@@ -2144,6 +2256,37 @@ mod tests {
         let json = stock.to_json().unwrap();
         let back = StockState::from_json(&json).unwrap();
         assert_eq!(back.relics.get("Neo C5").map(RelicStacks::total), Some(4));
+    }
+
+    #[test]
+    fn canonical_part_counts_sum_built_and_blueprint_forms() {
+        // Addendum #84/#89: a roster part's canonical count sums its
+        // blueprint form and its built form; the gear's own blueprint
+        // has no built counterpart; non-roster names drop out.
+        let roster = crate::model::Roster::from_json(
+            r#"[{"name": "Khora Prime", "vaulted": true, "type": "warframe",
+                 "parts": [{"name": "Khora Prime Blueprint"},
+                           {"name": "Khora Prime Chassis Blueprint"}]}]"#,
+        )
+        .unwrap();
+        let stock = StockState {
+            parts: [
+                ("Khora Prime Chassis Blueprint".to_owned(), 1),
+                ("Khora Prime Chassis".to_owned(), 2),
+                ("Khora Prime".to_owned(), 4),
+                ("Unrelated Junk".to_owned(), 5),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let counts = stock.canonical_part_counts(&roster);
+        assert_eq!(
+            counts.get("Khora Prime Chassis Blueprint"),
+            Some(&3),
+            "blueprint 1 + built 2 sum onto the roster part"
+        );
+        assert_eq!(counts.len(), 1, "own-blueprint built form and junk drop out");
     }
 
     #[test]
@@ -2453,10 +2596,14 @@ mod tests {
     /// Universe + relic/arcane name sets, built by the SAME helper the
     /// live capture and `--ocr-ingest` use (`capture::load_universe`:
     /// roster + relic names + the arcane set, scrubbed), so the tests and
-    /// production can never drift.
+    /// production can never drift. The combined set is the right test
+    /// universe here: these fixtures exercise the ingest path end to
+    /// end, not one screen's scoping.
     fn seed_universe() -> Option<(Universe, HashSet<String>, HashSet<String>)> {
         let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        crate::capture::load_universe(&base.join("data")).ok()
+        crate::capture::load_universe(&base.join("data"))
+            .ok()
+            .map(|set| (set.combined, set.relic_names, set.arcane_names))
     }
 
     /// Run one real fixture page through the full ingest path. `None`

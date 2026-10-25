@@ -380,6 +380,21 @@ impl Roster {
     }
 }
 
+/// The built (crafted) form of a roster part name, when the part is a
+/// COMPONENT blueprint: "<Gear> <Component> Blueprint" displays on the
+/// Parts screen without the suffix once the component is crafted
+/// ("Gauss Prime Chassis Blueprint" -> "Gauss Prime Chassis"), and
+/// both forms are first-class capture stock (addendum #89). The
+/// gear's own "<Gear> Blueprint" has no loose built counterpart —
+/// its built result is the gear itself — so it yields None, as does
+/// any part that is not a blueprint at all.
+pub fn built_component_form(gear: &str, part: &str) -> Option<String> {
+    if part == format!("{gear} Blueprint") {
+        return None;
+    }
+    part.strip_suffix(" Blueprint").map(str::to_owned)
+}
+
 // ---------------------------------------------------------------------------
 // Companion universe manifest (data/companions.toml)
 // ---------------------------------------------------------------------------

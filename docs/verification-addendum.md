@@ -1208,3 +1208,33 @@ it refines the brief where they disagree. For the next worker pass.
     component-equivalents). The Kavasa exclusion (#22)
     is a backlog decision and is not disturbed by this
     item. Folded into pass 27's scope.
+90. **Parts census resolution (pass 27, v0.5.22,
+    2026-10-25).** The census replayed Seth's 16
+    capture-debug frames through production code: 269
+    distinct parts visible, production held 108 with 8
+    false accepts and 0 of 61 Neuroptics instances.
+    RESOLVED by pass 27 (docs/twenty-seventh-pass.md):
+    (a) parts name band y 0.53-1.00 + PSM 11 + upscale 4
+    (tuned on the Neuroptics subset through the
+    production matcher: 0 -> 24/61 cell instances;
+    dual-PSM measured at +1 and rejected; line-split
+    and upscale-6 measured worse); (b) screen-scoped
+    validation universes, parts including the #89 built
+    forms; (c) the matcher tries ALL leading-token
+    suffix trims and strip_tier_label strips only
+    balanced [...] spans; (d) session counts resolve by
+    vote (mode, ties to max) instead of max-merge.
+    Production replay of the same frames after the
+    pass: 127 correct + 0 false accepts; Neuroptics
+    13/28 distinct items; the frame-11 mid-scroll
+    composite holds zero cells. DEFERRED: scroll-offset
+    handling — no cheap reliable signal; scoped
+    universes already neutralise composite phantoms,
+    and a speculative offset search would multiply
+    per-frame OCR time. NOTED LIMIT: a stack observed
+    exactly once keeps its count (the Trumna x8 phantom
+    is single-observation on these frames and
+    survives); MATCH_MARGIN was not retuned — the
+    dominant residual Neuroptics loss is margin refusal
+    among genuine siblings (20/37 misses), which is
+    the never-guess guard working as designed.

@@ -34,7 +34,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
 
-use crate::ocr::{self, GrayImage, Layout, OcrEngine, StockState, Universe};
+use crate::ocr::{self, GrayImage, Layout, OcrEngine, RefinementTier, StockState, Universe};
 
 /// Which inventory screen a frame shows. `Other` is any frame with no
 /// matching class (menus, gameplay, loading) — collection pauses silently.
@@ -233,7 +233,7 @@ fn fuzzy_keyword_present(squashed: &str, keyword: &str) -> bool {
 pub struct CaptureData {
     pub layouts: HashMap<String, Layout>,
     pub classifier: ScreenClassifier,
-    pub universe: Universe,
+    pub universes: UniverseSet,
     pub relic_names: HashSet<String>,
     pub arcane_names: HashSet<String>,
     /// The directory the data was loaded from (the install tree in
@@ -255,13 +255,13 @@ impl CaptureData {
     pub fn load(data_dir: &Path) -> Result<Self, String> {
         let layouts = Layout::load_file(&data_dir.join("capture/layouts.toml"))?;
         let classifier = ScreenClassifier::load(&data_dir.join("capture/screens.toml"))?;
-        let (universe, relic_names, arcane_names) = load_universe(data_dir)?;
+        let universes = load_universe(data_dir)?;
         Ok(Self {
             layouts,
             classifier,
-            universe,
-            relic_names,
-            arcane_names,
+            relic_names: universes.relic_names.clone(),
+            arcane_names: universes.arcane_names.clone(),
+            universes,
             data_dir: data_dir.to_path_buf(),
             debug_dir: crate::config::data_dir().join("capture-debug"),
         })
@@ -271,7 +271,7 @@ impl CaptureData {
     pub fn context(&self) -> CaptureContext<'_> {
         CaptureContext {
             layouts: &self.layouts,
-            universe: &self.universe,
+            universes: &self.universes,
             relic_names: &self.relic_names,
             arcane_names: &self.arcane_names,
             classifier: &self.classifier,
@@ -281,13 +281,54 @@ impl CaptureData {
     }
 }
 
-/// Build the OCR item universe exactly as the one-shot `--ocr-ingest`
+/// The OCR validation universes (pass 27): the historical combined
+/// set plus one SCOPED set per inventory screen. Capture validates a
+/// frame against its own screen's set only — under the combined set
+/// a parts read could land on a relic or gear name (the census's
+/// false-accept classes: "Axi O4", bare gear names from composite
+/// frames), and the wider candidate field blunted every margin.
+/// The combined set remains for callers that do not know the screen
+/// (and as the `Other` fallback, which is never read in practice).
+#[derive(Debug, Clone, Default)]
+pub struct UniverseSet {
+    pub combined: Universe,
+    pub parts: Universe,
+    pub relics: Universe,
+    pub arcanes: Universe,
+    /// Bucket-routing sets for [`StockState::from_results`] (the raw,
+    /// unscrubbed name sets, as before).
+    pub relic_names: HashSet<String>,
+    pub arcane_names: HashSet<String>,
+}
+
+impl UniverseSet {
+    /// The scoped universe for a classified screen.
+    pub fn for_class(&self, class: ScreenClass) -> &Universe {
+        match class {
+            ScreenClass::Parts => &self.parts,
+            ScreenClass::Relics => &self.relics,
+            ScreenClass::Arcanes => &self.arcanes,
+            ScreenClass::Other => &self.combined,
+        }
+    }
+
+    /// The scoped universe for a layout key ("parts" / "relic" /
+    /// "arcanes"); any other key falls back to the combined set.
+    pub fn for_layout(&self, key: &str) -> &Universe {
+        match key {
+            "parts" => &self.parts,
+            "relic" => &self.relics,
+            "arcanes" => &self.arcanes,
+            _ => &self.combined,
+        }
+    }
+}
+
+/// Build the OCR item universes exactly as the one-shot `--ocr-ingest`
 /// path does (roster + relic names + the arcane universe, scrubbed). Kept
 /// as a free function so both the live capture and the debug ingest share
 /// one definition — they can never drift.
-pub fn load_universe(
-    data_dir: &Path,
-) -> Result<(Universe, HashSet<String>, HashSet<String>), String> {
+pub fn load_universe(data_dir: &Path) -> Result<UniverseSet, String> {
     let scrub_path = data_dir.join("exclusions.toml");
     let scrub = crate::model::UniverseScrub::from_toml(
         &std::fs::read_to_string(&scrub_path)
@@ -305,32 +346,56 @@ pub fn load_universe(
     let relics = crate::model::RelicTables::from_json(&rel_text)?;
     let roster = crate::model::Roster::from_json(&wish_text)?;
 
-    let mut names: Vec<String> = Vec::new();
+    // Parts candidates: roster part names plus the BUILT form of
+    // every component blueprint (addendum #89) — the Parts screen
+    // shows crafted components without the "Blueprint" suffix, and
+    // both forms are first-class stock. Derivation happens BEFORE
+    // the scrub, so an excluded item's built forms (Kavasa Prime,
+    // addendum #22) are dropped by the same prefix rule as its
+    // blueprint forms.
+    let mut gear_names: Vec<String> = Vec::new();
+    let mut part_names: Vec<String> = Vec::new();
     for item in &roster.items {
-        names.push(item.name.clone());
+        gear_names.push(item.name.clone());
         for p in &item.parts {
-            names.push(p.name.clone());
+            part_names.push(p.name.clone());
+            if let Some(built) = crate::model::built_component_form(&item.name, &p.name) {
+                part_names.push(built);
+            }
         }
     }
-    for name in relics.relics.keys() {
-        names.push(name.clone());
-    }
-    names.extend(arcanes.names.iter().cloned());
-    let mut names = scrub.scrub_names(&names);
-    names.sort();
-    names.dedup();
+    let relic_list: Vec<String> = relics.relics.keys().cloned().collect();
+    let arcane_list: Vec<String> = arcanes.names.clone();
 
-    Ok((
-        Universe::from_names(&names),
-        relics.relics.keys().cloned().collect(),
-        arcanes.name_set(),
-    ))
+    let scrubbed = |v: &[String]| {
+        let mut x = scrub.scrub_names(v);
+        x.sort();
+        x.dedup();
+        x
+    };
+    let parts = scrubbed(&part_names);
+    let relic_names_scrubbed = scrubbed(&relic_list);
+    let arcane_names_scrubbed = scrubbed(&arcane_list);
+    let mut combined_in = gear_names;
+    combined_in.extend(part_names);
+    combined_in.extend(relic_list.iter().cloned());
+    combined_in.extend(arcane_list.iter().cloned());
+    let combined = scrubbed(&combined_in);
+
+    Ok(UniverseSet {
+        combined: Universe::from_names(&combined),
+        parts: Universe::from_names(&parts),
+        relics: Universe::from_names(&relic_names_scrubbed),
+        arcanes: Universe::from_names(&arcane_names_scrubbed),
+        relic_names: relic_list.into_iter().collect(),
+        arcane_names: arcanes.name_set(),
+    })
 }
 
 /// Per-frame, borrow-only inputs to the pipeline.
 pub struct CaptureContext<'a> {
     pub layouts: &'a HashMap<String, Layout>,
-    pub universe: &'a Universe,
+    pub universes: &'a UniverseSet,
     pub relic_names: &'a HashSet<String>,
     pub arcane_names: &'a HashSet<String>,
     pub classifier: &'a ScreenClassifier,
@@ -355,12 +420,23 @@ impl CaptureCounts {
 }
 
 /// The accumulating capture state. Folding a frame is a UNION over stack
-/// identity: the same stack seen in ten frames counts once (the max
-/// observed count), never ten times — this is what makes scroll capture
-/// dedupe work (see [`StockState::merge_from`]).
+/// identity: the same stack seen in ten frames counts once, never ten
+/// times — this is what makes scroll capture dedupe work. The COUNT a
+/// stack resolves to is the MODE of its per-frame observations (ties
+/// go to the larger count), not the max (pass 27): a one-frame
+/// phantom badge read — the census's Trumna Prime Stock, x1 seen as
+/// x8 once — no longer outvotes every frame that saw the true count.
+/// A stack observed only once keeps that single observation; voting
+/// cannot fix a phantom nobody contradicted.
 #[derive(Debug, Default)]
 pub struct CaptureSession {
     captured: StockState,
+    /// Count observations per stack identity: count -> frames that
+    /// observed it. `captured` is re-resolved from these votes after
+    /// every frame (the maps are session-sized; the rebuild is cheap).
+    part_votes: HashMap<String, HashMap<u32, u32>>,
+    relic_votes: HashMap<(String, RefinementTier), HashMap<u32, u32>>,
+    arcane_votes: HashMap<(String, u8), HashMap<u32, u32>>,
     saw_relics: bool,
     saw_parts: bool,
     saw_arcanes: bool,
@@ -516,9 +592,44 @@ impl CaptureSession {
             ScreenClass::Other => {}
         }
 
-        let results = read_frame(layout, frame, engine, ctx);
+        let results = read_frame(layout, frame, engine, ctx, ctx.universes.for_class(class));
         let frame_stock = StockState::from_results(&results, ctx.relic_names, ctx.arcane_names);
-        self.captured.merge_from(&frame_stock);
+        self.observe_counts(&frame_stock);
+        self.captured = resolve_voted_stock(&self.part_votes, &self.relic_votes, &self.arcane_votes);
+    }
+
+    /// Record one frame's per-stack counts as votes (pass 27). A
+    /// stack appears at most once per frame (one inventory slot), so
+    /// each frame contributes exactly one observation per stack.
+    fn observe_counts(&mut self, frame_stock: &StockState) {
+        for (name, count) in &frame_stock.parts {
+            *self
+                .part_votes
+                .entry(name.clone())
+                .or_default()
+                .entry(*count)
+                .or_insert(0) += 1;
+        }
+        for (name, stacks) in &frame_stock.relics {
+            for (tier, count) in &stacks.tiers {
+                *self
+                    .relic_votes
+                    .entry((name.clone(), *tier))
+                    .or_default()
+                    .entry(*count)
+                    .or_insert(0) += 1;
+            }
+        }
+        for (name, stacks) in &frame_stock.arcanes {
+            for (rank, count) in &stacks.ranks {
+                *self
+                    .arcane_votes
+                    .entry((name.clone(), *rank))
+                    .or_default()
+                    .entry(*count)
+                    .or_insert(0) += 1;
+            }
+        }
     }
 
     /// Write an evidence frame to the context's debug dir
@@ -576,6 +687,46 @@ impl CaptureSession {
     }
 }
 
+/// The winning count from one stack's vote map: the most-observed
+/// count, ties broken toward the LARGER count (the pre-pass-27
+/// behaviour for the tied case, so a stack seen once at x8 and once
+/// at x1 still resolves x8 — voting only helps when observations
+/// actually disagree in number).
+fn voted_count(votes: &HashMap<u32, u32>) -> u32 {
+    votes
+        .iter()
+        .max_by(|a, b| a.1.cmp(b.1).then_with(|| a.0.cmp(b.0)))
+        .map(|(count, _)| *count)
+        .unwrap_or(1)
+}
+
+/// Rebuild the session stock from the count votes (pass 27).
+fn resolve_voted_stock(
+    part_votes: &HashMap<String, HashMap<u32, u32>>,
+    relic_votes: &HashMap<(String, RefinementTier), HashMap<u32, u32>>,
+    arcane_votes: &HashMap<(String, u8), HashMap<u32, u32>>,
+) -> StockState {
+    let mut stock = StockState::default();
+    for (name, votes) in part_votes {
+        stock.parts.insert(name.clone(), voted_count(votes));
+    }
+    for ((name, tier), votes) in relic_votes {
+        stock
+            .relics
+            .entry(name.clone())
+            .or_default()
+            .merge(*tier, voted_count(votes));
+    }
+    for ((name, rank), votes) in arcane_votes {
+        stock
+            .arcanes
+            .entry(name.clone())
+            .or_default()
+            .merge(*rank, voted_count(votes));
+    }
+    stock
+}
+
 /// Read every cell of one classified frame into validated results. Mirrors
 /// [`ocr::ingest_folder`]'s per-page body: a partial cell at the viewport
 /// edge is never read (never guessed).
@@ -584,6 +735,7 @@ fn read_frame(
     frame: &GrayImage,
     engine: &dyn OcrEngine,
     ctx: &CaptureContext<'_>,
+    universe: &Universe,
 ) -> Vec<ocr::CellResult> {
     // One batched call for the whole page (addendum #81): the
     // tesseract engine caches by crop hash and batches cache misses
@@ -596,7 +748,7 @@ fn read_frame(
         let read = read.unwrap_or_else(ocr::OcrRead::empty);
         results.push(ocr::validate_read(
             &read,
-            ctx.universe,
+            universe,
             ctx.min_confidence,
             layout.min_score,
             index,
@@ -1063,14 +1215,14 @@ mod tests {
         let engine = CountingEngine {
             header_reads: std::sync::Mutex::new(0),
         };
-        let universe = Universe::from_names(&[]);
+        let universes = UniverseSet::default();
         let layouts = HashMap::new();
         let relic_names = HashSet::new();
         let arcane_names = HashSet::new();
         let classifier = classifier();
         let ctx = CaptureContext {
             layouts: &layouts,
-            universe: &universe,
+            universes: &universes,
             relic_names: &relic_names,
             arcane_names: &arcane_names,
             classifier: &classifier,
@@ -1154,14 +1306,14 @@ mod tests {
                 .collect(),
             ),
         };
-        let universe = Universe::from_names(&[]);
+        let universes = UniverseSet::default();
         let layouts = HashMap::new();
         let relic_names = HashSet::new();
         let arcane_names = HashSet::new();
         let classifier = classifier();
         let ctx = CaptureContext {
             layouts: &layouts,
-            universe: &universe,
+            universes: &universes,
             relic_names: &relic_names,
             arcane_names: &arcane_names,
             classifier: &classifier,
@@ -1204,7 +1356,7 @@ mod tests {
         // caller points it at the USER data dir — the install tree
         // is read-only in the Flatpak), sequence-named per class,
         // capped per session.
-        let universe = Universe::from_names(&[]);
+        let universes = UniverseSet::default();
         let layouts = HashMap::new();
         let relic_names = HashSet::new();
         let arcane_names = HashSet::new();
@@ -1213,7 +1365,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let ctx = CaptureContext {
             layouts: &layouts,
-            universe: &universe,
+            universes: &universes,
             relic_names: &relic_names,
             arcane_names: &arcane_names,
             classifier: &classifier,
@@ -1277,6 +1429,123 @@ mod tests {
         assert!(!existing.relics.contains_key("Axi A1"));
         assert_eq!(existing.parts.get("Forma Blueprint"), Some(&9), "parts untouched");
         assert!(existing.arcanes.contains_key("Arcane Guardian"), "arcanes untouched");
+    }
+
+    #[test]
+    fn voted_count_picks_the_mode_and_breaks_ties_toward_max() {
+        let votes = |pairs: &[(u32, u32)]| pairs.iter().cloned().collect::<HashMap<u32, u32>>();
+        assert_eq!(voted_count(&votes(&[(8, 1), (1, 2)])), 1, "mode wins");
+        assert_eq!(voted_count(&votes(&[(8, 1), (1, 1)])), 8, "tie goes to max");
+        assert_eq!(voted_count(&votes(&[(3, 1)])), 3, "single observation kept");
+    }
+
+    /// Engine whose cell reads are scripted (text + count), with a
+    /// header that always classifies as the Parts screen.
+    struct CountScriptEngine {
+        reads: std::sync::Mutex<std::collections::VecDeque<crate::ocr::OcrRead>>,
+    }
+
+    impl crate::ocr::OcrEngine for CountScriptEngine {
+        fn name(&self) -> &str {
+            "count-script"
+        }
+
+        fn ocr_cell(&self, _cell: &GrayImage) -> crate::ocr::OcrRead {
+            self.reads
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(crate::ocr::OcrRead::empty)
+        }
+
+        fn read_text(
+            &self,
+            _image: &GrayImage,
+            _region: [f32; 4],
+            _psm: u32,
+            _upscale: u32,
+        ) -> String {
+            "INVENTORY / SELL".to_owned()
+        }
+    }
+
+    #[test]
+    fn session_count_votes_outvote_a_phantom_badge() {
+        // Pass 27 (census finding 5): one frame's phantom badge read
+        // (Trumna Prime Stock x1 recorded x8) must not survive when
+        // later frames observe the true count — the session count is
+        // the mode of the observations, not the max.
+        let layouts = Layout::parse(
+            r#"
+            [parts]
+            cols = 1
+            rows = 1
+            ref_width = 100
+            ref_height = 100
+            x0 = 0.0
+            cell_w = 100.0
+            y0 = 0.0
+            cell_h = 100.0
+            name = [0.0, 0.0, 1.0, 1.0]
+            count = [0.0, 0.0, 0.3, 0.2]
+            count_style = "badge"
+            name_psm = 6
+            count_psm = 7
+            name_upscale = 1
+            count_upscale = 1
+            min_score = 0.5
+            "#,
+        )
+        .unwrap();
+        let universes = UniverseSet {
+            parts: Universe::from_names(&["Trumna Prime Stock".to_owned()]),
+            ..UniverseSet::default()
+        };
+        let relic_names = HashSet::new();
+        let arcane_names = HashSet::new();
+        let classifier = classifier();
+        let ctx = CaptureContext {
+            layouts: &layouts,
+            universes: &universes,
+            relic_names: &relic_names,
+            arcane_names: &arcane_names,
+            classifier: &classifier,
+            min_confidence: 0.5,
+            debug_dir: None,
+        };
+        let read = |count: u32| crate::ocr::OcrRead {
+            text: "Trumna Prime Stock".to_owned(),
+            confidence: 0.9,
+            count: Some(count),
+            rank: None,
+        };
+        let engine = CountScriptEngine {
+            reads: std::sync::Mutex::new(vec![read(8), read(1), read(1)].into()),
+        };
+        let mut session = CaptureSession::new();
+        // Distinct bodies (signatures), identical header strip.
+        let frame = |body_v: u8| {
+            let mut img = GrayImage::blank(100, 100, body_v);
+            for y in 0..12 {
+                for x in 0..100 {
+                    img.set(x, y, 200);
+                }
+            }
+            img
+        };
+        session.process_frame(&ctx, &engine, &frame(10));
+        assert_eq!(
+            session.stock().parts.get("Trumna Prime Stock"),
+            Some(&8),
+            "a single observation stands until contradicted"
+        );
+        session.process_frame(&ctx, &engine, &frame(90));
+        session.process_frame(&ctx, &engine, &frame(160));
+        assert_eq!(
+            session.stock().parts.get("Trumna Prime Stock"),
+            Some(&1),
+            "two x1 observations outvote the one phantom x8"
+        );
     }
 
     #[test]
@@ -1406,14 +1675,14 @@ mod tests {
                     }
                 },
                 |source, lifecycle| {
-                    let universe = Universe::from_names(&[]);
+                    let universes = UniverseSet::default();
                     let layouts = HashMap::new();
                     let relic_names = HashSet::new();
                     let arcane_names = HashSet::new();
                     let classifier = ScreenClassifier::default();
                     let ctx = CaptureContext {
                         layouts: &layouts,
-                        universe: &universe,
+                        universes: &universes,
                         relic_names: &relic_names,
                         arcane_names: &arcane_names,
                         classifier: &classifier,
