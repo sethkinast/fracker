@@ -1990,3 +1990,47 @@ it refines the brief where they disagree. For the next worker pass.
     over font-rendered names). Details:
     docs/thirty-ninth-pass.md. Live verification (a real
     crack) is post-ship.
+105. **Crack-queue sort stability (pass 40, shipped as
+    v0.5.34).** The loop's stage-2 ordering made intrinsic.
+    (1) Premise verified, not assumed: live feed
+    2026-10-26T23:16Z carried Yuvarium (SolNode309, VoidT6 /
+    Omnia, Survival, Hard) — the standing Conjunction
+    Survival entry; Circulus (SolNode310) absent from the
+    live payload and from the 2026-10-19 fixture alike.
+    Omnia serves all five eras (live era counts at fetch:
+    Lith ×3, Meso ×4, Neo ×2, Axi ×5, Requiem ×3, Omnia ×4),
+    so every relic always has a mission via Yuvarium alone.
+    (2) Selection split: best_crack_candidate is intrinsic
+    (source tier, then score; no fissure input), the pick
+    composed via rank_fissures; build_chunks drops the
+    card-action gate, so chunk existence no longer prices
+    the live feed — a pickless chunk keeps empty fissure
+    fields and a Conjunction Survival fallback title
+    (unreachable with a complete feed). (3) Order: crack
+    chunks uniformly tier 2; the <60 min expiry promotion
+    removed as an ordering force ("expiring crack" label
+    kept); the final slate sort compares crack pairs Equal
+    so the stable sort preserves intrinsic order; event
+    chunks unchanged. (4) Tie band (data/tuning/
+    planner.toml): chance relative epsilon 0.10, coverage
+    epsilon 0 (exact counts — each step is a ≥ 1.25× score
+    multiplier, a difference in kind), stock factor exact
+    equality; adjacent-pair bubble reorder within a source
+    tier only, by batch minutes at the best live fissure;
+    bands may chain transitively. (5) Drive-by fix,
+    probe-verified on the v0.5.33 tree: the shared
+    best-candidate predicate chained tier.cmp().then(
+    score.cmp()).is_gt() — the tier leg inverted, so with
+    an Omnia fissure live an Unobtainable relic replaced an
+    Unvaulted one as a part's best crack (and derive_action
+    carried the same predicate across parts). Replaced by
+    crack_outranks (lower tier, then higher score) at both
+    sites, one regression test per site;
+    CrackCandidate::solo_minutes removed (write-only).
+    Gates: 9 new plan tests (rotation stability,
+    near-tie flip both directions, separated pair under
+    adversarial feeds, expiry annotation without promotion,
+    identical-input determinism, fissureless existence,
+    band components, 2 selection regressions); suite 345
+    passed / 0 failed (lib 317 = 308 + 9; golden 15).
+    Details: docs/fortieth-pass.md.
