@@ -282,6 +282,7 @@ impl CaptureData {
             line_reader: true,
             strip_offsets: true,
             snap_cells: false,
+            synthesis: true,
             debug_dir: Some(self.debug_dir.clone()),
         }
     }
@@ -436,6 +437,11 @@ pub struct CaptureContext<'a> {
     /// the fitted grid. Measurement only; production keeps the
     /// fitted grid unless the ablation adopts snapping.
     pub snap_cells: bool,
+    /// Pass 35: analysis-by-synthesis post-pass over the
+    /// stitch report (see `crate::synth`). It adjudicates only
+    /// slots the readers left unheld and never overrules a
+    /// reader hold.
+    pub synthesis: bool,
     /// When set, capture dumps evidence frames (the first frame, and
     /// the first frame of each recognised class) here as PNGs.
     pub debug_dir: Option<PathBuf>,
@@ -1165,6 +1171,10 @@ pub struct SlotReport {
     /// slot's median per-instance mesh score.
     pub glyph_score: f32,
     pub mesh_score: f32,
+    /// Pass 35: synthesis diagnostics for slots the synthesis
+    /// post-pass adjudicated (candidates + scores + outcome);
+    /// `None` for held slots and slots it never considered.
+    pub synth: Option<crate::synth::SynthDiag>,
 }
 
 /// One stitched parts session: the plan plus every slot's outcome.
@@ -1172,6 +1182,11 @@ pub struct SlotReport {
 pub struct StitchReport {
     pub plan: crate::stitch::StitchPlan,
     pub slots: Vec<SlotReport>,
+    /// Pass 35: the synthesis post-pass's calibration record
+    /// for this session (fitted parameters, measured score
+    /// distributions, chosen thresholds); `None` when the
+    /// post-pass did not run or could not calibrate.
+    pub synth_calib: Option<crate::synth::SynthCalibSummary>,
 }
 
 impl StitchReport {
@@ -1482,6 +1497,7 @@ pub fn stitch_parts_session(
                         glyph_implied,
                         glyph_score: channels.map(|c| c.glyph_score).unwrap_or(0.0),
                         mesh_score: channels.map(|c| c.mesh_score).unwrap_or(0.0),
+                        synth: None,
                     });
                 }
                 _ => {
@@ -1505,15 +1521,25 @@ pub fn stitch_parts_session(
                         glyph_implied: None,
                         glyph_score: 0.0,
                         mesh_score: 0.0,
+                        synth: None,
                     });
                 }
             }
         }
     }
-    StitchReport {
+    let mut report = StitchReport {
         plan,
         slots: slots_out,
+        synth_calib: None,
+    };
+    // Pass 35: the synthesis post-pass adjudicates the slots
+    // the readers left unheld (additive tail phase; it
+    // re-derives what it needs from the plan and mutates only
+    // unheld slots' verdicts — see `crate::synth`).
+    if ctx.synthesis {
+        crate::synth::adjudicate_report(&mut report, frames, layout, engine, ctx, universe);
     }
+    report
 }
 
 /// A coarse change signature: a 24x14 grid of block means, hashed. Two
@@ -1994,6 +2020,7 @@ mod tests {
             line_reader: false,
             strip_offsets: false,
             snap_cells: false,
+            synthesis: false,
             debug_dir: None,
         };
         let mut session = CaptureSession::new();
@@ -2091,6 +2118,7 @@ mod tests {
             line_reader: false,
             strip_offsets: false,
             snap_cells: false,
+            synthesis: false,
             debug_dir: None,
         };
         let mut session = CaptureSession::new();
@@ -2149,6 +2177,7 @@ mod tests {
             line_reader: false,
             strip_offsets: false,
             snap_cells: false,
+            synthesis: false,
             debug_dir: Some(dir.clone()),
         };
         let mut session = CaptureSession::new();
@@ -2366,6 +2395,7 @@ mod tests {
             line_reader: false,
             strip_offsets: false,
             snap_cells: false,
+            synthesis: false,
             debug_dir: None,
         };
         // Pass 33 mechanics: parts frames stitch at finish, and
@@ -2576,6 +2606,7 @@ mod tests {
                         line_reader: false,
                         strip_offsets: false,
                         snap_cells: false,
+                        synthesis: false,
                         debug_dir: None,
                     };
                     let session = run_capture(

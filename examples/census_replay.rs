@@ -228,9 +228,12 @@ fn session_main(
     if argv.iter().any(|a| a == "--strip-offsets") {
         ctx.strip_offsets = arg(&argv, "--strip-offsets").as_deref() != Some("off");
     }
+    if argv.iter().any(|a| a == "--synthesis") {
+        ctx.synthesis = arg(&argv, "--synthesis").as_deref() != Some("off");
+    }
     println!(
-        "pass34 toggles: line_reader={} snap={} strip_offsets={}",
-        ctx.line_reader, ctx.snap_cells, ctx.strip_offsets
+        "pass34/35 toggles: line_reader={} snap={} strip_offsets={} synthesis={}",
+        ctx.line_reader, ctx.snap_cells, ctx.strip_offsets, ctx.synthesis
     );
     let layout = ctx.layouts.get("parts").expect("parts layout").clone();
     let engine = TesseractCliEngine::probe(layout.clone()).expect("tesseract engine");
@@ -361,6 +364,9 @@ fn session_main(
         println!("WARNING: {unjoined} census cells joined no slot");
     }
     let mut distinct_correct: HashSet<String> = HashSet::new();
+    // Pass 35: which arbitration voices produced each correct
+    // distinct item (for synthesis-gain attribution).
+    let mut correct_vias: HashMap<String, HashSet<String>> = HashMap::new();
     let mut false_accepts: Vec<String> = Vec::new();
     let mut unmapped_held: Vec<String> = Vec::new();
     let mut slot_count_ok = 0usize;
@@ -382,6 +388,10 @@ fn session_main(
                 let t = ts.iter().next().unwrap();
                 if h == t {
                     distinct_correct.insert(t.clone());
+                    correct_vias
+                        .entry(t.clone())
+                        .or_default()
+                        .insert(format!("{:?}", slot.held_via));
                     // counts: resolved session count vs truth
                     let resolved = stock.parts.get(h).copied().unwrap_or(1);
                     let cell_list = &slot_cells[&s];
@@ -488,6 +498,99 @@ fn session_main(
         }
     }
 
+    // Pass 35: synthesis accounting — per-slot holds with
+    // scores, distinct gains attributable to synthesis alone,
+    // outcome tally, candidate-set sizes, and the count of
+    // hold-vs-hold name disagreements (ineligible by contract).
+    {
+        let mut gains: Vec<&str> = Vec::new();
+        for (name, vias) in &correct_vias {
+            if vias.len() == 1 && vias.iter().next().map(|v| v.as_str()) == Some("Some(Synthesis)") {
+                gains.push(name.as_str());
+            }
+        }
+        gains.sort();
+        println!("--- synthesis ---");
+        if let Some(c) = &report.synth_calib {
+            println!(
+                "calibration: {} slots; fit px={:.2} wrap={:.3} blur={:.2} level={:.2} gamma={:.2}",
+                c.slots, c.fit.px_size, c.fit.wrap_frac, c.fit.blur, c.fit.level, c.fit.gamma
+            );
+            println!(
+                "true scores q02/25/50/75/98: {:.3}/{:.3}/{:.3}/{:.3}/{:.3}",
+                c.true_q[0], c.true_q[1], c.true_q[2], c.true_q[3], c.true_q[4]
+            );
+            println!(
+                "wrong scores q02/25/50/75/98: {:.3}/{:.3}/{:.3}/{:.3}/{:.3}",
+                c.wrong_q[0], c.wrong_q[1], c.wrong_q[2], c.wrong_q[3], c.wrong_q[4]
+            );
+            println!(
+                "margins q05/10/35/50/90: {:.3}/{:.3}/{:.3}/{:.3}/{:.3}",
+                c.margin_q[0], c.margin_q[1], c.margin_q[2], c.margin_q[3], c.margin_q[4]
+            );
+            println!(
+                "plateau [{:.3}, {:.3}]; floor {:.3}; margin_thr {:.3}; grey {:.3}; exemplar n={} q05/50/95 {:.3}/{:.3}/{:.3} ex_floor {:.3}",
+                c.plateau.0, c.plateau.1, c.floor, c.margin_thr, c.grey_thr,
+                c.exemplar_n, c.exemplar_q[0], c.exemplar_q[1], c.exemplar_q[2], c.ex_floor
+            );
+        } else {
+            println!("calibration: NONE (post-pass did not calibrate)");
+        }
+        for (s, slot) in report.slots.iter().enumerate() {
+            if slot.held_via != Some(fracker::lineread::Via::Synthesis) {
+                continue;
+            }
+            let truth = slot_truths.get(&s).and_then(|ts| {
+                if ts.len() == 1 {
+                    ts.iter().next().map(|x| x.as_str())
+                } else {
+                    None
+                }
+            });
+            let d = slot.synth.as_ref();
+            println!(
+                "synth hold seg{} row{} col{}: held {:?} truth {:?} score {:.3} margin {:.3} exemplar {:?}",
+                slot.segment,
+                slot.row,
+                slot.col,
+                slot.result.as_ref().and_then(|r| r.matched.as_deref()),
+                truth,
+                d.map(|d| d.best_score).unwrap_or(0.0),
+                d.map(|d| d.margin).unwrap_or(0.0),
+                d.and_then(|d| d.exemplar),
+            );
+        }
+        println!(
+            "synthesis distinct gains ({}): {gains:?}",
+            gains.len()
+        );
+        let mut tally: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut cand_sizes: Vec<usize> = Vec::new();
+        for slot in &report.slots {
+            if let Some(d) = &slot.synth {
+                *tally.entry(d.outcome).or_default() += 1;
+                cand_sizes.push(d.candidates.len());
+            }
+        }
+        cand_sizes.sort_unstable();
+        println!("synthesis outcomes: {tally:?}");
+        if !cand_sizes.is_empty() {
+            println!(
+                "candidate sets: n={} min={} median={} max={}",
+                cand_sizes.len(),
+                cand_sizes[0],
+                cand_sizes[cand_sizes.len() / 2],
+                cand_sizes[cand_sizes.len() - 1]
+            );
+        }
+        let disagreements = report
+            .slots
+            .iter()
+            .filter(|s| s.refuse_reason == Some("name-disagreement"))
+            .count();
+        println!("name-disagreement refusals (synthesis-ineligible): {disagreements}");
+    }
+
     let neuro_distinct: HashSet<&String> = distinct_correct
         .iter()
         .filter(|n| n.contains("Neuroptics"))
@@ -525,6 +628,53 @@ fn session_main(
     println!("missed distinct ({}):", missed.len());
     for m in &missed {
         println!("  missed {m}");
+    }
+    // Pass 35: the post-stage-3 residue census — every missed
+    // item with its slots' synthesis diagnostics (best
+    // candidate, score, margin, outcome), or the structural
+    // reason no adjudication happened.
+    println!("residue census:");
+    for m in &missed {
+        let mut lines: Vec<String> = Vec::new();
+        for (s, slot) in report.slots.iter().enumerate() {
+            let carries = slot_truths
+                .get(&s)
+                .map(|ts| ts.len() == 1 && ts.iter().next().map(|x| x.as_str()) == Some(m))
+                .unwrap_or(false);
+            if !carries {
+                continue;
+            }
+            match &slot.synth {
+                Some(d) => lines.push(format!(
+                    "seg{} row{} col{}: outcome={} best={:?} score={:.3} margin={:.3} exemplar={:?} cands={}",
+                    slot.segment,
+                    slot.row,
+                    slot.col,
+                    d.outcome,
+                    d.best,
+                    d.best_score,
+                    d.margin,
+                    d.exemplar,
+                    d.candidates.len()
+                )),
+                None => lines.push(format!(
+                    "seg{} row{} col{}: not adjudicated (coverage={:?} band={:?} line={:?} refuse={:?})",
+                    slot.segment,
+                    slot.row,
+                    slot.col,
+                    slot.coverage,
+                    slot.band_held,
+                    slot.line_held,
+                    slot.refuse_reason
+                )),
+            }
+        }
+        if lines.is_empty() {
+            println!("  residue {m}: no adjudicable slot (never fully visible / outside the panorama)");
+        }
+        for l in lines {
+            println!("  residue {m}: {l}");
+        }
     }
     println!("per-frame alive contributions (correctly-held slots):");
     for (fi, name) in frame_order.iter().enumerate() {

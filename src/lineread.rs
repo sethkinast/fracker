@@ -758,6 +758,11 @@ pub enum Via {
     Band,
     /// Only the line reader held it, with §2 satisfied.
     Line,
+    /// Pass 35: neither reader held it; analysis-by-synthesis
+    /// adjudicated the slot from its candidate evidence (see
+    /// `crate::synth`). Synthesis never produces a hold where
+    /// a reader held a different name.
+    Synthesis,
 }
 
 /// The arbitration's outcome for one slot.

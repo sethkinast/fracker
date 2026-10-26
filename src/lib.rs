@@ -23,6 +23,8 @@ pub mod server;
 pub mod state;
 pub mod tabs;
 pub mod ticks;
+pub mod synth;
 pub mod tray;
+pub mod ttf;
 pub mod tuning;
 pub mod watch;

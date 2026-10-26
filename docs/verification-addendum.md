@@ -1718,3 +1718,51 @@ it refines the brief where they disagree. For the next worker pass.
     (157/1). The boundary-snap cell-cutting ablation was
     run under the full stack and not adopted (fitted grid
     stands; numbers in docs/thirty-fourth-pass.md).
+100. **A third voice that renders instead of reading
+    (pass 35, v0.5.29).** The arbitration's seen-not-held
+    residue is adjudicated by analysis-by-synthesis
+    (src/synth.rs): candidate names are rendered in the
+    game's font and scored against the observed line ink by
+    masked NCC; form still comes only from the pass-34
+    channels, reader holds are never overruled, and
+    hold-vs-hold disagreements stay refused (0 in both
+    censuses). The font is the 2013 "Old Roboto" cut
+    (AOSP android-4.3_r2.1; name table "Version 1.200310;
+    2013"; R advance 1356 vs the 2011 cut's 1298 and the
+    2014 redesign's 1261), vendored with its Apache-2.0
+    license under assets/fonts/ and rendered by a
+    hand-rolled dependency-free rasteriser (src/ttf.rs).
+    Held-line fit separates the cuts: 2013 ≈ 2011 (0.367
+    vs 0.368 mean oracle-fit line score), 2014 redesign
+    clearly worse (0.323). Three measured corrections
+    carry the design: the game's breaking is a fitted
+    word wrap, not fixed semantic lines ("Glaive Prime
+    Blade" is one line); NCC alignment is a search
+    (dx −6..+6, dy −3..+10), because the first line's box
+    merges the icon rim and ±2px ink-origin anchoring
+    scored true lines at median 0.107 — below the wrong
+    candidates (the shipped anchoring scores 0.398 std /
+    0.358 HC); and the ink-width kill fires only when
+    every shared line is width-wrong (the any-line form
+    flagged over half of all calibration truths).
+    Candidate scores weight lines by set-discriminative
+    value — the "Gear Prime" line every sibling shares
+    cannot decide a sibling field. Thresholds come from
+    per-session calibration over both-readers-held slots
+    (202 std / 229 HC): the true and best-wrong
+    distributions overlap (plateau inverted on both
+    censuses), so the floor sits at wrong-p99.5 + 0.01
+    (0.715 std / 0.646 HC) and most eligible slots refuse
+    below-floor by design. Gate (production harness, both
+    censuses): 0 false accepts; distinct 242 std / 238 HC
+    (baselines 239 / 234); Neuroptics 28/28 both; counts
+    no worse (std 459/459 held cells; HC 93.2%); synthesis
+    gains +3 std (Caliban, Ember, Garuda Prime Chassis
+    Blueprints) and +4 HC (Chroma and Garuda Prime Chassis,
+    Garuda and Inaros Prime Systems Blueprints), all
+    correct. A/B controls with synthesis off reproduce
+    v0.5.28's gate exactly (239/453 std; 234/93.2% HC).
+    The exemplar grey-zone channel is calibrated (median
+    agreement 0.909 std / 0.954 HC) but was exercised by
+    no live case in either census. 309 tests (303 + 6).
+    Residue census: docs/thirty-fifth-pass.md.

@@ -1915,6 +1915,49 @@ impl Universe {
         best
     }
 
+    /// The top-scoring names for a raw read, best first, over
+    /// the same interpretations [`Self::best_match_margin`]
+    /// tries (whole read + every leading-token suffix trim) with
+    /// the same scoring (`match_one`'s confusable-Levenshtein
+    /// similarity) — each name keeps its best score across
+    /// interpretations. Pass 35's synthesis candidate
+    /// enumeration consumes this: a nomination is evidence, not
+    /// a hold, so no margin or predicate logic lives here.
+    pub fn top_matches(&self, read: &str, cap: usize) -> Vec<(&str, f32)> {
+        let cleaned = strip_tier_label(read);
+        let cleaned = strip_relic_suffix(&cleaned);
+        let tokens: Vec<&str> = cleaned.split_whitespace().collect();
+        if tokens.is_empty() || cap == 0 {
+            return Vec::new();
+        }
+        let mut scores: Vec<(usize, f32)> = Vec::new();
+        for start in 0..tokens.len() {
+            let cand = fold(&tokens[start..].join(" "));
+            if cand.is_empty() {
+                continue;
+            }
+            for (i, folded) in self.folded.iter().enumerate() {
+                let d = levenshtein_confusable(&cand, folded);
+                let denom = cand.chars().count().max(folded.chars().count()).max(1) as f32;
+                let score = 1.0 - d as f32 / denom;
+                match scores.iter_mut().find(|(j, _)| *j == i) {
+                    Some(e) => {
+                        if score > e.1 {
+                            e.1 = score;
+                        }
+                    }
+                    None => scores.push((i, score)),
+                }
+            }
+        }
+        scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scores.truncate(cap);
+        scores
+            .into_iter()
+            .map(|(i, s)| (self.names[i].as_str(), s))
+            .collect()
+    }
+
     /// The name's FORM SIBLING (pass 34): the built
     /// form of a blueprint name (`"X Blueprint"` -> `"X"`), or the
     /// blueprint form of a built name (`"X"` -> `"X Blueprint"`),
