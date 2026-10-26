@@ -11,13 +11,29 @@ unknown_default_batch = 4
 max_batch = 6
 
 # Fissure cascade: a matching fissure expiring within this window jumps
-# first (if comfortably runnable); crack matches under `tier1_crack_mins`
-# join tier 1, the rest tier 2. Useful slate, not exhaustive: at most
-# `max_crack_chunks` crack chunks; relic acquisition appears only when
-# tier 2 holds fewer than `thin_tier2_below` chunks (top `farm_chunks`).
+# first (if comfortably runnable). Since pass 40 the crack slate's
+# ORDER is intrinsic (source tier, then score) — expiry no longer
+# promotes a crack anywhere; `tier1_crack_mins` only drives the
+# "expiring crack" label on a crack whose chosen fissure ends within
+# the window. Useful slate, not exhaustive: at most `max_crack_chunks`
+# crack chunks; relic acquisition appears only when tier 2 holds
+# fewer than `thin_tier2_below` chunks (top `farm_chunks`).
 expiry_jump_mins = 15.0
 tier1_crack_mins = 60.0
 max_crack_chunks = 6
+
+# Sort stability (pass 40): two crack chunks in the same source tier
+# are "pretty much tied" — and may be reordered by mission quality
+# alone — only when EVERY score component is this close. Chance is a
+# relative band (0.10 = within 10% of the larger chance: Radiant
+# 10% vs 11% is run-to-run noise over a batch). Coverage must match
+# exactly: each coverage step multiplies the score by (c+2)/(c+1),
+# at least 1.25x in the practical range, so a coverage difference is
+# never a tie. The stock factor carries no band at all: it is a step
+# function of stock knowledge (known vs unknown), and the two sides
+# of that step never tie.
+tie_chance_rel_epsilon = 0.10
+tie_coverage_epsilon = 0
 thin_tier2_below = 3
 farm_chunks = 3
 

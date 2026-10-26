@@ -260,6 +260,10 @@ struct PlannerFile {
     #[serde(default)]
     pub max_crack_chunks: usize,
     #[serde(default)]
+    pub tie_chance_rel_epsilon: f64,
+    #[serde(default)]
+    pub tie_coverage_epsilon: usize,
+    #[serde(default)]
     pub thin_tier2_below: usize,
     #[serde(default)]
     pub farm_chunks: usize,
@@ -381,6 +385,8 @@ pub struct PlannerTuning {
     pub expiry_jump_mins: f64,
     pub tier1_crack_mins: f64,
     pub max_crack_chunks: usize,
+    pub tie_chance_rel_epsilon: f64,
+    pub tie_coverage_epsilon: usize,
     pub thin_tier2_below: usize,
     pub farm_chunks: usize,
     pub score_resurgence: f64,
@@ -412,6 +418,8 @@ impl PlannerTuning {
             expiry_jump_mins: f.expiry_jump_mins,
             tier1_crack_mins: f.tier1_crack_mins,
             max_crack_chunks: f.max_crack_chunks,
+            tie_chance_rel_epsilon: f.tie_chance_rel_epsilon,
+            tie_coverage_epsilon: f.tie_coverage_epsilon,
             thin_tier2_below: f.thin_tier2_below,
             farm_chunks: f.farm_chunks,
             score_resurgence: f.score_resurgence,

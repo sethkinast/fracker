@@ -2,9 +2,13 @@
 //! (world state, profile, targets, drops, derived state, now) into an
 //! ordered chunk slate + goal cards. Same inputs, same plan (testable).
 //!
-//! Ordering: strict tiers; within a tier, earliest expiry first, then
-//! highest value density. Weekly-cycle content never appears here at
-//! any tier — it is board-only.
+//! Ordering: strict tiers across chunk kinds; within a tier, event
+//! chunks keep earliest-expiry-first. Crack chunks are the exception
+//! since pass 40: their order is intrinsic (source tier, then score
+//! components) and stable across fissure rotations — mission quality
+//! may reorder only chunks tied on every score component (see
+//! `in_tie_band`), and expiry never promotes a crack. Weekly-cycle
+//! content never appears here at any tier — it is board-only.
 //!
 //! All estimates, thresholds, and windows come from the runtime tuning
 //! tables (`crate::tuning`); this module holds no game content.
@@ -674,23 +678,50 @@ pub struct CrackCandidate {
     pub score: f64,
     pub expected_cracks: f64,
     pub trace_cost: u32,
-    pub solo_minutes: f64,
 }
 
-/// Best crack candidate for one (part) across its relics.
-/// Returns None when holdings are known-empty or no live fissure matches.
-pub fn best_crack_for_part(
+/// Crack selection order, shared by every "best crack" pick:
+/// lower source tier wins; within a tier, higher score wins.
+/// Written as two explicit legs because the chain mixes
+/// directions — the chained-cmp `.is_gt()` form this replaces
+/// got the score leg right and the tier leg exactly backwards,
+/// so a worse-tier candidate replaced a better-tier incumbent
+/// whenever both reached the comparison (pass 40, addendum
+/// #105). The per-relic fissure gate masked it only when the
+/// worse relic's era had no live fissure; with an Omnia fissure
+/// live — the feed's normal state — nothing was filtered and
+/// the inversion fired (probe-verified on the v0.5.33 tree).
+fn crack_outranks(
+    tier: SourceTier,
+    score: f64,
+    best_tier: SourceTier,
+    best_score: f64,
+) -> bool {
+    tier < best_tier
+        || (tier == best_tier
+            && score
+                .partial_cmp(&best_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                == std::cmp::Ordering::Greater)
+}
+
+/// Best crack candidate for one part across its relics, INTRINSIC
+/// (pass 40): a pure function of the part, the relic tables, stock,
+/// and tuning — no fissure input at all, so the answer cannot
+/// change as fissures rotate. Best = lowest source tier, then
+/// highest score, then relic name (the iteration order below is
+/// already tier/chance ranked, so the name falls out of it).
+/// Returns None only when the part has no relics or every relic
+/// for it is known-empty.
+pub fn best_crack_candidate(
     part: &str,
     relics: &RelicTables,
     stock: &RelicStock,
     varzia: &VarziaAvailability,
     other_wants: &HashSet<String>,
-    fissures: &[crate::model::Fissure],
-    now: DateTime<Utc>,
-    steel_path_tiebreak: bool,
     tuning: &Tuning,
-) -> Option<(CrackCandidate, FissurePick)> {
-    let mut best: Option<(CrackCandidate, FissurePick)> = None;
+) -> Option<CrackCandidate> {
+    let mut best: Option<CrackCandidate> = None;
     for (relic, _intact) in varzia.relics_for_part_ranked(relics, part, stock) {
         let source_tier = varzia.source_tier(relic, stock);
         let intact = relic.chance_for(part, Refinement::Intact);
@@ -720,22 +751,7 @@ pub fn best_crack_for_part(
             None => tuning.planner.unknown_stock_factor,
         };
         let score = chance * (1.0 + coverage as f64) * stock_factor;
-        let picks = rank_fissures(
-            fissures,
-            &[relic.era()],
-            batch,
-            now,
-            steel_path_tiebreak,
-            tuning,
-        );
-        let pick = match picks.into_iter().next() {
-            Some(p) => p,
-            None => continue,
-        };
         let trace_cost = tuning.refinement.trace_cost(refinement) * batch;
-        let solo_minutes = tuning
-            .missions
-            .minutes_for_batch(&pick.fissure.mission_type, batch);
         let cand = CrackCandidate {
             relic: relic.name.clone(),
             era: relic.era().to_owned(),
@@ -749,24 +765,91 @@ pub fn best_crack_for_part(
             score,
             expected_cracks: exp,
             trace_cost,
-            solo_minutes,
         };
         let better = match &best {
             None => true,
-            Some((b, _)) => source_tier
-                .cmp(&b.source_tier)
-                .then_with(|| {
-                    cand.score
-                        .partial_cmp(&b.score)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .is_gt(),
+            Some(b) => crack_outranks(source_tier, cand.score, b.source_tier, b.score),
         };
         if better {
-            best = Some((cand, pick));
+            best = Some(cand);
         }
     }
     best
+}
+
+/// Best crack for one part WITH its mission: the intrinsic
+/// candidate plus its best live fissure from the feed. None when
+/// there is no candidate, or when no live fissure in the feed
+/// serves the candidate's era. An Omnia fissure serves every era,
+/// so with a complete feed the second case is a feed gap, not a
+/// normal state — callers that must not depend on the feed (the
+/// chunk slate) use `best_crack_candidate` and attach the pick
+/// separately.
+pub fn best_crack_for_part(
+    part: &str,
+    relics: &RelicTables,
+    stock: &RelicStock,
+    varzia: &VarziaAvailability,
+    other_wants: &HashSet<String>,
+    fissures: &[crate::model::Fissure],
+    now: DateTime<Utc>,
+    steel_path_tiebreak: bool,
+    tuning: &Tuning,
+) -> Option<(CrackCandidate, FissurePick)> {
+    let cand = best_crack_candidate(part, relics, stock, varzia, other_wants, tuning)?;
+    let pick = rank_fissures(
+        fissures,
+        &[cand.era.as_str()],
+        cand.batch,
+        now,
+        steel_path_tiebreak,
+        tuning,
+    )
+    .into_iter()
+    .next()?;
+    Some((cand, pick))
+}
+
+// ---------------------------------------------------------------------------
+// Sort stability (pass 40): the tie band
+// ---------------------------------------------------------------------------
+
+/// The stock factor a candidate's score was built with, recovered
+/// from its stock knowledge (the factor itself is not stored on
+/// the candidate).
+fn stock_factor_of(cand: &CrackCandidate, tuning: &Tuning) -> f64 {
+    match cand.owned {
+        Some(_) => tuning.planner.known_stock_factor,
+        None => tuning.planner.unknown_stock_factor,
+    }
+}
+
+/// "Pretty much tied on every metric" (Seth, pass 40): two crack
+/// candidates in the SAME source tier (callers group by tier) whose
+/// score components are each within the tuned tie band — chance
+/// within `tie_chance_rel_epsilon` (relative), coverage within
+/// `tie_coverage_epsilon` (0 in the shipped tuning: a coverage
+/// step multiplies the score by at least 1.25x, never a tie), and
+/// the stock factor exactly equal (it is a step function of stock
+/// knowledge, not a continuum). Composite-score closeness alone
+/// is NOT a tie: a high-chance / low-coverage candidate and a
+/// low-chance / high-coverage one with similar composites differ
+/// in kind, and mission quality must not reorder them.
+fn in_tie_band(a: &CrackCandidate, b: &CrackCandidate, tuning: &Tuning) -> bool {
+    let chance_close = (a.chance - b.chance).abs()
+        <= a.chance.max(b.chance) * tuning.planner.tie_chance_rel_epsilon;
+    let coverage_close =
+        a.coverage.abs_diff(b.coverage) <= tuning.planner.tie_coverage_epsilon;
+    let factor_close = stock_factor_of(a, tuning) == stock_factor_of(b, tuning);
+    chance_close && coverage_close && factor_close
+}
+
+/// A chunk's mission quality for tie reordering: the batch minutes
+/// at its best live fissure (the existing mission-time model). A
+/// chunk with no live pick has no mission at all — worst quality,
+/// so it never wins a tie against a chunk that has one.
+fn mission_minutes(pick: Option<&FissurePick>) -> f64 {
+    pick.map(|p| p.batch_minutes).unwrap_or(f64::INFINITY)
 }
 
 /// Radshare verdict: 4-player same-relic share turns per-crack chance
@@ -1164,15 +1247,9 @@ fn derive_action(
         ) {
             let better = match &best_crack {
                 None => true,
-                Some((b, _, _)) => cand
-                    .source_tier
-                    .cmp(&b.source_tier)
-                    .then_with(|| {
-                        cand.score
-                            .partial_cmp(&b.score)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .is_gt(),
+                Some((b, _, _)) => {
+                    crack_outranks(cand.source_tier, cand.score, b.source_tier, b.score)
+                }
             };
             if better {
                 best_crack = Some((cand, pick, part.name.clone()));
@@ -1480,17 +1557,20 @@ fn build_chunks(
         }
     }
 
-    // ---- Tier 2: target-matched fissures ----
-    // Greedy coverage: rank crack actions by score, take each relic once.
-    // Do-Now rule: crack chunks pursue ONLY the ≤3 focus parts.
+    // ---- Tier 2: crack chunks (intrinsic slate, pass 40) ----
+    // Greedy coverage: rank crack candidates by intrinsic value,
+    // take each relic once. Do-Now rule: crack chunks pursue ONLY
+    // the ≤3 focus parts. A chunk's EXISTENCE is intrinsic too —
+    // wants, stock, and relic data alone decide it; the card's
+    // action kind (which prices in the live feed) no longer gates
+    // the slate, and the fissure pick is attached afterwards as
+    // the chunk's mission, never as a condition.
     let focus_set: HashSet<String> =
         focus.iter().map(|f| f.part.clone()).collect();
     // Real ranked pass (owned values, no borrow tangle).
-    let mut ranked: Vec<(String, CrackCandidate, FissurePick, String, String)> = Vec::new();
+    let mut ranked: Vec<(String, CrackCandidate, Option<FissurePick>, String, String)> =
+        Vec::new();
     for card in cards {
-        if card.action.kind != ActionKind::Crack {
-            continue;
-        }
         let want_set: HashSet<String> =
             cards.iter().flat_map(|c| c.wants.clone()).collect();
         let mut needed: Vec<&PartRow> = card
@@ -1512,18 +1592,30 @@ fn build_chunks(
         for part in needed {
             let mut others = want_set.clone();
             others.remove(&part.name);
-            if let Some((cand, pick)) = best_crack_for_part(
+            if let Some(cand) = best_crack_candidate(
                 &part.name,
                 input.relics,
                 input.stock,
                 varzia,
                 &others,
-                &input.world.fissures,
-                input.now,
-                input.steel_path_tiebreak,
                 input.tuning,
             ) {
                 if !cand.source_tier.is_unobtainable() {
+                    // The mission: best live fissure for the
+                    // candidate's era (an Omnia fissure — the
+                    // Conjunction Survival entries — serves every
+                    // era, so a complete feed always yields one).
+                    // No pick is a feed gap, not a missing chunk.
+                    let pick = rank_fissures(
+                        &input.world.fissures,
+                        &[cand.era.as_str()],
+                        cand.batch,
+                        input.now,
+                        input.steel_path_tiebreak,
+                        input.tuning,
+                    )
+                    .into_iter()
+                    .next();
                     representative = Some((cand, pick, part.name.clone()));
                     break;
                 }
@@ -1539,6 +1631,10 @@ fn build_chunks(
             ));
         }
     }
+    // Intrinsic order (pass 40): source tier, then score, then the
+    // deterministic (part, relic) name pair — no live-mission input,
+    // no expiry input, so two regens over unchanged intrinsic state
+    // produce this same order bit for bit.
     ranked.sort_by(|a, b| {
         a.1.source_tier
             .cmp(&b.1.source_tier)
@@ -1547,9 +1643,31 @@ fn build_chunks(
                     .partial_cmp(&a.1.score)
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
+            .then_with(|| a.3.cmp(&b.3))
             .then_with(|| a.1.relic.cmp(&b.1.relic))
     });
-    // Expiring (<60 min) crack matches join tier 1; rest tier 2.
+    // Mission quality may reorder ONLY chunks tied on every score
+    // component (the tie band): bubble such pairs until no adjacent
+    // tied pair is mission-inverted. Bands can chain transitively
+    // (A~B and B~C reorder even if A≁C) — with ≤ `max_crack_chunks`
+    // + also-rans in the list this is a handful of passes.
+    let mut swapped = true;
+    while swapped {
+        swapped = false;
+        for i in 0..ranked.len().saturating_sub(1) {
+            let tied = ranked[i].1.source_tier == ranked[i + 1].1.source_tier
+                && in_tie_band(&ranked[i].1, &ranked[i + 1].1, input.tuning);
+            if tied
+                && mission_minutes(ranked[i + 1].2.as_ref())
+                    < mission_minutes(ranked[i].2.as_ref())
+            {
+                ranked.swap(i, i + 1);
+                swapped = true;
+            }
+        }
+    }
+    // All crack chunks are tier 2 now (pass 40): an expiring fissure
+    // keeps only its "expiring crack" label, never a tier jump.
     let mut seen_relics: HashSet<String> = HashSet::new();
     for (gear, cand, pick, part, _action_text) in ranked {
         if !seen_relics.insert(cand.relic.clone()) {
@@ -1559,32 +1677,72 @@ fn build_chunks(
             Some(_) => String::new(),
             None => " (if you have it)".to_owned(),
         };
-        let endless = input.tuning.missions.is_endless(&pick.fissure.mission_type);
-        let sp = if pick.fissure.is_hard { input.tuning.planner.steel_path_label.as_str() } else { "" };
-        let expiry_dt = parse_time(&pick.fissure.expiry);
-        let tier: u8 = if pick.expires_in_mins < input.tuning.planner.tier1_crack_mins {
-            1
-        } else {
-            2
-        };
+        // Pass 40: expiring survives ONLY as the kind label — the
+        // annotation was the same mechanism as the tier jump; the
+        // label stays, the jump is gone (tier is always 2 below).
+        let expiring = pick
+            .as_ref()
+            .map(|p| p.expires_in_mins < input.tuning.planner.tier1_crack_mins)
+            .unwrap_or(false);
         let mut alternates = String::new();
         if cand.coverage > 0 {
             alternates = format!(" Covers {} other want(s) in the same relic.", cand.coverage);
         }
-        chunks.push(Chunk {
-            id: format!("t{}-crack-{}", tier, sanitize_id(&cand.relic)),
-            tier,
-            title: format!(
-                "Crack {}{} at {}{} ({} {}) — {}.",
-                cand.batch,
-                stock_note,
-                pick.fissure.node,
-                sp,
-                cand.relic,
-                cand.refinement.name(),
-                part,
+        let (title, minutes_label, expiry_dt) = match &pick {
+            Some(pick) => {
+                let endless = input.tuning.missions.is_endless(&pick.fissure.mission_type);
+                let sp = if pick.fissure.is_hard {
+                    input.tuning.planner.steel_path_label.as_str()
+                } else {
+                    ""
+                };
+                (
+                    format!(
+                        "Crack {}{} at {}{} ({} {}) — {}.",
+                        cand.batch,
+                        stock_note,
+                        pick.fissure.node,
+                        sp,
+                        cand.relic,
+                        cand.refinement.name(),
+                        part,
+                    ),
+                    chunk_minutes_label(pick.batch_minutes, endless, cand.batch),
+                    parse_time(&pick.fissure.expiry),
+                )
+            }
+            // Feed gap (no live fissure serves the era — with the
+            // permanent Omnia Conjunction Survival entries this is
+            // an incomplete feed, not a normal state): the chunk
+            // still exists, and its mission is the standing
+            // fallback, labelled as such. No node, no expiry —
+            // nothing the feed did not say.
+            None => (
+                format!(
+                    "Crack {}{} ({} {}) — {}. Feed shows no {} fissure — Conjunction Survival (Lua) serves every era.",
+                    cand.batch,
+                    stock_note,
+                    cand.relic,
+                    cand.refinement.name(),
+                    part,
+                    cand.era,
+                ),
+                chunk_minutes_label(
+                    input
+                        .tuning
+                        .missions
+                        .minutes_for_batch("Survival", cand.batch),
+                    true,
+                    cand.batch,
+                ),
+                None,
             ),
-            minutes_label: chunk_minutes_label(pick.batch_minutes, endless, cand.batch),
+        };
+        chunks.push(Chunk {
+            id: format!("t2-crack-{}", sanitize_id(&cand.relic)),
+            tier: 2,
+            title,
+            minutes_label,
             why: format!(
                 "{}% at {} for {} ({} traces). Goal: {}.{}",
                 fmt_pct(cand.chance),
@@ -1594,7 +1752,7 @@ fn build_chunks(
                 gear,
                 alternates,
             ),
-            kind: if tier == 1 {
+            kind: if expiring {
                 "expiring crack".to_owned()
             } else {
                 "target crack".to_owned()
@@ -1611,10 +1769,18 @@ fn build_chunks(
                 batch: cand.batch,
                 traces: cand.trace_cost,
                 covers: cand.coverage,
-                radshare: radshare_for(input, &gear, &cand, &pick),
-                fissure_node: pick.fissure.node.clone(),
-                fissure_mission: pick.fissure.mission_type.clone(),
-                steel_path: pick.fissure.is_hard,
+                radshare: pick
+                    .as_ref()
+                    .and_then(|pick| radshare_for(input, &gear, &cand, pick)),
+                fissure_node: pick
+                    .as_ref()
+                    .map(|p| p.fissure.node.clone())
+                    .unwrap_or_default(),
+                fissure_mission: pick
+                    .as_ref()
+                    .map(|p| p.fissure.mission_type.clone())
+                    .unwrap_or_default(),
+                steel_path: pick.as_ref().map(|p| p.fissure.is_hard).unwrap_or(false),
                 vaulted: cand.vaulted,
                 unobtainable: cand.source_tier.is_unobtainable(),
             }),
@@ -1625,8 +1791,7 @@ fn build_chunks(
             .count()
             >= input.tuning.planner.max_crack_chunks
         {
-            // Useful slate, not exhaustive (BRIEF §10). Expiring
-            // matches join tier 1 but share the same cap.
+            // Useful slate, not exhaustive (BRIEF §10).
             break;
         }
     }
@@ -1703,17 +1868,25 @@ fn build_chunks(
         });
     }
 
-    // Within-tier order: earliest expiry first, then value (tier 1 keeps
-    // insertion value order for alerts; others sort by expiry).
+    // Within-tier order: earliest expiry first for event chunks
+    // (tier 1 keeps insertion value order for alerts; others sort
+    // by expiry). Crack chunks are the pass-40 exception: they keep
+    // the intrinsic order build_chunks established — expiry must
+    // never reorder them, so crack pairs compare Equal and the
+    // stable sort preserves insertion order.
     chunks.sort_by(|a, b| {
-        a.tier
-            .cmp(&b.tier)
-            .then_with(|| match (a.expiry, b.expiry) {
-                (Some(x), Some(y)) => x.cmp(&y),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => std::cmp::Ordering::Equal,
-            })
+        a.tier.cmp(&b.tier).then_with(|| {
+            if a.crack.is_some() && b.crack.is_some() {
+                std::cmp::Ordering::Equal
+            } else {
+                match (a.expiry, b.expiry) {
+                    (Some(x), Some(y)) => x.cmp(&y),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                }
+            }
+        })
     });
     (chunks, farms, notes)
 }
@@ -3034,5 +3207,549 @@ mod tests {
             tuning: &t,
         });
         assert!(q.event_alerts.iter().all(|a| !a.done));
+    }
+
+    // -----------------------------------------------------------------
+    // Pass 40 (addendum #105): sort stability gates.
+    //
+    // Scenario shape: one gear per chunk, one relic per part, stock
+    // Unknown unless a test says otherwise (so refinement is Radiant
+    // and the candidate chance is the table's Radiant value; batches
+    // land on the unknown-stock default of 4). Mission minutes for a
+    // batch of 4 from the shipped tuning: Capture 20, Survival 22,
+    // Exterminate 28, Mobile Defense 36.
+    // -----------------------------------------------------------------
+
+    /// (gear, relic, radiant chance) triples -> (roster, tables, wants).
+    fn stability_fixture(
+        spec: &[(&str, &str, f64)],
+    ) -> (Roster, RelicTables, Vec<String>) {
+        let roster_json: Vec<String> = spec
+            .iter()
+            .map(|(gear, _, _)| {
+                format!(
+                    r#"{{"name": "{gear}", "vaulted": false, "type": "warframe",
+                         "parts": [{{"name": "{gear} Blueprint"}}]}}"#
+                )
+            })
+            .collect();
+        let roster =
+            Roster::from_json(&format!("[{}]", roster_json.join(","))).unwrap();
+        let relic_json: Vec<String> = spec
+            .iter()
+            .map(|(gear, relic, radiant)| {
+                format!(
+                    r#""{relic}": {{"name": "{relic}", "vaulted": false, "sources": {{}},
+                        "rewards": [{{"name": "{gear} Blueprint",
+                            "chance": {{"Intact": 11, "Exceptional": 13, "Flawless": 17, "Radiant": {radiant}}}}}]}}"#
+                )
+            })
+            .collect();
+        let tables = RelicTables::from_json(
+            &format!(r#"{{"relics": {{{}}}, "sources": {{}}}}"#, relic_json.join(",")),
+        )
+        .unwrap();
+        let wants: Vec<String> =
+            spec.iter().map(|(gear, _, _)| format!("{gear} Blueprint")).collect();
+        (roster, tables, wants)
+    }
+
+    fn stability_plan(
+        roster: &Roster,
+        tables: &RelicTables,
+        wants: &[String],
+        fissures: Vec<Fissure>,
+    ) -> Plan {
+        let world = WorldState {
+            fissures,
+            ..Default::default()
+        };
+        let owned = OwnedEquipment::empty();
+        let stock = RelicStock::Unknown;
+        let recent: HashSet<String> = HashSet::new();
+        let now: DateTime<Utc> = "2026-10-15T21:00:00Z".parse().unwrap();
+        plan(&PlanInput {
+            now,
+            world: &world,
+            owned: &owned,
+            wants,
+            roster,
+            relics: tables,
+            stock: &stock,
+            part_stock: no_part_stock(),
+            unverified_parts: no_unverified(),
+            pins: &[],
+            recent_gear: &recent,
+            steel_path_tiebreak: true,
+            completed_missions: &[],
+            item_names: test_item_names(),
+            tuning: &tuning(),
+        })
+    }
+
+    fn crack_relics(p: &Plan) -> Vec<String> {
+        p.chunks
+            .iter()
+            .filter(|c| c.crack.is_some())
+            .map(|c| c.crack.as_ref().unwrap().relic.clone())
+            .collect()
+    }
+
+    #[test]
+    fn stability_chunks_exist_without_any_fissure() {
+        // Change 1: chunk existence is intrinsic. An empty fissure
+        // feed yields the chunks anyway, carrying no invented node
+        // or expiry — and an Omnia-only feed (the Conjunction
+        // Survival shape) serves every era's chunk.
+        let (roster, tables, wants) = stability_fixture(&[
+            ("Alpha Prime", "Lith A1", 20.0),
+            ("Beta Prime", "Meso B1", 19.0),
+        ]);
+        let p = stability_plan(&roster, &tables, &wants, vec![]);
+        let cracks: Vec<&Chunk> =
+            p.chunks.iter().filter(|c| c.crack.is_some()).collect();
+        assert_eq!(cracks.len(), 2, "chunks exist on an empty feed");
+        for c in &cracks {
+            let ci = c.crack.as_ref().unwrap();
+            assert_eq!(ci.fissure_node, "", "no invented node");
+            assert!(c.expiry.is_none(), "no invented expiry");
+            assert!(
+                c.title.contains("Conjunction Survival"),
+                "the standing fallback is labelled: {}",
+                c.title
+            );
+        }
+        let omnia = vec![syn_fissure(
+            "Yuvarium (Lua)",
+            "Survival",
+            "Omnia",
+            "2026-10-15T23:00:00Z",
+        )];
+        let p2 = stability_plan(&roster, &tables, &wants, omnia);
+        for c in p2.chunks.iter().filter(|c| c.crack.is_some()) {
+            assert_eq!(
+                c.crack.as_ref().unwrap().fissure_node,
+                "Yuvarium (Lua)",
+                "Omnia serves every era"
+            );
+        }
+    }
+
+    #[test]
+    fn stability_rotation_changes_order_only_within_tie_bands() {
+        // Gate (a): a clearly separated slate (20 / 11 / 5 — no pair
+        // inside the chance band) keeps its exact order across
+        // rotations that change every chunk's mission and expiry.
+        let (roster, tables, wants) = stability_fixture(&[
+            ("Alpha Prime", "Lith A1", 20.0),
+            ("Beta Prime", "Meso B1", 11.0),
+            ("Gamma Prime", "Neo G1", 5.0),
+        ]);
+        let want_order = vec![
+            "Lith A1".to_owned(),
+            "Meso B1".to_owned(),
+            "Neo G1".to_owned(),
+        ];
+        let feeds: Vec<Vec<Fissure>> = vec![
+            // Rotation 1: everything slow.
+            vec![
+                syn_fissure("N1", "Mobile Defense", "Lith", "2026-10-15T22:00:00Z"),
+                syn_fissure("N2", "Mobile Defense", "Meso", "2026-10-15T22:30:00Z"),
+                syn_fissure("N3", "Mobile Defense", "Neo", "2026-10-15T23:00:00Z"),
+            ],
+            // Rotation 2: everything fast, expiries shuffled — the
+            // old sort key (tier, then expiry) would reorder this.
+            vec![
+                syn_fissure("N4", "Capture", "Neo", "2026-10-15T21:20:00Z"),
+                syn_fissure("N5", "Capture", "Lith", "2026-10-15T21:40:00Z"),
+                syn_fissure("N6", "Capture", "Meso", "2026-10-15T21:50:00Z"),
+            ],
+            // Rotation 3: only the Omnia conjunction entry remains.
+            vec![syn_fissure(
+                "Yuvarium (Lua)",
+                "Survival",
+                "Omnia",
+                "2026-10-15T23:00:00Z",
+            )],
+        ];
+        for (i, feed) in feeds.into_iter().enumerate() {
+            let p = stability_plan(&roster, &tables, &wants, feed);
+            assert_eq!(
+                crack_relics(&p),
+                want_order,
+                "rotation {} must not reorder a separated slate",
+                i + 1
+            );
+        }
+    }
+
+    #[test]
+    fn stability_near_tie_pair_flips_with_mission_quality_only() {
+        // Gate (b): 20 vs 19 at Radiant — 5% apart, inside the 10%
+        // chance band, same tier / coverage / stock factor, so the
+        // pair is tied and mission quality alone decides. Feed 1
+        // gives Beta the fast mission; feed 2 reverses it.
+        let (roster, tables, wants) = stability_fixture(&[
+            ("Alpha Prime", "Lith A1", 20.0),
+            ("Beta Prime", "Meso B1", 19.0),
+        ]);
+        let feed1 = vec![
+            syn_fissure("Slow", "Mobile Defense", "Lith", "2026-10-15T23:00:00Z"),
+            syn_fissure("Fast", "Capture", "Meso", "2026-10-15T23:00:00Z"),
+        ];
+        let p1 = stability_plan(&roster, &tables, &wants, feed1);
+        assert_eq!(
+            crack_relics(&p1),
+            vec!["Meso B1".to_owned(), "Lith A1".to_owned()],
+            "tied pair: the better mission wins"
+        );
+        let feed2 = vec![
+            syn_fissure("Fast", "Capture", "Lith", "2026-10-15T23:00:00Z"),
+            syn_fissure("Slow", "Mobile Defense", "Meso", "2026-10-15T23:00:00Z"),
+        ];
+        let p2 = stability_plan(&roster, &tables, &wants, feed2);
+        assert_eq!(
+            crack_relics(&p2),
+            vec!["Lith A1".to_owned(), "Meso B1".to_owned()],
+            "and flips back when the feed reverses"
+        );
+    }
+
+    #[test]
+    fn stability_separated_pair_never_flips() {
+        // Gate (c): 20 vs 10 is 50% apart — outside the band under
+        // every feed, including the adversarial one (best chunk on
+        // the slowest mission, worst chunk on the fastest, worst
+        // chunk's fissure about to expire).
+        let (roster, tables, wants) = stability_fixture(&[
+            ("Alpha Prime", "Lith A1", 20.0),
+            ("Beta Prime", "Meso B1", 10.0),
+        ]);
+        let want = vec!["Lith A1".to_owned(), "Meso B1".to_owned()];
+        let feeds: Vec<Vec<Fissure>> = vec![
+            vec![
+                syn_fissure("Slow", "Mobile Defense", "Lith", "2026-10-15T23:00:00Z"),
+                syn_fissure("Fast", "Capture", "Meso", "2026-10-15T23:00:00Z"),
+            ],
+            vec![
+                syn_fissure("Fast", "Capture", "Lith", "2026-10-15T21:10:00Z"),
+                syn_fissure("Slow", "Mobile Defense", "Meso", "2026-10-16T02:00:00Z"),
+            ],
+            vec![
+                syn_fissure("Slow", "Mobile Defense", "Lith", "2026-10-16T02:00:00Z"),
+                syn_fissure("Fast", "Capture", "Meso", "2026-10-15T21:10:00Z"),
+            ],
+        ];
+        for (i, feed) in feeds.into_iter().enumerate() {
+            let p = stability_plan(&roster, &tables, &wants, feed);
+            assert_eq!(crack_relics(&p), want, "feed {} must not flip a separated pair", i + 1);
+        }
+    }
+
+    #[test]
+    fn stability_expiring_fissure_annotates_but_never_promotes() {
+        // Gate (d): the worse chunk's fissure expires inside the
+        // old tier-1 window. It keeps the "expiring crack" label
+        // but stays tier 2, below the better chunk — and below the
+        // tier-1 event alert, which still leads the slate.
+        let (roster, tables, wants) = stability_fixture(&[
+            ("Alpha Prime", "Lith A1", 20.0),
+            ("Beta Prime", "Meso B1", 10.0),
+        ]);
+        let mut world = WorldState {
+            fissures: vec![
+                syn_fissure("Far", "Capture", "Lith", "2026-10-16T02:00:00Z"),
+                syn_fissure("Near", "Capture", "Meso", "2026-10-15T21:30:00Z"),
+            ],
+            ..Default::default()
+        };
+        world
+            .alerts
+            .push(syn_alert("a1", "event_alert", "Event", "2026-10-15T21:20:00Z", true));
+        let owned = OwnedEquipment::empty();
+        let stock = RelicStock::Unknown;
+        let recent: HashSet<String> = HashSet::new();
+        let now: DateTime<Utc> = "2026-10-15T21:00:00Z".parse().unwrap();
+        let p = plan(&PlanInput {
+            now,
+            world: &world,
+            owned: &owned,
+            wants: &wants,
+            roster: &roster,
+            relics: &tables,
+            stock: &stock,
+            part_stock: no_part_stock(),
+            unverified_parts: no_unverified(),
+            pins: &[],
+            recent_gear: &recent,
+            steel_path_tiebreak: true,
+            completed_missions: &[],
+            item_names: test_item_names(),
+            tuning: &tuning(),
+        });
+        assert_eq!(p.chunks[0].tier, 1, "the event alert still leads");
+        assert!(p.chunks[0].crack.is_none());
+        assert_eq!(
+            crack_relics(&p),
+            vec!["Lith A1".to_owned(), "Meso B1".to_owned()],
+            "expiry does not lift the worse chunk"
+        );
+        let beta = p
+            .chunks
+            .iter()
+            .find(|c| c.crack.as_ref().map(|ci| ci.relic.as_str()) == Some("Meso B1"))
+            .unwrap();
+        assert_eq!(beta.tier, 2, "no tier jump for an expiring crack");
+        assert_eq!(beta.kind, "expiring crack", "the annotation stays");
+        let alpha = p
+            .chunks
+            .iter()
+            .find(|c| c.crack.as_ref().map(|ci| ci.relic.as_str()) == Some("Lith A1"))
+            .unwrap();
+        assert_eq!(alpha.kind, "target crack");
+    }
+
+    #[test]
+    fn stability_identical_inputs_identical_slate() {
+        // Gate (e): bit-stability — two regens over identical
+        // inputs produce identical chunk slates.
+        let (roster, tables, wants) = stability_fixture(&[
+            ("Alpha Prime", "Lith A1", 20.0),
+            ("Beta Prime", "Meso B1", 19.0),
+            ("Gamma Prime", "Neo G1", 5.0),
+        ]);
+        let feed = vec![
+            syn_fissure("N1", "Mobile Defense", "Lith", "2026-10-15T22:00:00Z"),
+            syn_fissure("N2", "Capture", "Meso", "2026-10-15T22:30:00Z"),
+            syn_fissure("N3", "Capture", "Neo", "2026-10-15T23:00:00Z"),
+        ];
+        let sig = |p: &Plan| -> Vec<(String, u8, String, String)> {
+            p.chunks
+                .iter()
+                .map(|c| (c.id.clone(), c.tier, c.title.clone(), c.kind.clone()))
+                .collect()
+        };
+        let a = stability_plan(&roster, &tables, &wants, feed.clone());
+        let b = stability_plan(&roster, &tables, &wants, feed);
+        assert_eq!(sig(&a), sig(&b), "identical inputs, identical slate");
+    }
+
+    #[test]
+    fn cross_tier_selection_keeps_the_lowest_tier() {
+        // Regression (pass 40, addendum #105): the candidate
+        // comparison's tier leg was inverted, so with an Omnia
+        // fissure live (nothing filtered) a vaulted, unobtainable
+        // relic replaced the unvaulted one as a part's best crack.
+        // Probe-verified against the v0.5.33 tree, which chose the
+        // Axi relic here.
+        let text = r#"{
+            "relics": {
+                "Lith A1": {"name": "Lith A1", "vaulted": false, "sources": {},
+                    "rewards": [{"name": "Probe Prime Blueprint", "chance": {"Intact": 11, "Radiant": 20}}]},
+                "Axi B1": {"name": "Axi B1", "vaulted": true, "sources": {},
+                    "rewards": [{"name": "Probe Prime Blueprint", "chance": {"Intact": 25.33, "Radiant": 25.33}}]}
+            },
+            "sources": {}
+        }"#;
+        let tables = RelicTables::from_json(text).unwrap();
+        let stock = RelicStock::Unknown;
+        let varzia = VarziaAvailability::default();
+        let others: HashSet<String> = HashSet::new();
+        let t = tuning();
+        let cand = best_crack_candidate(
+            "Probe Prime Blueprint",
+            &tables,
+            &stock,
+            &varzia,
+            &others,
+            &t,
+        )
+        .unwrap();
+        assert_eq!(cand.relic, "Lith A1", "lowest source tier wins");
+        assert_eq!(cand.source_tier, SourceTier::Unvaulted);
+        let fiss = vec![syn_fissure(
+            "Yuvarium (Lua)",
+            "Survival",
+            "Omnia",
+            "2026-10-15T23:00:00Z",
+        )];
+        let now: DateTime<Utc> = "2026-10-15T21:00:00Z".parse().unwrap();
+        let (cand2, _) = best_crack_for_part(
+            "Probe Prime Blueprint",
+            &tables,
+            &stock,
+            &varzia,
+            &others,
+            &fiss,
+            now,
+            true,
+            &t,
+        )
+        .unwrap();
+        assert_eq!(cand2.relic, "Lith A1");
+    }
+
+    #[test]
+    fn card_action_picks_the_better_tier_across_parts() {
+        // The same inverted comparison lived in derive_action's
+        // cross-part choice: the rarest needed part is evaluated
+        // first, and a later part's better-tier crack must replace
+        // its worse-tier one. Systems (rare, vaulted-only relic)
+        // evaluates first; Chassis (uncommon, unvaulted relic)
+        // must win the action.
+        let roster = Roster::from_json(
+            r#"[{"name": "Probe Prime", "vaulted": false, "type": "warframe",
+                  "parts": [{"name": "Probe Prime Systems Blueprint"},
+                            {"name": "Probe Prime Chassis Blueprint"}]}]"#,
+        )
+        .unwrap();
+        let text = r#"{
+            "relics": {
+                "Axi B1": {"name": "Axi B1", "vaulted": true, "sources": {},
+                    "rewards": [{"name": "Probe Prime Systems Blueprint", "chance": {"Intact": 2, "Radiant": 10}}]},
+                "Lith A1": {"name": "Lith A1", "vaulted": false, "sources": {},
+                    "rewards": [{"name": "Probe Prime Chassis Blueprint", "chance": {"Intact": 11, "Radiant": 20}}]}
+            },
+            "sources": {}
+        }"#;
+        let tables = RelicTables::from_json(text).unwrap();
+        let mut world = WorldState::default();
+        world.fissures = vec![syn_fissure(
+            "Yuvarium (Lua)",
+            "Survival",
+            "Omnia",
+            "2026-10-15T23:00:00Z",
+        )];
+        let owned = OwnedEquipment::empty();
+        let stock = RelicStock::Unknown;
+        let wants = vec![
+            "Probe Prime Systems Blueprint".to_owned(),
+            "Probe Prime Chassis Blueprint".to_owned(),
+        ];
+        let recent: HashSet<String> = HashSet::new();
+        let now: DateTime<Utc> = "2026-10-15T21:00:00Z".parse().unwrap();
+        let p = plan(&PlanInput {
+            now,
+            world: &world,
+            owned: &owned,
+            wants: &wants,
+            roster: &roster,
+            relics: &tables,
+            stock: &stock,
+            part_stock: no_part_stock(),
+            unverified_parts: no_unverified(),
+            pins: &[],
+            recent_gear: &recent,
+            steel_path_tiebreak: true,
+            completed_missions: &[],
+            item_names: test_item_names(),
+            tuning: &tuning(),
+        });
+        assert_eq!(p.goals.len(), 1);
+        assert_eq!(p.goals[0].action.kind, ActionKind::Crack);
+        assert_eq!(
+            p.goals[0].action.relic.as_deref(),
+            Some("Lith A1"),
+            "the action names the better-tier crack: {}",
+            p.goals[0].action.text
+        );
+    }
+
+    #[test]
+    fn tie_band_is_component_wise() {
+        // The band's three components, exercised directly: chance
+        // inside the relative epsilon ties; a coverage step never
+        // does (the brief's example — high-chance/low-coverage vs
+        // low-chance/high-coverage with near-equal composites); a
+        // stock-knowledge step never does.
+        let t = tuning();
+        let varzia = VarziaAvailability::default();
+        let others: HashSet<String> = ["B Prime Blueprint".to_owned()].into_iter().collect();
+        let tables = RelicTables::from_json(
+            r#"{"relics": {
+                "Lith A1": {"name": "Lith A1", "vaulted": false, "sources": {},
+                    "rewards": [{"name": "A Prime Blueprint",
+                        "chance": {"Intact": 20, "Exceptional": 20, "Flawless": 20, "Radiant": 20}}]},
+                "Meso B1": {"name": "Meso B1", "vaulted": false, "sources": {},
+                    "rewards": [{"name": "B Prime Blueprint",
+                        "chance": {"Intact": 20, "Exceptional": 20, "Flawless": 20, "Radiant": 20}},
+                                {"name": "A Prime Blueprint",
+                        "chance": {"Intact": 20, "Exceptional": 20, "Flawless": 20, "Radiant": 20}}]}
+            }, "sources": {}}"#,
+        )
+        .unwrap();
+        let unknown = RelicStock::Unknown;
+        // Empty other-wants: Lith A1 is A's best candidate (with B
+        // in the set, Meso B1's coverage would make IT A's best —
+        // not the solo read this test wants).
+        let none: HashSet<String> = HashSet::new();
+        let a_solo = best_crack_candidate(
+            "A Prime Blueprint",
+            &tables,
+            &unknown,
+            &varzia,
+            &none,
+            &t,
+        )
+        .unwrap();
+        let b_cover = best_crack_candidate(
+            "B Prime Blueprint",
+            &tables,
+            &unknown,
+            &varzia,
+            &["A Prime Blueprint".to_owned()].into_iter().collect(),
+            &t,
+        )
+        .unwrap();
+        assert_eq!(a_solo.coverage, 0);
+        assert_eq!(b_cover.coverage, 1, "Meso B1 also drops the other want");
+        assert!(
+            !in_tie_band(&a_solo, &b_cover, &t),
+            "equal chance, different coverage: not a tie"
+        );
+        assert!(in_tie_band(&a_solo, &a_solo, &t), "a candidate ties itself");
+
+        // Stock knowledge: same relic, same numbers, but one side
+        // known-held (factor 1.5) and the other unknown (1.0).
+        let known = RelicStock::Known(crate::model::KnownStock::from_totals(
+            [("Lith A1".to_owned(), 3)].into_iter().collect(),
+        ));
+        let a_known = best_crack_candidate(
+            "A Prime Blueprint",
+            &tables,
+            &known,
+            &varzia,
+            &none,
+            &t,
+        )
+        .unwrap();
+        assert_eq!(a_known.chance, a_solo.chance, "flat table: same chance");
+        assert!(
+            !in_tie_band(&a_solo, &a_known, &t),
+            "known vs unknown stock: not a tie"
+        );
+
+        // Chance boundary: 20 vs 18 is exactly the 10% relative
+        // band edge (tied); 20 vs 17 is outside it.
+        let tables2 = RelicTables::from_json(
+            r#"{"relics": {
+                "Lith A1": {"name": "Lith A1", "vaulted": false, "sources": {},
+                    "rewards": [{"name": "A Prime Blueprint", "chance": {"Intact": 11, "Radiant": 20}}]},
+                "Lith C1": {"name": "Lith C1", "vaulted": false, "sources": {},
+                    "rewards": [{"name": "C Prime Blueprint", "chance": {"Intact": 11, "Radiant": 18}}]},
+                "Lith D1": {"name": "Lith D1", "vaulted": false, "sources": {},
+                    "rewards": [{"name": "D Prime Blueprint", "chance": {"Intact": 11, "Radiant": 17}}]}
+            }, "sources": {}}"#,
+        )
+        .unwrap();
+        let none: HashSet<String> = HashSet::new();
+        let c20 = best_crack_candidate("A Prime Blueprint", &tables2, &unknown, &varzia, &none, &t)
+            .unwrap();
+        let c18 = best_crack_candidate("C Prime Blueprint", &tables2, &unknown, &varzia, &none, &t)
+            .unwrap();
+        let c17 = best_crack_candidate("D Prime Blueprint", &tables2, &unknown, &varzia, &none, &t)
+            .unwrap();
+        assert!(in_tie_band(&c20, &c18, &t), "20 vs 18: at the band edge, tied");
+        assert!(!in_tie_band(&c20, &c17, &t), "20 vs 17: outside the band");
     }
 }
