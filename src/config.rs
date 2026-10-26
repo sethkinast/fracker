@@ -28,6 +28,10 @@ pub struct Config {
     /// an ephemeral port and records the live URL for the tray's Open
     /// action. 0 = always pick an ephemeral port.
     pub serve_port: u16,
+    /// Reward-pick detection (pass 39): on the fissure reward
+    /// screen, grab one frame at T+14 s, OCR the bordered card,
+    /// and credit the part to stock. Default on.
+    pub reward_detect: bool,
 }
 
 impl Default for Config {
@@ -39,6 +43,7 @@ impl Default for Config {
             pins: Vec::new(),
             steel_path_tiebreak: true,
             serve_port: 8791,
+            reward_detect: true,
         }
     }
 }
@@ -85,6 +90,9 @@ impl Config {
         }
         if let Some(v) = table.get("serve_port").and_then(|v| v.as_integer()) {
             cfg.serve_port = v.clamp(0, 65535) as u16;
+        }
+        if let Some(v) = table.get("reward_detect").and_then(|v| v.as_bool()) {
+            cfg.reward_detect = v;
         }
         Ok((cfg, ConfigSource::File))
     }

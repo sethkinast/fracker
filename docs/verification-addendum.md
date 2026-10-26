@@ -1953,3 +1953,40 @@ it refines the brief where they disagree. For the next worker pass.
     pre-tag. Live verification of the gate is post-ship
     (Seth's next browse sync). Details:
     docs/thirty-eighth-pass.md.
+104. **Reward-pick detection and credit (pass 39, shipped
+    as v0.5.33).** The crack loop's stages 4 + 5 (QUEUE_REVIEW
+    loop): EE.log names only Seth's own relic roll, never
+    any player's pick, so the pick is read off the screen —
+    one frame at T+14 s from Event::RelicRewardScreen (the
+    screen lives 15 s). New src/reward.rs + resident
+    wiring: the paired initialized/got-rewards events arm
+    exactly one grab (RewardArming); the frame comes from
+    the live capture session's stream via a FrameTap
+    decorator (freshest frame ≤ 3 s old) or, with no
+    session, from a stream the grab negotiates at T+0.
+    Classification is structural (≥ 2 slots with a dark
+    card panel + real name-band text) — the banner OCR was
+    measured and rejected (thin letterspaced glyphs do not
+    read). The pick is the bordered card: perimeter
+    max-projection continuity, winner needs ≥ 0.55 and
+    ≥ 0.30 over the runner-up; fixture continuities
+    0.956/0.221/0.000/0.035. The bordered card's name band
+    is read at PSM 6 and 11 and arbitrated like the grid
+    paths (hold = score ≥ 0.80 + margin ≥ 0.10; agreeing
+    holds credit, contradicting holds refuse). Credit is
+    +1 verified in stock.json under the /unverified
+    discipline (gate, RMW, tmp+rename, refuse
+    unparseable), pruning the part's unverified entry;
+    regen fires after; every grab saves its frame to
+    capture-debug/rewards/ and logs its outcome. All
+    failures are silent misses — never a wrong credit. No
+    relic decrement (the screen does not attribute a card
+    to a relic); ticks untouched. Fixture verification on
+    reward-screen.png: DETECT "Dual Kamas Prime
+    Blueprint" (the brief's expected pick; read "- ual
+    Kamas Prime B lueprint", 0.923 vs 0.808 runner-up).
+    Suite 336 passed / 0 failed on the shipped tree (327
+    pre-rebase; 6 new tests, one running the real engine
+    over font-rendered names). Details:
+    docs/thirty-ninth-pass.md. Live verification (a real
+    crack) is post-ship.

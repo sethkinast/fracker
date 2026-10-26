@@ -198,6 +198,7 @@ async fn run_resident(args: &Args) -> Result<(), String> {
         watch_interval_ms: args.watch_interval_ms,
         serve_port: cfg.serve_port,
         pop_on_session_start: cfg.pop_on_session_start,
+        reward_detect: cfg.reward_detect,
     };
     let shutdown = resident::Shutdown::new();
 

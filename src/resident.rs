@@ -50,13 +50,13 @@ const TRAY_REFRESH_TIMEOUT: Duration = Duration::from_secs(2);
 const TASK_ABORT_TIMEOUT: Duration = Duration::from_secs(2);
 
 use crate::applog::AppLog;
-use crate::capture::{self, CaptureData, CaptureLog, CaptureSession, CaptureStage};
+use crate::capture::{self, CaptureData, CaptureLog, CaptureSession, CaptureStage, FrameSource};
 use crate::ocr::StockState as OcrStock;
 use crate::report::{self, ReportConfig};
 use crate::state::AppState;
 use crate::tray::{FrackerTray, TrayCommand, TrayStatus};
 use crate::watch::LogWatcher;
-use crate::{elog, portal, screencast, server, tabs, ticks};
+use crate::{elog, portal, reward, screencast, server, tabs, ticks};
 
 /// What asked for a report run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +72,12 @@ pub enum Trigger {
     MissionEnd,
     /// The tray's manual Regenerate verb.
     Manual,
+    /// The fissure reward-choice screen appeared (pass 39). NOT a
+    /// report trigger: it arms the T+14 reward grab.
+    RewardScreen,
+    /// The reward-choice screen shut down (pass 39). NOT a report
+    /// trigger: it closes the reward episode.
+    RewardClosed,
 }
 
 /// Cooperative shutdown for both the async loop and the watch thread.
@@ -124,6 +130,9 @@ pub struct ResidentOptions {
     pub serve_port: u16,
     /// Open the plan page automatically on session start (item 40b).
     pub pop_on_session_start: bool,
+    /// Reward-pick detection on the fissure reward screen
+    /// (pass 39; config `reward_detect`, default on).
+    pub reward_detect: bool,
 }
 
 /// A message from the Capture Inventory worker thread to the resident
@@ -234,6 +243,9 @@ pub async fn run(
     if let Some(server) = &plan_server {
         opts.report.push = Some(server.hub());
     }
+    // Pass 39: a regen sender for the reward grab task (credit
+    // fires the same Manual trigger the /unverified toggle uses).
+    let reward_regen_tx = trigger_tx.clone();
     let watch_thread = spawn_watch(
         opts.log_path.clone(),
         opts.watch_interval_ms,
@@ -262,6 +274,14 @@ pub async fn run(
     let (capture_start_tx, mut capture_start_rx) =
         mpsc::unbounded_channel::<Result<CaptureRun, screencast::NegotiateError>>();
     let mut capture_start: Option<tokio::task::JoinHandle<()>> = None;
+    // Pass 39: reward-grab state. The tap is shared with the
+    // capture worker (its frame source offers frames while an
+    // episode is armed); the arming coalesces the paired
+    // reward-screen log events into one grab per episode.
+    let reward_tap = Arc::new(reward::FrameTap::new());
+    let mut reward_arming = reward::RewardArming::new();
+    let (reward_done_tx, mut reward_done_rx) = mpsc::unbounded_channel::<()>();
+    let mut reward_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -308,8 +328,41 @@ pub async fn run(
                 while let Ok(t) = trigger_rx.try_recv() {
                     burst.push(t);
                 }
-                let session_started = burst.contains(&Trigger::SessionStart);
-                schedule_report!(burst[0], session_started && opts.pop_on_session_start);
+                // Pass 39: reward triggers never schedule a report.
+                // Partition them out and drive the grab arming: a
+                // shutdown closes the episode; a screen appearance
+                // arms one grab per episode (the paired "initialized"
+                // and "Got rewards" events coalesce in RewardArming).
+                let mut reward_screen = false;
+                let mut reward_closed = false;
+                burst.retain(|t| match t {
+                    Trigger::RewardScreen => {
+                        reward_screen = true;
+                        false
+                    }
+                    Trigger::RewardClosed => {
+                        reward_closed = true;
+                        false
+                    }
+                    _ => true,
+                });
+                if reward_closed {
+                    reward_arming.on_closed();
+                }
+                if reward_screen && opts.reward_detect && reward_arming.on_screen() {
+                    reward_task = Some(spawn_reward_grab(
+                        opts.clone(),
+                        capture.is_some(),
+                        reward_tap.clone(),
+                        reward_regen_tx.clone(),
+                        capture_log.clone(),
+                        reward_done_tx.clone(),
+                    ));
+                }
+                if !burst.is_empty() {
+                    let session_started = burst.contains(&Trigger::SessionStart);
+                    schedule_report!(burst[0], session_started && opts.pop_on_session_start);
+                }
             }
             cmd = recv_cmd(&mut cmds) => {
                 match cmd {
@@ -346,10 +399,16 @@ pub async fn run(
                             let start_opts = opts.clone();
                             let start_status = status.clone();
                             let start_log = capture_log.clone();
+                            let start_tap = reward_tap.clone();
                             let result_tx = capture_start_tx.clone();
                             capture_start = Some(tokio::spawn(async move {
-                                let started =
-                                    start_capture(&start_opts, &start_status, &start_log).await;
+                                let started = start_capture(
+                                    &start_opts,
+                                    &start_status,
+                                    &start_log,
+                                    start_tap,
+                                )
+                                .await;
                                 let _ = result_tx.send(started);
                             }));
                         }
@@ -394,6 +453,12 @@ pub async fn run(
                     None => {}
                 }
             }
+            _ = reward_done_rx.recv() => {
+                // Pass 39: the grab resolved (credit or miss); the
+                // next reward screen may arm a fresh episode.
+                reward_arming.on_resolved();
+                reward_task = None;
+            }
             _ = tick.tick() => {
                 let rerun = pump_capture(&opts, &status, &tray, &mut capture, &capture_log).await;
                 if rerun {
@@ -429,6 +494,17 @@ pub async fn run(
             Err(_) => {
                 eprintln!("resident: capture start did not abort in time (detached)");
                 app_log.record("teardown", "abort capture start: timed out (detached)");
+            }
+        }
+    }
+    if let Some(job) = reward_task.take() {
+        app_log.record("teardown", "abort reward grab: start");
+        job.abort();
+        match tokio::time::timeout(TASK_ABORT_TIMEOUT, job).await {
+            Ok(_) => app_log.record("teardown", "abort reward grab: done"),
+            Err(_) => {
+                eprintln!("resident: reward grab did not abort in time (detached)");
+                app_log.record("teardown", "abort reward grab: timed out (detached)");
             }
         }
     }
@@ -540,11 +616,176 @@ fn spawn_open_job(
     })
 }
 
+/// A frame-source decorator (pass 39): offers every frame to
+/// the reward tap before the capture pipeline consumes it.
+struct TapSource {
+    inner: screencast::ScreenCastSource,
+    tap: Arc<reward::FrameTap>,
+}
+
+impl capture::FrameSource for TapSource {
+    fn next_frame(&mut self) -> Result<Option<crate::ocr::GrayImage>, String> {
+        let frame = self.inner.next_frame()?;
+        if let Some(f) = &frame {
+            self.tap.offer(f);
+        }
+        Ok(frame)
+    }
+}
+
+/// Spawn the one-shot reward grab (pass 39): at T+14 from the
+/// reward screen's appearance, take one frame, detect the
+/// bordered card's part, credit it, and regen. Completion is
+/// always reported on `done` so the loop can re-arm.
+fn spawn_reward_grab(
+    opts: ResidentOptions,
+    capture_live: bool,
+    tap: Arc<reward::FrameTap>,
+    regen_tx: mpsc::UnboundedSender<Trigger>,
+    log: CaptureLog,
+    done: mpsc::UnboundedSender<()>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        reward_grab(opts, capture_live, tap, regen_tx, log).await;
+        let _ = done.send(());
+    })
+}
+
+/// The reward grab itself. Every failure path logs a miss and
+/// credits nothing (the design of record: silent MISS, never a
+/// wrong credit).
+async fn reward_grab(
+    opts: ResidentOptions,
+    capture_live: bool,
+    tap: Arc<reward::FrameTap>,
+    regen_tx: mpsc::UnboundedSender<Trigger>,
+    log: CaptureLog,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(reward::GRAB_DELAY_SECS);
+    log.record("reward", "armed: reward screen seen; one grab at T+14s");
+    let frame = if capture_live {
+        // Reuse the live capture stream through the tap: portal
+        // startup is already paid and the stream is warm.
+        tap.arm();
+        tokio::time::sleep_until(deadline).await;
+        let f = tap.latest_fresh(Duration::from_secs(3));
+        tap.disarm();
+        if f.is_none() {
+            log.record("reward", "miss: capture stream gave no fresh frame at T+14");
+        }
+        f
+    } else {
+        reward_grab_own_stream(&opts, deadline, &log).await
+    };
+    let Some(frame) = frame else { return };
+    // Audit first: the grabbed frame is the evidence either way.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_else(|_| "0".to_owned());
+    let debug_dir = crate::config::data_dir().join("capture-debug");
+    match reward::save_audit_frame(&frame, &debug_dir, &stamp) {
+        Ok(p) => log.record("reward", &format!("frame saved: {}", p.display())),
+        Err(e) => log.record("reward", &format!("audit save failed: {e}")),
+    }
+    let data_dir = opts.report.data_dir.clone();
+    let stock_path = opts.report.stock_path.clone();
+    let detected = tokio::task::spawn_blocking(move || -> Result<String, String> {
+        let data = CaptureData::load(&data_dir).map_err(|e| format!("capture data load: {e}"))?;
+        let layout = data
+            .layouts
+            .get("relic")
+            .cloned()
+            .ok_or_else(|| "no relic layout".to_owned())?;
+        let engine = crate::ocr::TesseractCliEngine::probe(layout)
+            .ok_or_else(|| "tesseract unavailable".to_owned())?;
+        reward::detect_pick(&engine, &frame, &data.universes.parts).map_err(|m| m.describe())
+    })
+    .await;
+    match detected {
+        Ok(Ok(name)) => match reward::credit_part(&stock_path, &name) {
+            Ok(count) => {
+                log.record(
+                    "reward",
+                    &format!("credited {name} (verified count now {count})"),
+                );
+                let _ = regen_tx.send(Trigger::Manual);
+            }
+            Err(e) => log.record("reward", &format!("credit for {name} failed: {e}")),
+        },
+        Ok(Err(why)) => log.record("reward", &format!("miss: {why}")),
+        Err(e) => log.record("reward", &format!("miss: detection task failed: {e}")),
+    }
+}
+
+/// The standalone-stream path of the reward grab: negotiate a
+/// portal stream at T+0 (so consent/startup latency is paid
+/// immediately, not at T+14), drain frames into "latest", and
+/// hand over the freshest frame once the deadline passes.
+async fn reward_grab_own_stream(
+    opts: &ResidentOptions,
+    deadline: tokio::time::Instant,
+    log: &CaptureLog,
+) -> Option<crate::ocr::GrayImage> {
+    if let Err(e) = screencast::preflight_pipewire() {
+        log.record("reward", &format!("miss: pipewire preflight: {e}"));
+        return None;
+    }
+    let token = screencast::load_restore_token(&opts.state_dir);
+    let negotiated = match screencast::negotiate(token, &opts.state_dir, log).await {
+        Ok(n) => n,
+        Err(e) => {
+            log.record(
+                "reward",
+                &format!("miss: stream negotiate ({}): {}", e.stage, e.message),
+            );
+            return None;
+        }
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let drain_stop = stop.clone();
+    let drain_log = log.clone();
+    let drain = std::thread::spawn(move || {
+        let mut source =
+            match screencast::ScreenCastSource::new(negotiated, drain_stop, drain_log) {
+                Ok(s) => s,
+                Err(e) => return (None, Some(e)),
+            };
+        let mut latest = None;
+        loop {
+            match source.next_frame() {
+                Ok(Some(f)) => latest = Some(f),
+                Ok(None) => break,
+                Err(e) => return (latest, Some(e)),
+            }
+        }
+        (latest, None)
+    });
+    tokio::time::sleep_until(deadline).await;
+    stop.store(true, Ordering::Relaxed);
+    match tokio::task::spawn_blocking(move || drain.join()).await {
+        Ok(Ok((frame, err))) => {
+            if let Some(e) = err {
+                log.record("reward", &format!("stream note: {e}"));
+            }
+            if frame.is_none() {
+                log.record("reward", "miss: own stream delivered no frame");
+            }
+            frame
+        }
+        _ => {
+            log.record("reward", "miss: stream drain did not join");
+            None
+        }
+    }
+}
+
 /// Open the ScreenCast portal session and spawn the capture worker thread.
 async fn start_capture(
     opts: &ResidentOptions,
     status: &Arc<Mutex<TrayStatus>>,
     log: &CaptureLog,
+    tap: Arc<reward::FrameTap>,
 ) -> Result<CaptureRun, screencast::NegotiateError> {
     // Item 60b: resolve every capture symbol before the portal flow
     // begins. One error names every missing name, so a live run can never
@@ -587,7 +828,7 @@ async fn start_capture(
     let data_dir = opts.report.data_dir.clone();
     let worker_log = log.clone();
     let join = std::thread::spawn(move || {
-        capture_worker(data_dir, negotiated, stop_thread, tx, worker_log)
+        capture_worker(data_dir, negotiated, stop_thread, tx, worker_log, tap)
     });
     Ok(CaptureRun {
         stop,
@@ -605,6 +846,7 @@ fn capture_worker(
     stop: Arc<AtomicBool>,
     tx: std::sync::mpsc::Sender<CaptureEvent>,
     log: CaptureLog,
+    tap: Arc<reward::FrameTap>,
 ) {
     let data = match CaptureData::load(&data_dir) {
         Ok(d) => d,
@@ -622,12 +864,19 @@ fn capture_worker(
     let Some(engine) = crate::ocr::TesseractCliEngine::probe(layout) else {
         return send_failed(&tx, "connecting", "capture: tesseract unavailable".to_owned());
     };
-    let mut source = match screencast::ScreenCastSource::new(negotiated, stop.clone(), log.clone())
+    let raw_source = match screencast::ScreenCastSource::new(negotiated, stop.clone(), log.clone())
     {
         Ok(s) => s,
         Err(e) => {
             return send_failed(&tx, "connecting", format!("capture: {e}"));
         }
+    };
+    // Pass 39: offer every frame to the reward tap on its way
+    // into the pipeline (the tap retains frames only while a
+    // reward episode is armed).
+    let mut source = TapSource {
+        inner: raw_source,
+        tap,
     };
     // Item 49: "capturing" begins at the first real frame, not at connect.
     // Connecting a targetless stream used to sit idle forever, so labelling
@@ -1171,6 +1420,16 @@ fn watch_loop(
             }
             if ev.as_ref().map_or(false, |e| e.is_mission_end()) {
                 let _ = trigger_tx.send(Trigger::MissionEnd);
+            }
+            // Pass 39: the reward-choice screen's appearance arms
+            // the T+14 grab; its shutdown (RelicCrack) closes the
+            // episode. Neither is a report trigger — the resident
+            // loop partitions them out of report bursts.
+            if matches!(ev, Some(elog::Event::RelicRewardScreen)) {
+                let _ = trigger_tx.send(Trigger::RewardScreen);
+            }
+            if matches!(ev, Some(elog::Event::RelicCrack)) {
+                let _ = trigger_tx.send(Trigger::RewardClosed);
             }
             // §4: prove a mission from its armed identity + success marker.
             if let Some(done) = missions.feed(raw, &today, &now_utc()) {

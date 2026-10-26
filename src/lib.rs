@@ -18,6 +18,7 @@ pub mod push;
 pub mod render;
 pub mod report;
 pub mod resident;
+pub mod reward;
 pub mod screencast;
 pub mod server;
 pub mod state;

@@ -1,0 +1,759 @@
+//! Reward-screen pick detection + stock credit (pass 39, loop
+//! stages 4–5).
+//!
+//! EE.log cannot name the reward Seth PICKED on the fissure
+//! reward-choice screen — it names only his own relic's roll,
+//! and the other rewards not at all (QUEUE_REVIEW.md, EE-2.log
+//! analysis). But the log timestamps the moment all rewards
+//! exist (`Event::RelicRewardScreen`), the choice screen stays
+//! up exactly 15 s, and at T+14 s the selected card carries a
+//! light frame border with the pick final in practice. So: one
+//! frame at T+14, classify it positively as the reward screen,
+//! find the bordered card, OCR its name against the roster
+//! parts universe, and credit +1 into stock.json.
+//!
+//! Every failure is a silent MISS (a log line, no credit),
+//! never a wrong credit: the frame must classify, the border
+//! winner must clear an absolute floor AND a margin over the
+//! runner-up, and the name must match under the standard
+//! score + margin discipline. The consumed relic is NOT
+//! decremented — the screen does not show which relic
+//! produced a card (established from Seth's screencap).
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+
+use crate::ocr::{GrayImage, OcrEngine, Universe, MATCH_MARGIN};
+
+/// Delay from trigger detection to the grab (seconds). The
+/// choice screen lives 15 s from "Got rewards"; at T+14 the
+/// pick is final and a full second of slack remains.
+pub const GRAB_DELAY_SECS: u64 = 14;
+
+// ---------------------------------------------------------------------------
+// Card geometry, measured on fixtures/reward-screen.png
+// (1769x996; Seth's screencap of a 4-player reward screen).
+// Fractions of the frame, so real 2560x1440 captures scale.
+// Card 1's frame rect was measured directly (its light border
+// is the selection marker): x 605..742, y 315..463. The row is
+// centred, pitch 141 px, cards 137 px wide with ~4 px gaps.
+// ---------------------------------------------------------------------------
+
+/// Left edge of card slot 0, fraction of frame width.
+const ROW_LEFT: f32 = 0.34200;
+/// Slot pitch, fraction of frame width.
+const CARD_PITCH: f32 = 0.07971;
+/// Card width, fraction of frame width.
+const CARD_W: f32 = 0.07744;
+/// Card top, fraction of frame height.
+const ROW_TOP: f32 = 0.31627;
+/// Card height, fraction of frame height. (Top frame line at
+/// y=315, bottom at y=451.5 on the fixture; an earlier taller
+/// estimate put the bottom edge on the rarity bar below the
+/// panel and diluted the border signal.)
+const CARD_H: f32 = 0.13705;
+/// Number of card slots on a full-squad screen.
+pub const SLOTS: usize = 4;
+
+/// Perimeter samples at or above this gray level count as
+/// border-present. The selected frame line measures ~110–160
+/// on the fixture (light grey, 1–2 px); scene content rarely
+/// sustains it around a whole rectangle.
+const BORDER_BRIGHT: u8 = 100;
+/// Absolute floor for the winner's border continuity.
+const BORDER_FLOOR: f32 = 0.55;
+/// Required continuity margin over the runner-up slot.
+const BORDER_MARGIN: f32 = 0.30;
+/// Minimum fuzzy score for the bordered card's name read
+/// (the relic layout's floor: large, clean text).
+const NAME_MIN_SCORE: f32 = 0.80;
+
+/// Pixel rect `(x, y, w, h)` of card `slot` in a `fw`x`fh` frame.
+pub fn slot_rect(fw: u32, fh: u32, slot: usize) -> (u32, u32, u32, u32) {
+    let x = ((ROW_LEFT + slot as f32 * CARD_PITCH) * fw as f32).round() as u32;
+    let y = (ROW_TOP * fh as f32).round() as u32;
+    let w = (CARD_W * fw as f32).round() as u32;
+    let h = (CARD_H * fh as f32).round() as u32;
+    (x, y, w, h)
+}
+
+/// The bordered card's name band as a fraction-of-image region
+/// for [`OcrEngine::read_text`]: the card's lower portion,
+/// where the item name renders (one or two centred lines,
+/// bottom-anchored). Measured text zone on the fixture:
+/// y 420..450 of the 315..451.5 card — fractions 0.70..1.0.
+pub fn name_band_region(fw: u32, fh: u32, slot: usize) -> [f32; 4] {
+    let (x, y, w, h) = slot_rect(fw, fh, slot);
+    let fwf = fw as f32;
+    let fhf = fh as f32;
+    [
+        (x as f32 + 0.02 * w as f32) / fwf,
+        (y as f32 + 0.70 * h as f32) / fhf,
+        (x as f32 + 0.98 * w as f32) / fwf,
+        (y as f32 + h as f32) / fhf,
+    ]
+}
+
+/// Border continuity per slot: for each perimeter sample line
+/// (top/bottom/left/right), take the max over a small window
+/// straddling the card edge (the frame line is 1–2 px and our
+/// rect can sit a pixel off), then count the fraction of
+/// samples at or above [`BORDER_BRIGHT`]. The selected card's
+/// frame is continuous; an unselected card has no frame at
+/// all, so its "perimeter" is scene content — bright in
+/// patches, never all the way around.
+pub fn border_scores(frame: &GrayImage) -> [f32; SLOTS] {
+    let (fw, fh) = (frame.width, frame.height);
+    let mut out = [0.0f32; SLOTS];
+    // Window offsets (in px, fixture scale ~1769 wide) measured
+    // against the fixture's frame line; scaled with the frame.
+    let s = fw as f32 / 1769.0;
+    let offs = |base: [i32; 4]| -> Vec<i32> {
+        let mut v: Vec<i32> = base
+            .iter()
+            .map(|o| (*o as f32 * s).round() as i32)
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    let top_offs = offs([-1, 0, 1, 2]);
+    let bot_offs = offs([-2, -1, 0, 1]);
+    let at = |x: i32, y: i32| -> u8 {
+        if x < 0 || y < 0 || x >= fw as i32 || y >= fh as i32 {
+            0
+        } else {
+            frame.get(x as u32, y as u32)
+        }
+    };
+    for slot in 0..SLOTS {
+        let (x, y, w, h) = slot_rect(fw, fh, slot);
+        let (x0, y0) = (x as i32, y as i32);
+        let (x1, y1) = (x0 + w as i32 - 1, y0 + h as i32 - 1);
+        let mut bright = 0u32;
+        let mut total = 0u32;
+        for px in x0..=x1 {
+            let top = top_offs.iter().map(|o| at(px, y0 + o)).max().unwrap_or(0);
+            let bot = bot_offs.iter().map(|o| at(px, y1 + o)).max().unwrap_or(0);
+            for v in [top, bot] {
+                total += 1;
+                if v >= BORDER_BRIGHT {
+                    bright += 1;
+                }
+            }
+        }
+        for py in y0..=y1 {
+            let lef = top_offs.iter().map(|o| at(x0 + o, py)).max().unwrap_or(0);
+            let rig = bot_offs.iter().map(|o| at(x1 + o, py)).max().unwrap_or(0);
+            for v in [lef, rig] {
+                total += 1;
+                if v >= BORDER_BRIGHT {
+                    bright += 1;
+                }
+            }
+        }
+        out[slot] = if total == 0 {
+            0.0
+        } else {
+            bright as f32 / total as f32
+        };
+    }
+    out
+}
+
+/// The winning bordered slot, or `None` when no slot clears
+/// the floor or the winner's margin over the runner-up is too
+/// small (ambiguity is a miss, per the design of record).
+pub fn border_winner(scores: &[f32; SLOTS]) -> Option<usize> {
+    let mut best = 0usize;
+    for i in 1..SLOTS {
+        if scores[i] > scores[best] {
+            best = i;
+        }
+    }
+    let mut second = 0.0f32;
+    for (i, s) in scores.iter().enumerate() {
+        if i != best && *s > second {
+            second = *s;
+        }
+    }
+    if scores[best] >= BORDER_FLOOR && scores[best] - second >= BORDER_MARGIN {
+        Some(best)
+    } else {
+        None
+    }
+}
+
+/// Bright-pixel floor for a card's name band, at the
+/// fixture's pixel area (scaled by frame area). A present
+/// card always carries its item name: measured 227–483
+/// bright (>=130) text pixels per band on the fixture.
+const BAND_BRIGHT_MIN: f32 = 120.0;
+/// A present card's panel interior is dark and translucent
+/// (fixture means 52–71); bright scene content fails this.
+const INTERIOR_MAX: f32 = 130.0;
+/// Fixture pixel area the bright floor was measured at.
+const FIXTURE_AREA: f32 = 1769.0 * 996.0;
+
+/// Does `slot` hold a card? Structural presence: a dark
+/// panel interior plus real text in the name band.
+pub fn card_present(frame: &GrayImage, slot: usize) -> bool {
+    let (x, y, w, h) = slot_rect(frame.width, frame.height, slot);
+    // Panel interior: inset on all sides, above the name band.
+    let ix0 = x + (0.06 * w as f32) as u32;
+    let iy0 = y + (0.06 * h as f32) as u32;
+    let ix1 = (x + (0.94 * w as f32) as u32).min(frame.width);
+    let iy1 = (y + (0.78 * h as f32) as u32).min(frame.height);
+    let mut sum = 0u64;
+    let mut n = 0u64;
+    for py in iy0..iy1 {
+        for px in ix0..ix1 {
+            sum += frame.get(px, py) as u64;
+            n += 1;
+        }
+    }
+    if n == 0 || (sum as f32 / n as f32) > INTERIOR_MAX {
+        return false;
+    }
+    // Name-band text: bright glyph pixels.
+    let region = name_band_region(frame.width, frame.height, slot);
+    let bx0 = (region[0] * frame.width as f32) as u32;
+    let by0 = (region[1] * frame.height as f32) as u32;
+    let bx1 = ((region[2] * frame.width as f32) as u32).min(frame.width);
+    let by1 = ((region[3] * frame.height as f32) as u32).min(frame.height);
+    let mut bright = 0u32;
+    for py in by0..by1 {
+        for px in bx0..bx1 {
+            if frame.get(px, py) >= 130 {
+                bright += 1;
+            }
+        }
+    }
+    let scale = (frame.width as f32 * frame.height as f32) / FIXTURE_AREA;
+    bright as f32 >= BAND_BRIGHT_MIN * scale
+}
+
+/// Classification gate: the frame must positively show the
+/// reward screen's card-row structure — at least two present
+/// cards in the measured centred row. (Banner OCR was
+/// measured and rejected as the gate: the "VOID FISSURE"
+/// glyphs are thin and letterspaced and do not read reliably
+/// even at capture resolution, while the card row is
+/// unmistakable.) Gameplay and extraction frames do not
+/// carry the row; the border and name gates downstream
+/// protect the credit regardless.
+pub fn is_reward_screen(frame: &GrayImage) -> bool {
+    (0..SLOTS).filter(|&s| card_present(frame, s)).count() >= 2
+}
+
+/// Why a grab produced no credit. Every variant is a silent
+/// miss: logged, never surfaced as an error, never a credit.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Miss {
+    /// The frame did not classify as the reward screen.
+    NotRewardScreen,
+    /// No card border cleared the floor / margin.
+    NoBorderWinner { scores: [f32; SLOTS] },
+    /// The bordered card's name reads matched nothing under
+    /// the standard discipline — or the two reads held
+    /// different names (an active contradiction, refused per
+    /// the house arbitration doctrine).
+    NameNoMatch { detail: String },
+}
+
+impl Miss {
+    /// One-line reason for the resident log.
+    pub fn describe(&self) -> String {
+        match self {
+            Miss::NotRewardScreen => "frame is not the reward screen".to_owned(),
+            Miss::NoBorderWinner { scores } => format!(
+                "no clear bordered card (continuities {:.2}/{:.2}/{:.2}/{:.2})",
+                scores[0], scores[1], scores[2], scores[3]
+            ),
+            Miss::NameNoMatch { detail } => detail.clone(),
+        }
+    }
+}
+
+/// Full detection on one grabbed frame: classify, find the
+/// bordered card, OCR its name, match against the roster
+/// parts universe. `Ok` carries the canonical part name to
+/// credit.
+pub fn detect_pick(
+    engine: &dyn OcrEngine,
+    frame: &GrayImage,
+    parts: &Universe,
+) -> Result<String, Miss> {
+    if !is_reward_screen(frame) {
+        return Err(Miss::NotRewardScreen);
+    }
+    let scores = border_scores(frame);
+    let Some(slot) = border_winner(&scores) else {
+        return Err(Miss::NoBorderWinner { scores });
+    };
+    // Two reads of the bordered card's band (PSM 6 and PSM
+    // 11): measured on the fixture and on synthetic screens,
+    // neither mode dominates — each drops or garbles a line
+    // the other reads cleanly. Arbitration mirrors the grid
+    // paths: a name is credited when a read holds it under
+    // the standard discipline and no read holds a DIFFERENT
+    // name; two holds that disagree are an active
+    // contradiction and refuse.
+    let region = name_band_region(frame.width, frame.height, slot);
+    let mut held: Vec<String> = Vec::new();
+    let mut detail = String::new();
+    for psm in [6, 11] {
+        let read = engine.read_text(frame, region, psm, 4);
+        match parts.best_match_margin(&read) {
+            Some((name, score, second))
+                if score >= NAME_MIN_SCORE && score - second >= MATCH_MARGIN =>
+            {
+                if !held.iter().any(|h| h == name) {
+                    held.push(name.to_owned());
+                }
+            }
+            other => {
+                if !detail.is_empty() {
+                    detail.push_str("; ");
+                }
+                detail.push_str(&match other {
+                    Some((name, score, second)) => format!(
+                        "psm{psm} read {read:?} matched {name} at {score:.2} (runner-up {second:.2}), below the hold discipline"
+                    ),
+                    None => format!("psm{psm} read {read:?} matched nothing"),
+                });
+            }
+        }
+    }
+    match held.len() {
+        1 => Ok(held.pop().unwrap()),
+        0 => Err(Miss::NameNoMatch { detail }),
+        _ => Err(Miss::NameNoMatch {
+            detail: format!("reads disagree: {} vs {}", held[0], held[1]),
+        }),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stock credit (stage 5)
+// ---------------------------------------------------------------------------
+
+/// Serialises reward credits against each other. (The
+/// /unverified toggle carries its own gate; whole-file
+/// read-modify-write races between the two are the same
+/// class capture finalize already accepts.)
+static CREDIT_GATE: Mutex<()> = Mutex::new(());
+
+/// Credit +1 of `name` into the verified parts of the stock
+/// file at `stock_path`, with the /unverified mutation's
+/// durability discipline: lock, read-modify-write,
+/// tmp+rename via [`StockState::write_to`], and refuse on an
+/// unparseable stock file (never clobber). A missing file
+/// starts from empty stock. A verified credit also prunes
+/// the part's unverified entry — finalize does the same when
+/// a capture verifies an asserted part. Returns the new
+/// verified count.
+pub fn credit_part(stock_path: &Path, name: &str) -> Result<u32, String> {
+    let _gate = CREDIT_GATE.lock().unwrap_or_else(|p| p.into_inner());
+    let mut stock = match std::fs::read_to_string(stock_path) {
+        Ok(text) => crate::ocr::StockState::from_json(&text)
+            .map_err(|e| format!("stock unparseable, refusing to credit: {e}"))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => crate::ocr::StockState::default(),
+        Err(e) => return Err(format!("stock unreadable, refusing to credit: {e}")),
+    };
+    let count = {
+        let entry = stock.parts.entry(name.to_owned()).or_insert(0);
+        *entry = entry.saturating_add(1);
+        *entry
+    };
+    stock.unverified.remove(name);
+    stock
+        .write_to(stock_path)
+        .map_err(|e| format!("stock write failed: {e}"))?;
+    Ok(count)
+}
+
+/// Save a grabbed frame under `capture-debug/rewards/` for
+/// audit (successes and misses alike — the miss frames are
+/// the evidence when detection is questioned). Returns the
+/// path on success.
+pub fn save_audit_frame(frame: &GrayImage, debug_dir: &Path, stamp: &str) -> Result<PathBuf, String> {
+    let dir = debug_dir.join("rewards");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("audit dir: {e}"))?;
+    let path = dir.join(format!("reward-{stamp}.png"));
+    frame.write_png(&path)?;
+    Ok(path)
+}
+
+// ---------------------------------------------------------------------------
+// Episode arming + live-capture frame tap (resident wiring)
+// ---------------------------------------------------------------------------
+
+/// Coalescing state for reward episodes. "Relic rewards
+/// initialized" and "Got rewards" fire ~0.4 s apart for the
+/// SAME screen: one pending grab per episode, re-armed only
+/// after the grab resolves or the screen shuts down.
+#[derive(Debug, Default)]
+pub struct RewardArming {
+    pending: bool,
+}
+
+impl RewardArming {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A reward screen appeared. Returns true when the caller
+    /// should start a grab (no episode was pending).
+    pub fn on_screen(&mut self) -> bool {
+        if self.pending {
+            false
+        } else {
+            self.pending = true;
+            true
+        }
+    }
+
+    /// The grab task finished (credit or miss).
+    pub fn on_resolved(&mut self) {
+        self.pending = false;
+    }
+
+    /// The reward screen shut down (RelicCrack event). The
+    /// episode is over whether or not the grab has resolved;
+    /// a still-running grab keeps its own frame and resolves
+    /// independently.
+    pub fn on_closed(&mut self) {
+        self.pending = false;
+    }
+
+    pub fn pending(&self) -> bool {
+        self.pending
+    }
+}
+
+/// The freshest frame of a live inventory-capture stream,
+/// tapped for the reward grab so an armed episode does not
+/// open a second portal stream. Frames are only retained
+/// while armed (one clone per frame during the ~14 s window),
+/// each stamped with its arrival time: if the capture session
+/// stops mid-episode, the grab must not mistake a stale frame
+/// (border not yet final) for the T+14 frame.
+#[derive(Default)]
+pub struct FrameTap {
+    armed: AtomicBool,
+    latest: Mutex<Option<(GrayImage, std::time::Instant)>>,
+}
+
+impl FrameTap {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn arm(&self) {
+        self.armed.store(true, Ordering::Relaxed);
+    }
+
+    pub fn disarm(&self) {
+        self.armed.store(false, Ordering::Relaxed);
+    }
+
+    pub fn is_armed(&self) -> bool {
+        self.armed.load(Ordering::Relaxed)
+    }
+
+    /// Called by the capture stream's frame source for every
+    /// frame; retains a clone only while armed.
+    pub fn offer(&self, frame: &GrayImage) {
+        if self.is_armed() {
+            if let Ok(mut g) = self.latest.lock() {
+                *g = Some((frame.clone(), std::time::Instant::now()));
+            }
+        }
+    }
+
+    /// The freshest tapped frame, provided it arrived within
+    /// `max_age` of now — a live stream delivers continuously,
+    /// so a frame older than that means the stream stopped and
+    /// its last frame predates the final pick.
+    pub fn latest_fresh(&self, max_age: std::time::Duration) -> Option<GrayImage> {
+        let g = self.latest.lock().ok()?;
+        let (frame, at) = g.as_ref()?;
+        if at.elapsed() <= max_age {
+            Some(frame.clone())
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ocr::OcrRead;
+
+    /// Engine scripted by region: a slot's name band returns
+    /// that slot's text; anything else reads empty.
+    struct ScriptedEngine {
+        bands: [String; SLOTS],
+    }
+
+    impl OcrEngine for ScriptedEngine {
+        fn name(&self) -> &str {
+            "scripted"
+        }
+        fn ocr_cell(&self, _cell: &GrayImage) -> OcrRead {
+            OcrRead::empty()
+        }
+        fn read_text(
+            &self,
+            image: &GrayImage,
+            region: [f32; 4],
+            _psm: u32,
+            _upscale: u32,
+        ) -> String {
+            for slot in 0..SLOTS {
+                if region == name_band_region(image.width, image.height, slot) {
+                    return self.bands[slot].clone();
+                }
+            }
+            String::new()
+        }
+    }
+
+    fn parts_universe() -> Universe {
+        Universe::from_names(&[
+            "Dual Kamas Prime Blueprint".to_owned(),
+            "Alternox Prime Receiver".to_owned(),
+            "Kompressa Prime Receiver".to_owned(),
+            "Cedo Prime Stock".to_owned(),
+            "Harrow Prime Neuroptics Blueprint".to_owned(),
+        ])
+    }
+
+    /// A dark frame with the card row drawn in: panels on all
+    /// four slots and white (255) 4 px borders on the given
+    /// slots. `text_bars` adds bright name-band content to
+    /// every slot (structural presence for the classifier);
+    /// the real-engine test renders real names instead and
+    /// passes false.
+    fn synthetic_frame(bordered: &[usize], text_bars: bool) -> GrayImage {
+        let (fw, fh) = (2560, 1440);
+        let mut frame = GrayImage::blank(fw, fh, 35);
+        for slot in 0..SLOTS {
+            let (x, y, w, h) = slot_rect(fw, fh, slot);
+            for py in y..y + h {
+                for px in x..x + w {
+                    frame.set(px, py, 55);
+                }
+            }
+            if text_bars {
+                for py in (y + (0.80 * h as f32) as u32)..(y + (0.87 * h as f32) as u32) {
+                    for px in (x + (0.10 * w as f32) as u32)..(x + (0.90 * w as f32) as u32) {
+                        frame.set(px, py, 200);
+                    }
+                }
+            }
+        }
+        for &slot in bordered {
+            let (x, y, w, h) = slot_rect(fw, fh, slot);
+            for t in 0..4u32 {
+                for px in x..x + w {
+                    frame.set(px, y + t, 255);
+                    frame.set(px, y + h - 1 - t, 255);
+                }
+                for py in y..y + h {
+                    frame.set(x + t, py, 255);
+                    frame.set(x + w - 1 - t, py, 255);
+                }
+            }
+        }
+        frame
+    }
+
+    fn scripted() -> ScriptedEngine {
+        ScriptedEngine {
+            bands: [
+                "Dual Kamas Prime Blueprint".to_owned(),
+                "Alternox Prime Receiver".to_owned(),
+                "Kompressa Prime Receiver".to_owned(),
+                "Cedo Prime Stock".to_owned(),
+            ],
+        }
+    }
+
+    #[test]
+    fn synthetic_screen_detects_and_credits_end_to_end() {
+        let frame = synthetic_frame(&[0], true);
+        let engine = scripted();
+        let name = detect_pick(&engine, &frame, &parts_universe())
+            .expect("the bordered card's part must be detected");
+        assert_eq!(name, "Dual Kamas Prime Blueprint");
+
+        // Credit against a temp stock file.
+        let dir = std::env::temp_dir().join(format!(
+            "fracker-reward-e2e-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let stock_path = dir.join("stock.json");
+        std::fs::write(
+            &stock_path,
+            r#"{"parts":{"Cedo Prime Stock":2},"unverified":{"Dual Kamas Prime Blueprint":1}}"#,
+        )
+        .unwrap();
+        let count = credit_part(&stock_path, &name).unwrap();
+        assert_eq!(count, 1);
+        let text = std::fs::read_to_string(&stock_path).unwrap();
+        let stock = crate::ocr::StockState::from_json(&text).unwrap();
+        assert_eq!(stock.parts.get("Dual Kamas Prime Blueprint"), Some(&1));
+        assert_eq!(stock.parts.get("Cedo Prime Stock"), Some(&2));
+        assert!(
+            !stock.unverified.contains_key("Dual Kamas Prime Blueprint"),
+            "a verified credit prunes the unverified entry"
+        );
+        // A second credit increments.
+        assert_eq!(credit_part(&stock_path, &name).unwrap(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gameplay_frame_credits_nothing() {
+        // A bright scene frame: no dark panels, no card row —
+        // classification refuses before borders or names are
+        // even considered.
+        let frame = GrayImage::blank(2560, 1440, 180);
+        let engine = scripted();
+        let err = detect_pick(&engine, &frame, &parts_universe()).unwrap_err();
+        assert_eq!(err, Miss::NotRewardScreen);
+    }
+
+    #[test]
+    fn ambiguous_border_credits_nothing() {
+        // Two equally bordered cards: no clear winner.
+        let frame = synthetic_frame(&[1, 3], true);
+        let engine = scripted();
+        let err = detect_pick(&engine, &frame, &parts_universe()).unwrap_err();
+        assert!(
+            matches!(err, Miss::NoBorderWinner { .. }),
+            "two borders must miss, got {err:?}"
+        );
+        // And no border at all also misses.
+        let frame = synthetic_frame(&[], true);
+        let err = detect_pick(&engine, &frame, &parts_universe()).unwrap_err();
+        assert!(matches!(err, Miss::NoBorderWinner { .. }));
+    }
+
+    #[test]
+    fn double_trigger_arms_exactly_one_grab() {
+        let mut arming = RewardArming::new();
+        assert!(arming.on_screen(), "first screen event arms");
+        assert!(
+            !arming.on_screen(),
+            "the paired Got-rewards event must not re-arm"
+        );
+        assert!(arming.pending());
+        arming.on_resolved();
+        assert!(arming.on_screen(), "a resolved episode re-arms");
+        arming.on_closed();
+        assert!(!arming.pending());
+        assert!(arming.on_screen(), "a closed episode re-arms");
+    }
+
+    #[test]
+    fn credit_refuses_unparseable_stock() {
+        let dir = std::env::temp_dir().join(format!(
+            "fracker-reward-bad-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let stock_path = dir.join("stock.json");
+        std::fs::write(&stock_path, "{not json").unwrap();
+        assert!(credit_part(&stock_path, "Cedo Prime Stock").is_err());
+        // The unparseable file is untouched.
+        assert_eq!(std::fs::read_to_string(&stock_path).unwrap(), "{not json");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The real tesseract engine over a synthetic screen whose
+    /// names are rendered with the vendored game font
+    /// (crate::ttf): the full pipeline — header read, border,
+    /// band OCR, universe match — with no scripted answers.
+    #[test]
+    fn real_engine_reads_rendered_screen() {
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let Some(layout) = crate::ocr::Layout::load_file(&base.join("data/capture/layouts.toml"))
+            .ok()
+            .and_then(|l| l.get("relic").cloned())
+        else {
+            return; // layouts unavailable in this environment
+        };
+        let Some(engine) = crate::ocr::TesseractCliEngine::probe(layout) else {
+            return; // no tesseract in this environment
+        };
+        let Ok(font) = crate::ttf::embedded_font() else {
+            return;
+        };
+        let (fw, fh) = (2560u32, 1440u32);
+        let mut frame = synthetic_frame(&[2], false);
+        // Names on all four cards (two lines for the long one),
+        // sized to fit the band like the game's bottom-anchored
+        // wrap.
+        let names = [
+            "Dual Kamas Prime Blueprint",
+            "Alternox Prime Receiver",
+            "Kompressa Prime Receiver",
+            "Cedo Prime Stock",
+        ];
+        for (slot, name) in names.iter().enumerate() {
+            let region = name_band_region(fw, fh, slot);
+            let bx = (region[0] * fw as f32) as u32;
+            let by = (region[1] * fh as f32) as u32;
+            let bw = ((region[2] - region[0]) * fw as f32) as u32;
+            let lines = wrap_two(name);
+            for (i, line) in lines.iter().enumerate() {
+                let img = font.render_line(line, 24.0, 0.6, 0.0, 1.0, 2);
+                let x = bx + bw.saturating_sub(img.width) / 2;
+                paste_ink(&mut frame, &img, x, by + i as u32 * 26);
+            }
+        }
+        let name = match detect_pick(&engine, &frame, &parts_universe()) {
+            Ok(n) => n,
+            Err(miss) => panic!("real-engine detection missed: {}", miss.describe()),
+        };
+        assert_eq!(name, "Kompressa Prime Receiver");
+    }
+
+    /// Paste a rendered line's ink into `frame` at (x, y),
+    /// brightening (max-blend), clipped to the frame.
+    fn paste_ink(frame: &mut GrayImage, ink: &GrayImage, x: u32, y: u32) {
+        for iy in 0..ink.height {
+            for ix in 0..ink.width {
+                let (fx, fy) = (x + ix, y + iy);
+                if fx < frame.width && fy < frame.height {
+                    let v = ink.get(ix, iy);
+                    if v > frame.get(fx, fy) {
+                        frame.set(fx, fy, v);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Split a part name into at most two lines at the middle
+    /// space, like the game's centred wrap.
+    fn wrap_two(name: &str) -> Vec<String> {
+        let words: Vec<&str> = name.split(' ').collect();
+        if words.len() < 3 {
+            return vec![name.to_owned()];
+        }
+        let mid = words.len() / 2;
+        vec![
+            words[..mid].join(" "),
+            words[mid..].join(" "),
+        ]
+    }
+}
