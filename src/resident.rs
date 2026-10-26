@@ -829,6 +829,11 @@ async fn finalize_capture(
     let summary = capture::captured_summary(&session);
     println!("resident: {summary} -> {}", path.display());
     log.record("finalizing", &format!("{summary} -> {}", path.display()));
+    // Pass 33: the stitch coverage accounting rides the finalize
+    // log — what the parts capture covered, not just what it held.
+    if let Some(cov) = session.coverage_summary() {
+        log.record("finalizing", &cov);
+    }
     set_capture_stage(status, log, CaptureStage::Idle);
     true
 }

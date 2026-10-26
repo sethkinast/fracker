@@ -279,6 +279,9 @@ impl CaptureData {
             radius_decoder: true,
             radius_strip: true,
             radius_tail_budget: ocr::RADIUS_TAIL_BUDGET,
+            line_reader: true,
+            strip_offsets: true,
+            snap_cells: false,
             debug_dir: Some(self.debug_dir.clone()),
         }
     }
@@ -414,6 +417,25 @@ pub struct CaptureContext<'a> {
     /// Tail-alignment budget for the decoder (see
     /// `ocr::RADIUS_TAIL_BUDGET`).
     pub radius_tail_budget: usize,
+    /// Pass 34 (Pass B): the line reader runs alongside the
+    /// band reader in the stitch path and the two arbitrate
+    /// under the form channels (see `crate::lineread`). The
+    /// flag exists so the census replay can A/B the second
+    /// reader through the production path itself.
+    pub line_reader: bool,
+    /// Pass 34 (brief §4): the radius decoder's strip phase
+    /// reads at a small fixed set of vertical offsets around
+    /// the fitted placement and arbitrates the decodes by
+    /// agreement — strip OCR on fitted cells is extremely
+    /// phase-sensitive (measured clean at −8px, garbage at 0),
+    /// and a single fixed placement lands on the bad phase for
+    /// exactly the cells that need the strip.
+    pub strip_offsets: bool,
+    /// Pass 34 (brief §4, ablation): snap the stitch's crop
+    /// origins to content-detected tile boundaries instead of
+    /// the fitted grid. Measurement only; production keeps the
+    /// fitted grid unless the ablation adopts snapping.
+    pub snap_cells: bool,
     /// When set, capture dumps evidence frames (the first frame, and
     /// the first frame of each recognised class) here as PNGs.
     pub debug_dir: Option<PathBuf>,
@@ -454,6 +476,13 @@ pub struct CaptureSession {
     saw_relics: bool,
     saw_parts: bool,
     saw_arcanes: bool,
+    /// Parts frames awaiting the stitch (pass 33): parts frames
+    /// are not read on arrival — they accumulate here and are
+    /// stitched as a session by [`Self::finish_parts`].
+    parts_pending: Vec<GrayImage>,
+    /// The stitch reports this session produced (pass 33), one
+    /// per `finish_parts` call — the coverage accounting record.
+    stitch_reports: Vec<StitchReport>,
     /// Evidence for a zero-collection diagnosis: the first few
     /// (class, header OCR text) pairs this session classified.
     pub header_samples: Vec<(ScreenClass, String)>,
@@ -488,6 +517,11 @@ impl CaptureSession {
     /// Per-name evidence-dump cap (addendum #82): enough frames
     /// for an OCR training sample, bounded disk.
     const MAX_DEBUG_PER_NAME: u32 = 60;
+
+    /// Pending-parts cap (pass 33): a stitch flushes mid-session
+    /// rather than buffering a whole scroll unboundedly (a 1440p
+    /// frame is ~3.7 MB; 48 pending is a bounded, transient peak).
+    const PARTS_STITCH_FLUSH_AT: usize = 48;
 
     pub fn new() -> Self {
         Self::default()
@@ -606,10 +640,126 @@ impl CaptureSession {
             ScreenClass::Other => {}
         }
 
+        // Pass 33: parts frames accumulate for the stitch; a
+        // non-parts frame flushes the pending parts first, so a
+        // screen change closes the stitch where the scroll ended.
+        if class == ScreenClass::Parts {
+            self.parts_pending.push(frame.clone());
+            if self.parts_pending.len() >= Self::PARTS_STITCH_FLUSH_AT {
+                self.finish_parts(ctx, engine);
+            }
+            return;
+        }
+        if !self.parts_pending.is_empty() {
+            self.finish_parts(ctx, engine);
+        }
+
         let results = read_frame(layout, frame, engine, ctx, ctx.universes.for_class(class));
         let frame_stock = StockState::from_results(&results, ctx.relic_names, ctx.arcane_names);
         self.observe_counts(&frame_stock);
         self.captured = resolve_voted_stock(&self.part_votes, &self.relic_votes, &self.arcane_votes);
+    }
+
+    /// Stitch and fold every pending parts frame (pass 33).
+    /// Called when the screen changes away from Parts, when the
+    /// pending list hits its cap, and at the end of `run_capture`.
+    /// Each held slot contributes one count vote per usable
+    /// instance — the stitched equivalent of the per-frame
+    /// observations the vote was designed for (a ×1 instance, its
+    /// ring-gated read absent, votes 1).
+    pub fn finish_parts(&mut self, ctx: &CaptureContext<'_>, engine: &dyn OcrEngine) {
+        if self.parts_pending.is_empty() {
+            return;
+        }
+        let frames = std::mem::take(&mut self.parts_pending);
+        let Some(layout) = ctx.layouts.get("parts") else {
+            return;
+        };
+        let report = stitch_parts_session(
+            &frames,
+            layout,
+            engine,
+            ctx,
+            ctx.universes.for_class(ScreenClass::Parts),
+        );
+        for slot in &report.slots {
+            // Coverage is the authoritative verdict: a contested
+            // slot's stored result is the canonical read kept for
+            // diagnostics, and it must not vote.
+            if slot.coverage != SlotCoverage::Held {
+                continue;
+            }
+            let Some(result) = &slot.result else { continue };
+            let Some(name) = &result.matched else { continue };
+            if slot.instance_counts.is_empty() {
+                *self
+                    .part_votes
+                    .entry(name.clone())
+                    .or_default()
+                    .entry(result.count.unwrap_or(1))
+                    .or_insert(0) += 1;
+            } else {
+                for c in &slot.instance_counts {
+                    *self
+                        .part_votes
+                        .entry(name.clone())
+                        .or_default()
+                        .entry(c.unwrap_or(1))
+                        .or_insert(0) += 1;
+                }
+            }
+            // Pass 34: the built-copy glyph on a held blueprint
+            // slot records its built sibling as held stock (one
+            // ×1 vote — the twin's own count is not observed).
+            if let Some(implied) = &slot.glyph_implied {
+                *self
+                    .part_votes
+                    .entry(implied.clone())
+                    .or_default()
+                    .entry(1)
+                    .or_insert(0) += 1;
+            }
+        }
+        self.captured =
+            resolve_voted_stock(&self.part_votes, &self.relic_votes, &self.arcane_votes);
+        self.stitch_reports.push(report);
+    }
+
+    /// Every stitch report this session produced (pass 33).
+    pub fn stitch_reports(&self) -> &[StitchReport] {
+        &self.stitch_reports
+    }
+
+    /// Coverage accounting across all stitch reports (pass 33):
+    /// held / seen-not-held / never-fully-visible slot counts plus
+    /// disagreement flags — the finalize-visible answer to "what
+    /// did the capture actually cover". `None` when no parts
+    /// session was stitched.
+    pub fn coverage_summary(&self) -> Option<String> {
+        if self.stitch_reports.is_empty() {
+            return None;
+        }
+        let (mut held, mut seen, mut never, mut flagged) = (0usize, 0usize, 0usize, 0usize);
+        let mut implied = 0usize;
+        for r in &self.stitch_reports {
+            for s in &r.slots {
+                match s.coverage {
+                    SlotCoverage::Held => held += 1,
+                    SlotCoverage::SeenNotHeld => seen += 1,
+                    SlotCoverage::NeverFullyVisible => never += 1,
+                }
+                if s.disagreement {
+                    flagged += 1;
+                }
+                if s.glyph_implied.is_some() {
+                    implied += 1;
+                }
+            }
+        }
+        Some(format!(
+            "stitch coverage: {held} held, {seen} seen-not-held, {never} never-fully-visible, {flagged} instance-disagreement flagged, {implied} glyph-implied built-form holds ({} stitch report(s))",
+            self.stitch_reports.len()
+        ))
     }
 
     /// Record one frame's per-stack counts as votes (pass 27). A
@@ -788,7 +938,24 @@ pub fn read_frame(
     // tesseract engine caches by crop hash and batches cache misses
     // into a handful of processes, instead of 2–3 spawns per cell.
     let cells = layout.split(frame);
-    let reads = engine.ocr_cells_in(&cells, layout);
+    read_cells(&cells, layout, engine, ctx, universe)
+}
+
+/// Validate + decode an already-cut set of cells (pass 33 seam):
+/// everything [`read_frame`] does after the grid split — batched
+/// OCR, margin validation under the shared hold predicate, and the
+/// radius decoder's band + strip phases. The stitch path feeds
+/// this the session's canonical (median-of-instances) crops so a
+/// stitched session and a single frame are read by literally the
+/// same code, with the same evidence bars.
+pub fn read_cells(
+    cells: &[Option<GrayImage>],
+    layout: &Layout,
+    engine: &dyn OcrEngine,
+    ctx: &CaptureContext<'_>,
+    universe: &Universe,
+) -> Vec<ocr::CellResult> {
+    let reads = engine.ocr_cells_in(cells, layout);
     let mut results = Vec::with_capacity(reads.len());
     for (index, read) in reads.iter().enumerate() {
         // A `None` cell (partial, at the viewport edge) is never read.
@@ -859,28 +1026,494 @@ pub fn read_frame(
                         .map(|cell| (index, cell))
                 })
                 .collect();
-            let requests: Vec<(&GrayImage, [f32; 4], u32, u32)> =
-                pending.iter().map(|(_, cell)| (*cell, strip, 7, 4)).collect();
+            // Pass 34 (brief §4): strip reads at a small fixed
+            // set of vertical offsets around the fitted
+            // placement, under a UNIFORM policy (never per-cell
+            // tuning). Pass 33 measured the strip on fitted
+            // cells to be extremely phase-sensitive — the same
+            // cell reads clean at −8px and garbage at 0 — so a
+            // single fixed placement strands the cells whose
+            // fitted phase is the bad one. The offsets are page
+            // px at the capture scale, expressed per cell as a
+            // fraction of its height. Each offset's text decodes
+            // through the same predicate-gated strip path; a
+            // cell holds only when the offsets that decode AGREE
+            // on one name (the agreement discipline the stitch
+            // applies across sightings, applied across phases).
+            let offsets_px: &[f32] = if ctx.strip_offsets {
+                &[-8.0, 0.0, 8.0]
+            } else {
+                &[0.0]
+            };
+            let mut requests: Vec<(&GrayImage, [f32; 4], u32, u32)> = Vec::new();
+            let mut req_cell: Vec<usize> = Vec::new(); // pending position per request
+            for (pi, (_, cell)) in pending.iter().enumerate() {
+                let dy = |px: f32| px / (cell.height.max(1) as f32);
+                for &off in offsets_px {
+                    let region = [
+                        strip[0],
+                        (strip[1] + dy(off)).clamp(0.0, 1.0),
+                        strip[2],
+                        (strip[3] + dy(off)).clamp(0.0, 1.0),
+                    ];
+                    if region[3] <= region[1] {
+                        continue;
+                    }
+                    requests.push((cell, region, 7, 4));
+                    req_cell.push(pi);
+                }
+            }
             let texts = engine.read_text_batch(&requests);
-            for ((index, _), text) in pending.iter().zip(texts.iter()) {
+            let mut decodes: Vec<Vec<String>> = vec![Vec::new(); pending.len()];
+            for (ri, text) in texts.iter().enumerate() {
                 if text.trim().is_empty() {
                     continue;
                 }
-                let Some(read) = reads.get(*index).and_then(|r| r.as_ref()) else {
+                let pi = req_cell[ri];
+                let (index, _) = pending[pi];
+                let Some(read) = reads.get(index).and_then(|r| r.as_ref()) else {
                     continue;
                 };
                 if let Some(name) =
                     universe.radius_decode_strip(&read.text, text, ctx.radius_tail_budget)
                 {
-                    let result = &mut results[*index];
-                    result.matched = Some(name);
-                    result.held = true;
-                    result.count = read.count;
+                    if !decodes[pi].contains(&name) {
+                        decodes[pi].push(name);
+                    }
                 }
+            }
+            for (pi, (index, _)) in pending.iter().enumerate() {
+                if decodes[pi].len() != 1 {
+                    continue;
+                }
+                let Some(read) = reads.get(*index).and_then(|r| r.as_ref()) else {
+                    continue;
+                };
+                let result = &mut results[*index];
+                result.matched = Some(decodes[pi][0].clone());
+                result.held = true;
+                result.count = read.count;
             }
         }
     }
     results
+}
+
+/// How one panorama slot ended (pass 33 coverage accounting —
+/// the finalize-visible record of what a capture covered).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotCoverage {
+    /// Read and held: the slot's item is in the captured stock.
+    Held,
+    /// Fully visible at least once, but no read held.
+    SeenNotHeld,
+    /// Covered by viewports only in partial sightings: no instance
+    /// ever had adequate viewport margin, so no crop was ever cut.
+    NeverFullyVisible,
+}
+
+/// One panorama slot's outcome in a stitched parts session.
+#[derive(Debug, Clone)]
+pub struct SlotReport {
+    pub segment: usize,
+    pub row: i32,
+    pub col: u32,
+    pub coverage: SlotCoverage,
+    /// The winning read's validation result (the canonical read,
+    /// kept for diagnostics, when the slot is contested or
+    /// unheld; `None` when the slot was never fully visible).
+    pub result: Option<ocr::CellResult>,
+    /// Usable instances that fed the canonical crop.
+    pub instances: usize,
+    /// Partial sightings (clipped / viewport-edge) of this slot.
+    pub partial_sightings: usize,
+    /// Ring-gated count reads per usable instance (`None` = no
+    /// badge detected = ×1). The session vote consumes these.
+    pub instance_counts: Vec<Option<u32>>,
+    /// A pooled instance disagreed with the canonical crop beyond
+    /// the stated threshold — reported, not silently resolved.
+    pub disagreement: bool,
+    /// The canonical crop was a pixel-wise median (≥3 pooled).
+    pub median: bool,
+    /// The slot's segment was a relink fallback (started after a
+    /// link failure or a post-solve ejection).
+    pub fallback: bool,
+    /// Pass 34: the band reader's agreement verdict for this
+    /// slot (the ONE name its reads held), before arbitration;
+    /// `None` when it held nothing or was internally contested.
+    pub band_held: Option<String>,
+    /// Pass 34: the line reader's agreement verdict, before
+    /// form gating; `None` likewise, and whenever the line
+    /// reader is off.
+    pub line_held: Option<String>,
+    /// Pass 34: the form channels' verdict for this slot
+    /// (`Unknown` when the line reader is off or the slot was
+    /// never fully visible).
+    pub form_verdict: crate::lineread::FormVerdict,
+    /// Pass 34: which reader(s) the arbitrated hold came from;
+    /// `None` when the slot is not held.
+    pub held_via: Option<crate::lineread::Via>,
+    /// Pass 34: why arbitration refused a slot a reader wanted
+    /// to hold (gate attribution); `None` otherwise.
+    pub refuse_reason: Option<&'static str>,
+    /// Pass 34: the built form implied held by the built-copy
+    /// glyph on a slot held as its blueprint sibling — recorded
+    /// as held stock by the session, and marked as implied in
+    /// the coverage accounting.
+    pub glyph_implied: Option<String>,
+    /// Pass 34 diagnostics: the glyph template score and the
+    /// slot's median per-instance mesh score.
+    pub glyph_score: f32,
+    pub mesh_score: f32,
+}
+
+/// One stitched parts session: the plan plus every slot's outcome.
+#[derive(Debug, Clone)]
+pub struct StitchReport {
+    pub plan: crate::stitch::StitchPlan,
+    pub slots: Vec<SlotReport>,
+}
+
+impl StitchReport {
+    /// Distinct held item names in this report.
+    pub fn held_names(&self) -> std::collections::BTreeSet<&str> {
+        self.slots
+            .iter()
+            .filter(|s| s.coverage == SlotCoverage::Held)
+            .filter_map(|s| s.result.as_ref().and_then(|r| r.matched.as_deref()))
+            .collect()
+    }
+}
+
+/// Stitch one accumulated parts session and read every slot
+/// (pass 33): plan the session ([`crate::stitch::plan_session`]),
+/// build each slot's canonical crop from its usable instances,
+/// and read the slot through the same [`read_cells`] path a
+/// single frame takes. Every covered slot produces a
+/// [`SlotReport`] — including slots no instance ever fully
+/// showed.
+///
+/// The slot's verdict follows an agreement rule (pass 33 gate
+/// finding): the canonical crop AND every usable instance are
+/// read; the slot holds a name only when it is the ONE name any
+/// of its reads holds. Two different held names make the slot
+/// contested — refused and flagged as a disagreement — because
+/// a panorama slot is one physical item and its sightings must
+/// not disagree about what it is. (A single canonical read was
+/// measured to lose the union-of-draws advantage the per-frame
+/// pipeline had: items at the OCR margin are held by one of
+/// their several sightings, rarely by a designated one.)
+///
+/// Pass 34 adds the second reader: with `ctx.line_reader` on,
+/// every crop is ALSO read by the line reader
+/// ([`crate::lineread::read_cells_lines`]) under the same
+/// agreement rule, the slot's form channels are measured, and
+/// the two verdicts are arbitrated by
+/// [`crate::lineread::arbitrate`] — hold on agreement, form
+/// channels as the licence for a lone reader, refusal on any
+/// active contradiction. With the line reader off the slot
+/// verdict is pass 33's exactly.
+pub fn stitch_parts_session(
+    frames: &[GrayImage],
+    layout: &Layout,
+    engine: &dyn OcrEngine,
+    ctx: &CaptureContext<'_>,
+    universe: &Universe,
+) -> StitchReport {
+    let refs: Vec<&GrayImage> = frames.iter().collect();
+    let plan = crate::stitch::plan_session(&refs, layout);
+    let mut slots_out: Vec<SlotReport> = Vec::new();
+    for (si, seg) in plan.segments.iter().enumerate() {
+        let slots = crate::stitch::slot_instances(&plan, si, &refs, layout);
+        let cw = seg.pitch.col_pitch.round().max(1.0) as u32;
+        let ch = seg.pitch.row_pitch.round().max(1.0) as u32;
+        // Pass 34 ablation (§4): snap crop origins to detected
+        // tile boundaries instead of the fitted grid.
+        let slots = if ctx.snap_cells {
+            slots
+                .iter()
+                .map(|s| crate::stitch::snap_slot(s, &refs, cw, ch))
+                .collect()
+        } else {
+            slots
+        };
+        // Flattened read list: every slot's canonical crop first
+        // (slot order), then each multi-instance slot's usable
+        // instance crops (slot order), all through one read_cells
+        // call so the batched engine sees the whole segment.
+        let mut canons: Vec<Option<crate::stitch::CanonicalCrop>> = Vec::with_capacity(slots.len());
+        let mut cells: Vec<Option<GrayImage>> = Vec::with_capacity(slots.len());
+        for slot in &slots {
+            let cc = crate::stitch::canonical_crop(slot, &refs, cw, ch);
+            cells.push(cc.as_ref().map(|c| c.image.clone()));
+            canons.push(cc);
+        }
+        let mut inst_ranges: Vec<std::ops::Range<usize>> = Vec::with_capacity(slots.len());
+        for slot in &slots {
+            let usable: Vec<&crate::stitch::Instance> =
+                slot.instances.iter().filter(|i| i.usable()).collect();
+            let start = cells.len();
+            if usable.len() > 1 {
+                for i in &usable {
+                    cells.push(Some(crate::stitch::crop_integer(
+                        &frames[i.frame],
+                        i.fx, i.fy, cw, ch,
+                    )));
+                }
+            }
+            inst_ranges.push(start..cells.len());
+        }
+        let results = read_cells(&cells, layout, engine, ctx, universe);
+        // Pass 34: the line reader over the SAME crops (canonical
+        // + instances, same order), when enabled.
+        let line_outcomes = if ctx.line_reader {
+            Some(crate::lineread::read_cells_lines(
+                &cells, layout, engine, ctx, universe,
+            ))
+        } else {
+            None
+        };
+        for (idx, slot) in slots.iter().enumerate() {
+            let partial = slot.instances.iter().filter(|i| !i.usable()).count();
+            match &canons[idx] {
+                Some(cc) => {
+                    let usable: Vec<&crate::stitch::Instance> =
+                        slot.instances.iter().filter(|i| i.usable()).collect();
+                    let icells: Vec<Option<GrayImage>> = usable
+                        .iter()
+                        .map(|i| {
+                            Some(crate::stitch::crop_integer(
+                                &frames[i.frame],
+                                i.fx, i.fy, cw, ch,
+                            ))
+                        })
+                        .collect();
+                    let counts = engine.read_counts_in(&icells, layout);
+                    // Band agreement rule (pass 33): distinct
+                    // held names across the canonical read and
+                    // the instance reads; exactly one name holds,
+                    // more than one is an internal contest (the
+                    // reader abstains, flagged as disagreement).
+                    let canon_res = &results[idx];
+                    let mut band_names: Vec<&str> = Vec::new();
+                    if canon_res.held {
+                        if let Some(m) = canon_res.matched.as_deref() {
+                            band_names.push(m);
+                        }
+                    }
+                    let mut band_winner: Option<&ocr::CellResult> =
+                        if canon_res.held { Some(canon_res) } else { None };
+                    for ri in inst_ranges[idx].clone() {
+                        let r = &results[ri];
+                        if r.held {
+                            if let Some(m) = r.matched.as_deref() {
+                                if !band_names.contains(&m) {
+                                    band_names.push(m);
+                                }
+                                if band_winner.is_none() {
+                                    band_winner = Some(r);
+                                }
+                            }
+                        }
+                    }
+                    let band_contested = band_names.len() > 1;
+                    let band_held: Option<String> = if band_names.len() == 1 {
+                        Some(band_names[0].to_owned())
+                    } else {
+                        None
+                    };
+                    // Line agreement (pass 34): the same rule
+                    // over the line reader's outcomes, plus the
+                    // slot's form channels.
+                    let mut line_held: Option<String> = None;
+                    let mut line_contested = false;
+                    let mut line_winner: Option<ocr::CellResult> = None;
+                    let mut channels: Option<crate::lineread::FormChannels> = None;
+                    if let Some(outcomes) = &line_outcomes {
+                        let lo0 = &outcomes[idx];
+                        let mut line_names: Vec<&str> = Vec::new();
+                        if lo0.result.held {
+                            if let Some(m) = lo0.result.matched.as_deref() {
+                                line_names.push(m);
+                                line_winner = Some(lo0.result.clone());
+                            }
+                        }
+                        for ri in inst_ranges[idx].clone() {
+                            let o = &outcomes[ri];
+                            if o.result.held {
+                                if let Some(m) = o.result.matched.as_deref() {
+                                    if !line_names.contains(&m) {
+                                        line_names.push(m);
+                                    }
+                                    if line_winner.is_none() {
+                                        line_winner = Some(o.result.clone());
+                                    }
+                                }
+                            }
+                        }
+                        line_contested = line_names.len() > 1;
+                        if line_names.len() == 1 {
+                            line_held = Some(line_names[0].to_owned());
+                        }
+                        // Channels: mesh per instance crop,
+                        // median-aggregated (the canonical
+                        // composite blurs the mesh; when the
+                        // slot has no separate instance crops
+                        // the canonical IS the best instance);
+                        // glyph on the canonical crop; line
+                        // evidence pooled over the slot's reads,
+                        // certification from the canonical read.
+                        let mut mesh_v: Vec<f32> = Vec::new();
+                        let range = inst_ranges[idx].clone();
+                        if range.is_empty() {
+                            mesh_v.push(
+                                crate::lineread::mesh_scores(&cc.image, layout).margin_grad,
+                            );
+                        } else {
+                            for ri in range.clone() {
+                                if let Some(img) = &cells[ri] {
+                                    mesh_v.push(
+                                        crate::lineread::mesh_scores(img, layout)
+                                            .margin_grad,
+                                    );
+                                }
+                            }
+                        }
+                        mesh_v.sort_by(|a, b| {
+                            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                        let mesh_score = if mesh_v.is_empty() {
+                            0.0
+                        } else {
+                            mesh_v[mesh_v.len() / 2]
+                        };
+                        let glyph_score = crate::lineread::glyph_score(&cc.image);
+                        let mut bp_line = lo0.bp_line;
+                        for ri in range {
+                            bp_line = bp_line || outcomes[ri].bp_line;
+                        }
+                        channels = Some(crate::lineread::FormChannels {
+                            mesh: crate::lineread::mesh_class(mesh_score),
+                            mesh_score,
+                            glyph: glyph_score >= crate::lineread::GLYPH_NCC_MIN,
+                            glyph_score,
+                            bp_line,
+                            no_line_certified: lo0.certified,
+                        });
+                    }
+                    // Arbitration (pass 34): with the line
+                    // reader off, the band agreement decides
+                    // exactly as pass 33 left it.
+                    let (held_name, held_via, refuse_reason, form_verdict) =
+                        match &channels {
+                            Some(ch) => {
+                                let v = ch.verdict();
+                                match crate::lineread::arbitrate(
+                                    band_held.as_deref(),
+                                    line_held.as_deref(),
+                                    ch,
+                                    universe,
+                                ) {
+                                    crate::lineread::Arbitration::Hold { name, via } => {
+                                        (Some(name), Some(via), None, v)
+                                    }
+                                    crate::lineread::Arbitration::Refuse { reason } => {
+                                        (None, None, Some(reason), v)
+                                    }
+                                }
+                            }
+                            None => {
+                                let h = band_held.clone();
+                                let via = if h.is_some() {
+                                    Some(crate::lineread::Via::Band)
+                                } else {
+                                    None
+                                };
+                                (h, via, None, crate::lineread::FormVerdict::Unknown)
+                            }
+                        };
+                    let held = held_name.is_some();
+                    let result = match (&held_name, held_via) {
+                        (Some(_), Some(crate::lineread::Via::Line)) => line_winner
+                            .clone()
+                            .unwrap_or_else(|| canon_res.clone()),
+                        (Some(_), _) => band_winner
+                            .cloned()
+                            .unwrap_or_else(|| canon_res.clone()),
+                        _ => canon_res.clone(),
+                    };
+                    // The built-copy glyph on a slot held as a
+                    // blueprint implies its built sibling as
+                    // held stock (brief §2(c)).
+                    let glyph_implied = match (&held_name, &channels) {
+                        (Some(n), Some(ch))
+                            if ch.glyph
+                                && crate::lineread::form_of(universe, n)
+                                    == Some(crate::lineread::Form::Blueprint) =>
+                        {
+                            universe.form_sibling(n)
+                        }
+                        _ => None,
+                    };
+                    slots_out.push(SlotReport {
+                        segment: si,
+                        row: slot.row,
+                        col: slot.col,
+                        coverage: if held {
+                            SlotCoverage::Held
+                        } else {
+                            SlotCoverage::SeenNotHeld
+                        },
+                        result: Some(result),
+                        instances: usable.len(),
+                        partial_sightings: partial,
+                        instance_counts: counts,
+                        disagreement: cc.disagreement()
+                            || band_contested
+                            || line_contested
+                            || refuse_reason == Some("name-disagreement"),
+                        median: cc.median,
+                        fallback: seg.relinked,
+                        band_held,
+                        line_held,
+                        form_verdict,
+                        held_via,
+                        refuse_reason,
+                        glyph_implied,
+                        glyph_score: channels.map(|c| c.glyph_score).unwrap_or(0.0),
+                        mesh_score: channels.map(|c| c.mesh_score).unwrap_or(0.0),
+                    });
+                }
+                _ => {
+                    slots_out.push(SlotReport {
+                        segment: si,
+                        row: slot.row,
+                        col: slot.col,
+                        coverage: SlotCoverage::NeverFullyVisible,
+                        result: None,
+                        instances: 0,
+                        partial_sightings: partial,
+                        instance_counts: Vec::new(),
+                        disagreement: false,
+                        median: false,
+                        fallback: seg.relinked,
+                        band_held: None,
+                        line_held: None,
+                        form_verdict: crate::lineread::FormVerdict::Unknown,
+                        held_via: None,
+                        refuse_reason: None,
+                        glyph_implied: None,
+                        glyph_score: 0.0,
+                        mesh_score: 0.0,
+                    });
+                }
+            }
+        }
+    }
+    StitchReport {
+        plan,
+        slots: slots_out,
+    }
 }
 
 /// A coarse change signature: a 24x14 grid of block means, hashed. Two
@@ -971,6 +1604,8 @@ pub fn run_capture(
             None => break,
         }
     }
+    // Pass 33: the parts stitch closes when the capture does.
+    session.finish_parts(ctx, engine);
     Ok(session)
 }
 
@@ -1356,6 +1991,9 @@ mod tests {
             radius_decoder: true,
             radius_strip: true,
             radius_tail_budget: crate::ocr::RADIUS_TAIL_BUDGET,
+            line_reader: false,
+            strip_offsets: false,
+            snap_cells: false,
             debug_dir: None,
         };
         let mut session = CaptureSession::new();
@@ -1450,6 +2088,9 @@ mod tests {
             radius_decoder: true,
             radius_strip: true,
             radius_tail_budget: crate::ocr::RADIUS_TAIL_BUDGET,
+            line_reader: false,
+            strip_offsets: false,
+            snap_cells: false,
             debug_dir: None,
         };
         let mut session = CaptureSession::new();
@@ -1505,6 +2146,9 @@ mod tests {
             radius_decoder: true,
             radius_strip: true,
             radius_tail_budget: crate::ocr::RADIUS_TAIL_BUDGET,
+            line_reader: false,
+            strip_offsets: false,
+            snap_cells: false,
             debug_dir: Some(dir.clone()),
         };
         let mut session = CaptureSession::new();
@@ -1719,16 +2363,45 @@ mod tests {
             radius_decoder: true,
             radius_strip: true,
             radius_tail_budget: crate::ocr::RADIUS_TAIL_BUDGET,
+            line_reader: false,
+            strip_offsets: false,
+            snap_cells: false,
             debug_dir: None,
         };
-        let read = |count: u32| crate::ocr::OcrRead {
+        // Pass 33 mechanics: parts frames stitch at finish, and
+        // the vote consumes PER-INSTANCE count reads — so the
+        // script interleaves one name read (the canonical crop's)
+        // with one count read per instance: [name, x8, name, x1,
+        // name, x1] models frame 1 observing a phantom x8 and
+        // frames 2–3 observing the true x1. (If frames 2–3 link
+        // into one segment their slot still takes one name read
+        // and two instance count reads; the script's fifth entry
+        // is then consumed as a count read whose empty count votes
+        // x1 — the assertions below hold under either stitch.)
+        let name_read = || crate::ocr::OcrRead {
             text: "Trumna Prime Stock".to_owned(),
+            confidence: 0.9,
+            count: None,
+            rank: None,
+        };
+        let count_read = |count: u32| crate::ocr::OcrRead {
+            text: String::new(),
             confidence: 0.9,
             count: Some(count),
             rank: None,
         };
         let engine = CountScriptEngine {
-            reads: std::sync::Mutex::new(vec![read(8), read(1), read(1)].into()),
+            reads: std::sync::Mutex::new(
+                vec![
+                    name_read(),
+                    count_read(8),
+                    name_read(),
+                    count_read(1),
+                    name_read(),
+                    count_read(1),
+                ]
+                .into(),
+            ),
         };
         let mut session = CaptureSession::new();
         // Distinct bodies (signatures), identical header strip.
@@ -1742,6 +2415,7 @@ mod tests {
             img
         };
         session.process_frame(&ctx, &engine, &frame(10));
+        session.finish_parts(&ctx, &engine);
         assert_eq!(
             session.stock().parts.get("Trumna Prime Stock"),
             Some(&8),
@@ -1749,6 +2423,7 @@ mod tests {
         );
         session.process_frame(&ctx, &engine, &frame(90));
         session.process_frame(&ctx, &engine, &frame(160));
+        session.finish_parts(&ctx, &engine);
         assert_eq!(
             session.stock().parts.get("Trumna Prime Stock"),
             Some(&1),
@@ -1898,6 +2573,9 @@ mod tests {
                         radius_decoder: true,
                         radius_strip: true,
                         radius_tail_budget: crate::ocr::RADIUS_TAIL_BUDGET,
+                        line_reader: false,
+                        strip_offsets: false,
+                        snap_cells: false,
                         debug_dir: None,
                     };
                     let session = run_capture(

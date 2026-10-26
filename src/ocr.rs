@@ -620,7 +620,9 @@ impl Layout {
 
 /// Crop a `[x0,y0,x1,y1]` fraction-of-cell region, always returning at
 /// least a 1x1 image so downstream code need not special-case.
-fn crop_region(cell: &GrayImage, region: [f32; 4]) -> GrayImage {
+/// Public for the Pass B form channels (`crate::lineread`), which
+/// measure the same regions the readers read.
+pub fn crop_region(cell: &GrayImage, region: [f32; 4]) -> GrayImage {
     let w = cell.width as f32;
     let h = cell.height as f32;
     let x0 = (region[0] * w).clamp(0.0, w) as u32;
@@ -634,6 +636,149 @@ fn crop_region(cell: &GrayImage, region: [f32; 4]) -> GrayImage {
         .max(y0 as f32 + 1.0)
         .min(h) as u32;
     cell.crop(x0, y0, (x1 - x0).max(1), (y1 - y0).max(1))
+}
+
+/// The badge window (pass 33): cell-relative region around the
+/// parts count badge, slightly larger than the count region
+/// itself so the whole ring is inside it. The Pass B built-copy
+/// glyph lives in the same window and is matched in the same
+/// canonical resample (`crate::lineread::glyph_score`).
+pub const BADGE_WINDOW: [f32; 4] = [0.02, 0.0, 0.36, 0.20];
+/// Canonical size the badge window is resampled to before template
+/// matching — the size at which [`BADGE_TEMPLATE`] was measured
+/// (2560×1440 captures), so detection is resolution-independent.
+pub const BADGE_WINDOW_W: u32 = 62;
+pub const BADGE_WINDOW_H: u32 = 36;
+/// NCC floor for "the badge ring is present". Calibrated on both
+/// censuses' aligned frames (see docs/thirty-third-pass.md):
+/// non-badge cells score at most 0.34 (the built-copy glyph's
+/// small circles are the closest confuser), genuine badges at
+/// least 0.96 (standard) — 0.50 sits in empty space on both sides.
+const BADGE_RING_NCC_MIN: f32 = 0.50;
+
+/// The count badge's circled check, cropped from a verified ×6
+/// cell (standard census frame-first-00, Glaive Prime Blade) at
+/// the canonical window scale: 27×23, nominal window offset
+/// (10, 2). The badge art is identical on every cell (deterministic
+/// UI rendering), which is what makes a literal template viable.
+const BADGE_TEMPLATE: [[u8; 27]; 23] = [
+    [5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 7, 12, 15, 13, 7, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5],
+    [5, 5, 5, 5, 5, 5, 5, 5, 18, 67, 89, 110, 118, 113, 90, 72, 23, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5],
+    [5, 5, 5, 5, 5, 5, 5, 72, 140, 155, 159, 138, 123, 138, 158, 156, 141, 87, 5, 5, 5, 5, 5, 5, 5, 5, 5],
+    [5, 5, 5, 5, 5, 8, 96, 159, 134, 62, 8, 5, 5, 5, 7, 53, 128, 158, 108, 15, 5, 5, 5, 5, 5, 5, 5],
+    [5, 5, 5, 5, 5, 94, 155, 94, 11, 5, 5, 5, 5, 5, 5, 5, 5, 87, 153, 109, 5, 5, 5, 5, 5, 5, 5],
+    [5, 5, 5, 5, 70, 158, 93, 9, 5, 5, 5, 5, 5, 5, 5, 5, 6, 43, 157, 159, 95, 5, 5, 5, 5, 5, 5],
+    [5, 5, 5, 19, 140, 135, 11, 5, 5, 5, 5, 5, 5, 5, 5, 7, 41, 158, 159, 159, 144, 28, 5, 5, 5, 5, 5],
+    [5, 5, 5, 66, 155, 63, 5, 5, 5, 5, 5, 5, 5, 5, 7, 54, 149, 159, 159, 144, 158, 77, 5, 5, 5, 5, 5],
+    [5, 5, 6, 87, 159, 8, 5, 5, 12, 5, 5, 5, 5, 5, 41, 149, 159, 159, 144, 39, 150, 102, 10, 5, 5, 5, 5],
+    [5, 5, 11, 109, 138, 5, 6, 33, 150, 59, 7, 5, 7, 41, 158, 159, 159, 145, 49, 5, 110, 129, 18, 5, 5, 5, 5],
+    [5, 5, 14, 117, 125, 5, 28, 142, 159, 143, 59, 7, 54, 149, 159, 159, 143, 50, 5, 5, 92, 137, 21, 5, 5, 5, 5],
+    [5, 5, 12, 111, 138, 5, 11, 89, 159, 159, 150, 84, 149, 159, 159, 143, 38, 5, 5, 6, 102, 130, 18, 5, 5, 5, 5],
+    [5, 5, 7, 89, 159, 8, 5, 5, 89, 153, 159, 159, 159, 159, 145, 49, 5, 5, 5, 6, 144, 105, 11, 5, 5, 5, 5],
+    [5, 5, 5, 72, 157, 52, 5, 5, 11, 87, 153, 159, 159, 144, 50, 5, 5, 5, 5, 31, 158, 81, 6, 5, 5, 5, 5],
+    [5, 5, 5, 19, 140, 131, 11, 5, 5, 11, 90, 159, 144, 39, 5, 5, 5, 5, 5, 122, 145, 31, 5, 5, 5, 5, 5],
+    [5, 5, 5, 5, 85, 158, 88, 8, 5, 5, 5, 83, 50, 5, 5, 5, 5, 7, 73, 154, 105, 5, 5, 5, 5, 5, 5],
+    [5, 5, 5, 5, 5, 107, 151, 82, 6, 6, 5, 5, 5, 5, 5, 5, 5, 72, 144, 118, 11, 5, 5, 5, 5, 5, 5],
+    [5, 5, 5, 5, 5, 14, 107, 156, 128, 41, 5, 5, 5, 5, 5, 30, 122, 154, 118, 21, 5, 5, 5, 5, 5, 5, 5],
+    [5, 5, 5, 5, 5, 5, 6, 93, 141, 157, 151, 113, 94, 110, 147, 158, 144, 104, 11, 5, 5, 5, 5, 5, 5, 5, 5],
+    [5, 5, 5, 5, 5, 5, 6, 6, 23, 77, 101, 127, 135, 129, 104, 80, 31, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5],
+    [5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 10, 17, 19, 18, 10, 6, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5],
+    [5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5],
+    [5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5],
+];
+
+/// Bilinear resample to an exact size (centre-aligned mapping, as
+/// in PIL's resize — the mapping the badge calibration used).
+/// Public for the Pass B form channels (`crate::lineread`), which
+/// resample the badge window for the glyph template match.
+pub fn resize_bilinear(img: &GrayImage, w: u32, h: u32) -> GrayImage {
+    let mut out = GrayImage::blank(w, h, 0);
+    if img.width == 0 || img.height == 0 {
+        return out;
+    }
+    let sx = img.width as f32 / w as f32;
+    let sy = img.height as f32 / h as f32;
+    for dy in 0..h {
+        let fy = ((dy as f32 + 0.5) * sy - 0.5).clamp(0.0, (img.height - 1) as f32);
+        let y0 = fy.floor() as u32;
+        let y1 = (y0 + 1).min(img.height - 1);
+        let wy = fy - y0 as f32;
+        for dx in 0..w {
+            let fx = ((dx as f32 + 0.5) * sx - 0.5).clamp(0.0, (img.width - 1) as f32);
+            let x0 = fx.floor() as u32;
+            let x1 = (x0 + 1).min(img.width - 1);
+            let wx = fx - x0 as f32;
+            let v = img.get(x0, y0) as f32 * (1.0 - wx) * (1.0 - wy)
+                + img.get(x1, y0) as f32 * wx * (1.0 - wy)
+                + img.get(x0, y1) as f32 * (1.0 - wx) * wy
+                + img.get(x1, y1) as f32 * wx * wy;
+            out.pixels[(dy * w + dx) as usize] = v.round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    out
+}
+
+/// Is the parts count badge's ring present in this cell? (Pass 33,
+/// addendum #97: ring-gated badge reads.) Template NCC of
+/// [`BADGE_TEMPLATE`] over the canonical badge window, searched
+/// over the offsets the calibration exercised (x 5..=15, y 0..=11 —
+/// the vertical range absorbs the row-pitch phase a per-frame cut
+/// can carry; stitched canonical crops sit at the nominal offset).
+/// The one confuser by design is the built-copy glyph in the same
+/// corner — its circles are a fraction of the badge's diameter and
+/// it calibrates at ≤ 0.34, far under the floor. A cell whose
+/// window is too small to judge answers "absent": an unreadable
+/// badge must never become a digit read.
+pub fn badge_ring_present(cell: &GrayImage) -> bool {
+    let win = crop_region(cell, BADGE_WINDOW);
+    if win.width < 16 || win.height < 10 {
+        return false;
+    }
+    let win = resize_bilinear(&win, BADGE_WINDOW_W, BADGE_WINDOW_H);
+    let (tw, th) = (27usize, 23usize);
+    let tmean: f32 =
+        BADGE_TEMPLATE.iter().flatten().map(|&v| v as f32).sum::<f32>() / (tw * th) as f32;
+    let tcent: Vec<f32> = BADGE_TEMPLATE
+        .iter()
+        .flatten()
+        .map(|&v| v as f32 - tmean)
+        .collect();
+    let tnorm: f32 = tcent.iter().map(|v| v * v).sum::<f32>().sqrt();
+    if tnorm <= f32::EPSILON {
+        return false;
+    }
+    let (ww, wh) = (win.width as usize, win.height as usize);
+    let mut best = f32::MIN;
+    for oy in 0..=11usize {
+        for ox in 5..=15usize {
+            if ox + tw > ww || oy + th > wh {
+                continue;
+            }
+            let mut sum = 0.0f32;
+            for y in 0..th {
+                for x in 0..tw {
+                    sum += win.pixels[(oy + y) * ww + ox + x] as f32;
+                }
+            }
+            let pmean = sum / (tw * th) as f32;
+            let (mut num, mut pss) = (0.0f32, 0.0f32);
+            for y in 0..th {
+                for x in 0..tw {
+                    let pc = win.pixels[(oy + y) * ww + ox + x] as f32 - pmean;
+                    num += pc * tcent[y * tw + x];
+                    pss += pc * pc;
+                }
+            }
+            if pss <= f32::EPSILON {
+                continue;
+            }
+            let ncc = num / (pss.sqrt() * tnorm);
+            if ncc > best {
+                best = ncc;
+            }
+        }
+    }
+    best >= BADGE_RING_NCC_MIN
 }
 
 /// Cache key for one cropped region: dimensions + a caller salt,
@@ -707,6 +852,22 @@ pub trait OcrEngine {
         _upscale: u32,
     ) -> String {
         String::new()
+    }
+
+    /// Read only the counts of already-cut cells (pass 33): the
+    /// stitch path votes counts from per-instance crops whose names
+    /// it never OCRs. The default goes through [`Self::ocr_cells_in`];
+    /// engines with a per-call process cost override it to run the
+    /// count regions alone.
+    fn read_counts_in(
+        &self,
+        cells: &[Option<GrayImage>],
+        layout: &Layout,
+    ) -> Vec<Option<u32>> {
+        self.ocr_cells_in(cells, layout)
+            .into_iter()
+            .map(|r| r.and_then(|read| read.count))
+            .collect()
     }
 
     /// Batch variant of [`Self::read_text`]: many region reads in
@@ -964,6 +1125,13 @@ impl TesseractCliEngine {
     }
 
     fn read_count(&self, cell: &GrayImage, layout: &Layout) -> Option<u32> {
+        // Ring gate (pass 33): a badge-style count exists only
+        // where the badge's ring is detected. No ring means the
+        // stack is ×1 (or the corner carries the built-copy glyph,
+        // which is not a count) — never OCR the corner texture.
+        if matches!(layout.count_style, CountStyle::Badge) && !badge_ring_present(cell) {
+            return None;
+        }
         let whitelist = match layout.count_style {
             CountStyle::XPrefix => "xX0123456789",
             CountStyle::Badge => "0123456789",
@@ -1155,14 +1323,28 @@ impl OcrEngine for TesseractCliEngine {
 
         let counts: Vec<(u64, GrayImage)> =
             live.iter().map(|c| crop(c, layout.count, cs)).collect();
+        // Ring gate (pass 33), the batched twin of the check in
+        // `read_count`: badge-style counts are OCR'd only for cells
+        // whose badge ring is detected; the rest never reach
+        // tesseract and resolve to no count (×1). The gate is a
+        // pure function of the cell's pixels, but its window is
+        // larger than the count crop the cache keys on, so gate
+        // outcomes are NOT cached — they are recomputed per cell
+        // (the NCC is far cheaper than the OCR it gates).
+        let ring_ok: Vec<bool> = if matches!(layout.count_style, CountStyle::Badge) {
+            live.iter().map(|c| badge_ring_present(c)).collect()
+        } else {
+            vec![true; live.len()]
+        };
         let wl = match layout.count_style {
             CountStyle::XPrefix => "xX0123456789",
             CountStyle::Badge => "0123456789",
         };
         let todo: Vec<(u64, GrayImage)> = counts
             .iter()
-            .filter(|(k, _)| !cache.counts.contains_key(k))
-            .cloned()
+            .zip(ring_ok.iter())
+            .filter(|((k, _), ok)| **ok && !cache.counts.contains_key(k))
+            .map(|(c, _)| c.clone())
             .collect();
         let mut raw_counts: HashMap<u64, String> = HashMap::new();
         Self::fill_cache(
@@ -1200,7 +1382,14 @@ impl OcrEngine for TesseractCliEngine {
                     let read = OcrRead {
                         confidence: if text.is_empty() { 0.0 } else { 0.85 },
                         text,
-                        count: cache.counts[&counts[i].0],
+                        // Ring-gated cells take their count from
+                        // the cache; ungated cells never had their
+                        // corner OCR'd and report no count.
+                        count: if ring_ok[i] {
+                            cache.counts[&counts[i].0]
+                        } else {
+                            None
+                        },
                         rank: self.read_rank(cell, layout),
                     };
                     i += 1;
@@ -1208,6 +1397,76 @@ impl OcrEngine for TesseractCliEngine {
                 })
             })
             .collect()
+    }
+
+    /// Counts-only batched reads (pass 33): the counts half of
+    /// [`Self::ocr_cells_in`] run on its own — same count crop,
+    /// same crop-hash cache, same ring gate, same parse rule
+    /// (digits only, kept only when > 1), so a count read here and
+    /// a count read there can never disagree. The stitch path
+    /// votes per-instance counts through this without paying name
+    /// OCR for crops it only needs the badge of.
+    fn read_counts_in(
+        &self,
+        cells: &[Option<GrayImage>],
+        layout: &Layout,
+    ) -> Vec<Option<u32>> {
+        let mut cache = self.cache.lock().unwrap();
+        if cache.names.len() > 4096 {
+            *cache = OcrCache::default();
+        }
+        let cs = layout.count_psm
+            ^ (layout.count_upscale << 8)
+            ^ ((matches!(layout.count_style, CountStyle::XPrefix) as u32) << 16);
+        let live: Vec<(usize, &GrayImage)> = cells
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| c.as_ref().map(|c| (i, c)))
+            .collect();
+        let crops: Vec<(u64, GrayImage)> = live
+            .iter()
+            .map(|(_, c)| {
+                let s = crop_region(c, layout.count);
+                (crop_key(&s, cs), s)
+            })
+            .collect();
+        let ring_ok: Vec<bool> = if matches!(layout.count_style, CountStyle::Badge) {
+            live.iter().map(|(_, c)| badge_ring_present(c)).collect()
+        } else {
+            vec![true; live.len()]
+        };
+        let wl = match layout.count_style {
+            CountStyle::XPrefix => "xX0123456789",
+            CountStyle::Badge => "0123456789",
+        };
+        let todo: Vec<(u64, GrayImage)> = crops
+            .iter()
+            .zip(ring_ok.iter())
+            .filter(|((k, _), ok)| **ok && !cache.counts.contains_key(k))
+            .map(|(c, _)| c.clone())
+            .collect();
+        let mut raw_counts: HashMap<u64, String> = HashMap::new();
+        Self::fill_cache(
+            self,
+            &todo,
+            layout.count_psm,
+            layout.count_upscale,
+            Some(wl),
+            &mut raw_counts,
+        );
+        for (k, t) in raw_counts {
+            let digits: String = t.chars().filter(|c| c.is_ascii_digit()).collect();
+            cache
+                .counts
+                .insert(k, digits.parse::<u32>().ok().filter(|&n| n > 1));
+        }
+        let mut out: Vec<Option<u32>> = vec![None; cells.len()];
+        for (li, (ci, _)) in live.iter().enumerate() {
+            if ring_ok[li] {
+                out[*ci] = cache.counts[&crops[li].0];
+            }
+        }
+        out
     }
 }
 
@@ -1568,6 +1827,14 @@ impl OcrEngine for FakeEngine {
 pub struct Universe {
     names: Vec<String>,
     folded: Vec<String>,
+    /// Discriminative tokens per name (pass 33, addendum #97): the
+    /// name's HEAD tokens — everything before its suffix class's
+    /// shared trailing run — or all its tokens when it shares no
+    /// suffix with another name. These are the only tokens that
+    /// distinguish the name from its siblings; [`Self::hold_permitted`]
+    /// is defined over them. Computed once at construction (the
+    /// derivation is a pairwise pass, far too costly per read).
+    discriminative: Vec<Vec<String>>,
     /// Built suffix classes for the radius decoder (pass 29), keyed
     /// by suffix. Building a class costs a pairwise pass over its
     /// members' heads; a capture session refuses the same stacks
@@ -1577,9 +1844,18 @@ pub struct Universe {
 
 impl Universe {
     pub fn from_names(names: &[String]) -> Self {
+        let folded: Vec<String> = names.iter().map(|n| fold(n)).collect();
+        let tokenised: Vec<Vec<&str>> = folded
+            .iter()
+            .map(|f| f.split(' ').filter(|t| !t.is_empty()).collect())
+            .collect();
+        let discriminative = (0..names.len())
+            .map(|i| discriminative_tokens(&tokenised, i))
+            .collect();
         Self {
             names: names.to_vec(),
-            folded: names.iter().map(|n| fold(n)).collect(),
+            folded,
+            discriminative,
             radius_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -1639,6 +1915,140 @@ impl Universe {
         best
     }
 
+    /// The name's FORM SIBLING (pass 34): the built
+    /// form of a blueprint name (`"X Blueprint"` -> `"X"`), or the
+    /// blueprint form of a built name (`"X"` -> `"X Blueprint"`),
+    /// when the sibling is itself in this universe. `None` when
+    /// the item has only one form here — form evidence is then
+    /// vacuous for the item, because no hold of it can mint or be
+    /// confused with a sibling form. The form channels
+    /// (`crate::lineread`) gate holds through this relation.
+    pub fn form_sibling(&self, name: &str) -> Option<String> {
+        if let Some(base) = name.strip_suffix(" Blueprint") {
+            if self.names.iter().any(|n| n == base) {
+                return Some(base.to_owned());
+            }
+        }
+        let bp = format!("{name} Blueprint");
+        if self.names.iter().any(|n| n == &bp) {
+            return Some(bp);
+        }
+        None
+    }
+
+    /// The candidate's discriminative tokens (its head — the only
+    /// tokens that distinguish it from its suffix-class siblings),
+    /// or `None` for a name outside this universe. Diagnostics and
+    /// tests; the hold paths use [`Self::hold_permitted`].
+    pub fn discriminative_tokens_of(&self, candidate: &str) -> Option<&[String]> {
+        self.names
+            .iter()
+            .position(|n| n == candidate)
+            .map(|i| self.discriminative[i].as_slice())
+    }
+
+    /// THE hold predicate (pass 33, addendum #97) — the single
+    /// condition every path that can hold an item must satisfy, on
+    /// top of its own evidence bars. Two clauses:
+    ///
+    /// 1. **Head witness.** The evidence read must witness the
+    ///    candidate's HEAD — its discriminative tokens, the only
+    ///    ones distinguishing it from its suffix-class siblings
+    ///    (see [`head_witnessed`]). A whole-name score counts
+    ///    shared tokens as evidence: on a read carrying only a
+    ///    shared suffix ("Prime Handle" — an icon-bleed fragment,
+    ///    a composite cell, another item's tail), EVERY
+    ///    "... Prime Handle" sibling scores high, the shortest
+    ///    name's dilution is smallest, and the margin between
+    ///    near-equal siblings can clear the guard on length alone
+    ///    — the pass-32 HC gate's Bo Prime Handle shape (truths
+    ///    Fragor / Venato / Karyst) and the reviewer's Q4
+    ///    diagnosis. Zero discriminative witnesses must mean no
+    ///    hold, whatever the diluted score says.
+    /// 2. **No clean strict subset.** If every token of the read
+    ///    is EXACTLY a token of the candidate and the read is
+    ///    shorter than the candidate, the read is what a token
+    ///    deletion of a longer name looks like ("Mesa Chassis",
+    ///    of Mesa Prime Chassis Blueprint): holding any name but
+    ///    the read's own exact name asserts tokens the read never
+    ///    showed. The property battery (`hold_paths_never_hold_
+    ///    a_different_item_on_token_subsets`) exercises exactly
+    ///    this shape exhaustively. Noisy reads — garbled,
+    ///    truncated or merged tokens — are never exact subsets,
+    ///    so this clause leaves the matcher's dilution model its
+    ///    legitimate territory (the gate measured a stricter
+    ///    full-coverage variant refusing genuine holds on merged
+    ///    "NidusPrime" and truncated "Protea P …" reads; that
+    ///    variant was rejected on that evidence).
+    ///
+    /// Enforcement points (one function, every hold path):
+    /// [`validate_read`] for the margin matcher, and the two
+    /// radius decoder paths ([`Self::radius_decode_budget`],
+    /// [`Self::radius_decode_strip`]) — each on its evidence
+    /// read(s): the band read for the band path; for the strip
+    /// path the union of the strip read (its head evidence) and
+    /// the band read (its suffix evidence, tail-verified inside
+    /// the call). The matcher's internal RANKING is deliberately
+    /// not zeroed: the decoder's class nomination consumes it,
+    /// and a nomination is not a hold — the pinned strip
+    /// counter-case ("x Prime Receiver" band + "Lex Prime" strip)
+    /// nominates the Receiver class from a band read whose head
+    /// token is destroyed, which is legitimate because the class
+    /// is verified by the witnessed tail and the hold itself
+    /// still passes this predicate on the combined evidence.
+    /// Zeroing the ranking would kill that mechanism; gating the
+    /// hold does not. The predicate is a NECESSARY condition,
+    /// never sufficient: the decoder's evidence floor (pass 32)
+    /// still refuses 2-char fragments the predicate alone would
+    /// pass ("le" sits within one edit of "lex"), and the
+    /// matcher's score/margin bars still apply. Quantity of
+    /// evidence and discriminativeness of evidence are separate
+    /// questions; each path must answer both.
+    pub fn hold_permitted(&self, read: &str, candidate: &str) -> bool {
+        self.hold_permitted_tokens(&cleaned_read_tokens(read), candidate)
+    }
+
+    /// The predicate over pre-tokenised evidence (the strip
+    /// decoder's two evidence reads union here).
+    fn hold_permitted_tokens(&self, read_toks: &[String], candidate: &str) -> bool {
+        let Some(idx) = self.names.iter().position(|n| n == candidate) else {
+            return false;
+        };
+        if read_toks.is_empty() {
+            return false;
+        }
+        let cand_toks: Vec<String> = self.folded[idx]
+            .split(' ')
+            .filter(|t| !t.is_empty())
+            .map(squash_token)
+            .filter(|t| !t.is_empty())
+            .collect();
+        // Clause 2: a clean strict subset holds only its own
+        // exact name (which is not strict, so it passes here).
+        if strict_exact_subset(read_toks, &cand_toks) {
+            return false;
+        }
+        // Clause 1: the head must be witnessed.
+        let head: Vec<String> = self.discriminative[idx]
+            .iter()
+            .map(|t| squash_token(t))
+            .filter(|t| !t.is_empty())
+            .collect();
+        if head.is_empty() {
+            return false;
+        }
+        // The candidate token following the head (for the merged
+        // witness target), in squashed form.
+        let head_folded_len = self.discriminative[idx].len();
+        let next_tok = self.folded[idx]
+            .split(' ')
+            .filter(|t| !t.is_empty())
+            .nth(head_folded_len)
+            .map(squash_token)
+            .filter(|t| !t.is_empty());
+        head_witnessed(read_toks, &head, next_tok.as_deref())
+    }
+
     /// Best name for one already-folded candidate plus its runner-up.
     fn match_one(&self, f: &str) -> Option<(&str, f32, f32)> {
         let mut best: Option<(&str, f32)> = None;
@@ -1662,6 +2072,152 @@ impl Universe {
         }
         best.map(|(n, s)| (n, s, second))
     }
+}
+
+/// Head tokens of `tokenised[idx]` — its discriminative tokens
+/// (pass 33): the tokens before the longest trailing run the name
+/// shares with at least one other universe name, using the same
+/// suffix derivation as the radius decoder's classes (see
+/// [`Universe::derive_class_parts`]); all of the name's tokens when
+/// no trailing run is shared (a classless name is discriminated by
+/// every token it has).
+fn discriminative_tokens(tokenised: &[Vec<&str>], idx: usize) -> Vec<String> {
+    let toks = &tokenised[idx];
+    if toks.len() >= 2 {
+        for k in (1..toks.len()).rev() {
+            let suffix = &toks[toks.len() - k..];
+            let shared = tokenised
+                .iter()
+                .filter(|t| t.len() > k && &t[t.len() - k..] == suffix)
+                .count();
+            if shared >= 2 {
+                return toks[..toks.len() - k]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+            }
+        }
+    }
+    toks.iter().map(|s| s.to_string()).collect()
+}
+
+/// How close a read token must sit to a head token to count as
+/// witnessing it (metric-closure distance, pass 33). Longer heads
+/// tolerate the decoder's witness cap of 2; a 3-char head ("lex",
+/// "mag") tightens to 1 — an exact token or a single junk affix
+/// ("xmag"). A head of ≤2 chars ("bo") requires metric EXACTNESS:
+/// at cap 1, any 2-char token sharing one char ("to", from the
+/// census's Venato read) would witness it, which is no witness at
+/// all. Exactness under the metric closure still forgives the
+/// glyph confusions themselves ("b0" is metrically "bo"), so the
+/// tightening costs only non-confusable near-misses.
+fn witness_cap(head_token: &str) -> usize {
+    match head_token.chars().count() {
+        0..=2 => 0,
+        3 => 1,
+        _ => 2,
+    }
+}
+
+/// A token stripped to its alphanumerics — the same squash the
+/// radius decoder applies to fragments, so junk glyphs (`"`, `*`,
+/// `”`) around a real token cost no witness distance.
+fn squash_token(t: &str) -> String {
+    t.chars().filter(|c| c.is_alphanumeric()).collect()
+}
+
+/// A read's evidence tokens: cleaned exactly as the matcher
+/// cleans (tier labels and the relic suffix stripped), folded,
+/// and squashed to alphanumerics (junk glyphs cost no witness
+/// distance, as in the decoder's fragments).
+fn cleaned_read_tokens(read: &str) -> Vec<String> {
+    let cleaned = strip_tier_label(read);
+    let cleaned = strip_relic_suffix(&cleaned);
+    let folded = fold(&cleaned);
+    folded
+        .split(' ')
+        .filter(|t| !t.is_empty())
+        .map(squash_token)
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+/// Is the candidate's HEAD witnessed by the evidence read?
+/// Witness shapes, per head token: a read token within
+/// [`witness_cap`] — or the JOIN of two adjacent read tokens,
+/// because OCR splits gear words mid-word ("akb olto" for
+/// "akbolto") and neither half alone is within reach of the head
+/// it jointly spells. OCR also MERGES words ("NidusPrime" for
+/// "Nidus Prime"), so the head tokens concatenated — and the
+/// head plus the first suffix token — are witness targets too,
+/// but only against SINGLE read tokens: comparing joins against
+/// merged targets would let "to prime" witness "bo prime" (the
+/// pass-32 Bo shape entering through the side door), which is
+/// why the two target classes are kept apart.
+fn head_witnessed(read_toks: &[String], head: &[String], next_tok: Option<&str>) -> bool {
+    for h in head {
+        let cap = witness_cap(h);
+        if read_toks
+            .iter()
+            .any(|w| levenshtein_confusable_metric_bounded(w, h, cap) <= cap)
+        {
+            return true;
+        }
+        if read_toks.windows(2).any(|w| {
+            let j = format!("{}{}", w[0], w[1]);
+            levenshtein_confusable_metric_bounded(&j, h, cap) <= cap
+        }) {
+            return true;
+        }
+    }
+    // Merged targets, against single read tokens only — and the
+    // witnessing token must SPAN the merge (be longer than the
+    // largest component), so the read's own bare suffix token
+    // cannot witness "boprime" merely by resembling its tail.
+    let merged = head.concat();
+    let longest_head = head.iter().map(|h| h.len()).max().unwrap_or(0);
+    if merged.len() > longest_head || next_tok.is_some() {
+        let cap = witness_cap(&merged);
+        if read_toks.iter().any(|w| {
+            w.len() > longest_head && levenshtein_confusable_metric_bounded(w, &merged, cap) <= cap
+        }) {
+            return true;
+        }
+        if let Some(n) = next_tok {
+            let merged2 = format!("{merged}{n}");
+            let cap = witness_cap(&merged2);
+            if read_toks.iter().any(|w| {
+                w.len() > n.len() && levenshtein_confusable_metric_bounded(w, &merged2, cap) <= cap
+            }) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Is the read an EXACT strict token subset of the candidate —
+/// every read token equal (post-squash) to a distinct candidate
+/// token, with tokens left over? Such a read is
+/// indistinguishable from a token deletion of the candidate
+/// (or of a longer sibling), so it may hold only a name it
+/// equals exactly — which is not strict, and passes.
+fn strict_exact_subset(read_toks: &[String], cand_toks: &[String]) -> bool {
+    if read_toks.len() >= cand_toks.len() {
+        return false;
+    }
+    let mut used = vec![false; cand_toks.len()];
+    for rt in read_toks {
+        match cand_toks
+            .iter()
+            .enumerate()
+            .find(|(i, ct)| !used[*i] && *ct == rt)
+        {
+            Some((i, _)) => used[i] = true,
+            None => return false,
+        }
+    }
+    true
 }
 
 /// The UI labels relic cells "Axi A1 Relic"; the universe stores "Axi A1".
@@ -1932,7 +2488,15 @@ pub fn validate_read(
     if let Some((name, score, second)) = universe.best_match_margin(&read.text) {
         out.matched = Some(name.to_owned());
         out.match_score = score;
-        out.held = score >= min_score && (score - second) >= MATCH_MARGIN;
+        // The shared discriminative-coverage predicate (pass 33,
+        // addendum #97): score and margin are whole-name measures
+        // in which shared suffix tokens dilute the only evidence
+        // that distinguishes siblings, so a read witnessing no
+        // discriminative token of the winner is not held however
+        // the diluted arithmetic lands.
+        out.held = score >= min_score
+            && (score - second) >= MATCH_MARGIN
+            && universe.hold_permitted(&read.text, name);
         if out.held {
             out.count = read.count;
             // Tier only means something on a held relic read; elsewhere
@@ -2226,6 +2790,68 @@ fn token_align_cost(tail: &[&str], suffix: &[String]) -> usize {
     prev[n]
 }
 
+/// The strip path's pooled tail verification (see
+/// [`Universe::radius_decode_strip`]): distinct-witness coverage
+/// of the class suffix over the union of the strip and band
+/// reads' tokens, with the suffix's final token witnessed by the
+/// band read itself and the summed witness distance within
+/// `budget`.
+fn strip_tail_witnessed(
+    band_read: &str,
+    strip_read: &str,
+    class: &RadiusClass,
+    budget: usize,
+) -> bool {
+    let toks = |read: &str| -> Vec<String> {
+        let cleaned = strip_tier_label(read);
+        let cleaned = strip_relic_suffix(&cleaned);
+        fold(&cleaned)
+            .split(' ')
+            .filter(|t| !t.is_empty())
+            .map(|t| t.to_owned())
+            .collect()
+    };
+    let band = toks(band_read);
+    let strip = toks(strip_read);
+    let suffix = class.suffix();
+    if band.is_empty() || suffix.is_empty() {
+        return false;
+    }
+    // The band anchors the tail: the suffix's final token must
+    // be witnessed by a band token.
+    let last = &suffix[suffix.len() - 1];
+    if !band
+        .iter()
+        .any(|t| levenshtein_confusable_metric_bounded(t, last, RADIUS_TOKEN_WITNESS) <= RADIUS_TOKEN_WITNESS)
+    {
+        return false;
+    }
+    // Distinct witnesses over the pooled tokens (strip first —
+    // it is the earlier line), summed distance within budget.
+    let pooled: Vec<&String> = strip.iter().chain(band.iter()).collect();
+    let mut used = vec![false; pooled.len()];
+    let mut total = 0usize;
+    for want in suffix {
+        let mut best: Option<(usize, usize)> = None; // (distance, pool idx)
+        for (i, tok) in pooled.iter().enumerate() {
+            if used[i] {
+                continue;
+            }
+            let d = levenshtein_confusable_metric_bounded(tok, want, RADIUS_TOKEN_WITNESS);
+            if d <= RADIUS_TOKEN_WITNESS && best.map_or(true, |(bd, _)| d < bd) {
+                best = Some((d, i));
+            }
+        }
+        let Some((d, i)) = best else { return false };
+        used[i] = true;
+        total += d;
+        if total > budget {
+            return false;
+        }
+    }
+    true
+}
+
 /// The fragment of a line-1 strip read (band-relative top strip,
 /// PSM 7): everything before the first token resembling "prime"
 /// (the head is the only content above the shared suffix on line 1;
@@ -2385,7 +3011,15 @@ impl Universe {
         }
         let class = self.radius_class(name)?;
         let fragment = self.radius_fragment(read, &class, budget)?;
-        class.decode(&fragment)
+        // The shared hold predicate (pass 33): the decode is a
+        // hold like any other, so the read must witness a
+        // discriminative token of the name it lands on. (The
+        // fragment usually witnesses it by construction; the check
+        // is the uniformity guarantee — no path holds on suffix
+        // evidence alone.)
+        class
+            .decode(&fragment)
+            .filter(|decoded| self.hold_permitted(read, decoded))
     }
 
     /// [`Self::radius_decode_budget`] at the production budget.
@@ -2405,12 +3039,36 @@ impl Universe {
             return None;
         }
         let class = self.radius_class(name)?;
-        // Tail verification on the band read is the class evidence;
-        // its own fragment may be too damaged to decode (that is
-        // why the strip exists), but the suffix must check out.
-        self.radius_fragment(band_read, &class, budget)?;
+        // Tail verification is the class evidence; the band's own
+        // fragment may be too damaged to decode (that is why the
+        // strip exists), but the suffix must check out. The check
+        // pools BOTH reads (pass 33 gate finding): the suffix's
+        // first token usually sits on line 1 ("Gear Prime"), which
+        // is the strip's whole content — a band read that truncated
+        // it to "Pr"/"P" failed the band-only alignment on junk
+        // skip costs even with a clean strip beside it. Pooling is
+        // witness-set based, not sequence-based: every suffix
+        // token needs a distinct witness token in the union of the
+        // two reads, the band alone must witness the suffix's
+        // FINAL token (the strip physically cannot contain the
+        // name's last line, so the tail stays anchored in the
+        // band), and the summed witness distance stays within
+        // budget — the same total the band path allows.
+        if !strip_tail_witnessed(band_read, strip_read, &class, budget) {
+            return None;
+        }
         let fragment = radius_strip_fragment(strip_read);
-        class.decode(&fragment)
+        // The shared hold predicate (pass 33), evaluated on this
+        // path's combined evidence: the strip read is the head
+        // evidence ("Lex Prime" witnesses "lex" — the band read
+        // that nominated the class may carry no head evidence at
+        // all, by design), the band read is the suffix evidence
+        // (already tail-verified above).
+        class.decode(&fragment).filter(|decoded| {
+            let mut toks = cleaned_read_tokens(strip_read);
+            toks.extend(cleaned_read_tokens(band_read));
+            self.hold_permitted_tokens(&toks, decoded)
+        })
     }
 }
 
@@ -4258,6 +4916,362 @@ mod tests {
             }
         }
         chars.iter().collect()
+    }
+
+    #[test]
+    fn discriminative_tokens_are_the_head() {
+        let u = parts_universe();
+        // The head alone discriminates a name among its suffix
+        // class; classless names keep every token.
+        assert_eq!(
+            u.discriminative_tokens_of("Mag Prime Neuroptics Blueprint")
+                .unwrap(),
+            ["mag"]
+        );
+        assert_eq!(
+            u.discriminative_tokens_of("Bo Prime Handle").unwrap(),
+            ["bo"]
+        );
+        assert_eq!(
+            u.discriminative_tokens_of("Dual Zoren Prime Blade").unwrap(),
+            ["dual", "zoren"]
+        );
+        assert_eq!(
+            u.discriminative_tokens_of("Lex Prime Receiver").unwrap(),
+            ["lex"]
+        );
+        assert!(u.discriminative_tokens_of("Not A Real Item").is_none());
+    }
+
+    #[test]
+    fn hold_predicate_refuses_suffix_only_reads() {
+        let u = parts_universe();
+        // The Bo mechanism (pass 33, addendum #97): a read carrying
+        // only a shared suffix witnesses no discriminative token of
+        // any class member, so the shared hold predicate refuses
+        // it for every member — including the junk shapes the
+        // prototype's stage B held as Bo Prime Handle (truths
+        // Fragor / Venato / Karyst: their gear words destroyed or
+        // replaced by bleed, their suffixes intact).
+        for read in [
+            "Prime Handle",
+            "= Prime Handle",
+            "Ve to Prime Handle",
+            "coh Prime Handle",
+            "Prime Receiver",
+            "Prime Neuroptics Blueprint",
+        ] {
+            for cand in [
+                "Bo Prime Handle",
+                "Fragor Prime Handle",
+                "Lex Prime Receiver",
+                "Mag Prime Neuroptics Blueprint",
+            ] {
+                assert!(
+                    !u.hold_permitted(read, cand),
+                    "{read:?} must not permit a hold of {cand}"
+                );
+            }
+            let res = validate_read(
+                &OcrRead {
+                    text: read.to_owned(),
+                    confidence: 1.0,
+                    count: None,
+                    rank: None,
+                },
+                &u,
+                0.5,
+                0.5,
+                0,
+            );
+            assert!(!res.held, "{read:?} held {:?}", res.matched);
+        }
+        // Genuine reads witness their heads — exactly, junk-affixed,
+        // and split across tokens.
+        assert!(u.hold_permitted("Bo Prime Handle", "Bo Prime Handle"));
+        assert!(u.hold_permitted(
+            "Xmag Prime Neuroptics Blueprint",
+            "Mag Prime Neuroptics Blueprint"
+        ));
+        assert!(u.hold_permitted(
+            "Dual Zoren Prime Blade",
+            "Dual Zoren Prime Blade"
+        ));
+        // Coverage (the property battery's Mesa shape): a read
+        // missing a candidate token — "prime", "blueprint", any of
+        // them — does not permit the hold, even with the head exact.
+        assert!(!u.hold_permitted("Mesa Chassis", "Mesa Prime Chassis"));
+        assert!(!u.hold_permitted(
+            "Mesa Prime Chassis",
+            "Mesa Prime Chassis Blueprint"
+        ));
+        assert!(!u.hold_permitted("Lex Prime", "Lex Prime Receiver"));
+        // Noisy reads are not exact subsets, so the subset clause
+        // stays silent and the matcher's dilution model rules: a
+        // truncated suffix token ("bluepri", "P") does not block
+        // the hold the production matcher makes.
+        assert!(u.hold_permitted(
+            "Mag Prime Neuroptics Bluepri",
+            "Mag Prime Neuroptics Blueprint"
+        ));
+        assert!(u.hold_permitted(
+            "Protea P Neuroptics Blueprint",
+            "Protea Prime Neuroptics Blueprint"
+        ));
+        // A merged head token ("NidusPrime" for "Nidus Prime")
+        // witnesses the head through the merged target.
+        assert!(u.hold_permitted(
+            "NidusPrime Systems Blueprint",
+            "Nidus Prime Systems Blueprint"
+        ));
+        // ...but the read's own bare suffix token must not
+        // witness a merged head+next target ("prime" ≁ "boprime"
+        // as evidence for Bo): the pass-32 Bo shape stays refused.
+        assert!(!u.hold_permitted("Ve to Prime Handle", "Bo Prime Handle"));
+        // The "&" separator token is exempt from coverage (it
+        // squashes to nothing; no read could witness it).
+        assert!(u
+            .names()
+            .iter()
+            .any(|n| n == "Mesa Prime Chassis" || n == "Silva & Aegis Prime Blade"));
+        assert!(u.hold_permitted(
+            "Silva & Aegis Prime Blade",
+            "Silva & Aegis Prime Blade"
+        ));
+        // A sibling's head does not witness this candidate.
+        assert!(!u.hold_permitted(
+            "Mag Prime Neuroptics Blueprint",
+            "Nova Prime Neuroptics Blueprint"
+        ));
+    }
+
+    #[test]
+    fn badge_ring_gate_detects_the_badge_and_refuses_the_glyph() {
+        // Synthetic cell at census scale (182x181). The badge
+        // window's origin inside the cell is (3, 0) and the
+        // template's nominal offset within it is (10, 2).
+        let mut cell = GrayImage::blank(182, 181, 5);
+        for (y, row) in BADGE_TEMPLATE.iter().enumerate() {
+            for (x, &v) in row.iter().enumerate() {
+                cell.pixels[(2 + y) * 182 + 13 + x] = v;
+            }
+        }
+        assert!(badge_ring_present(&cell), "the badge itself must pass");
+        // Blank corner: nothing to detect.
+        assert!(!badge_ring_present(&GrayImage::blank(182, 181, 5)));
+        // A small bright ring — the built-copy glyph's circles are
+        // a fraction of the badge's diameter — must not pass: the
+        // glyph is not a count (pass 33 calibration put real glyph
+        // cells at NCC <= 0.34 against the 0.50 floor).
+        let mut glyph = GrayImage::blank(182, 181, 5);
+        for y in 0..181 {
+            for x in 0..182 {
+                let (dx, dy) = (x as i32 - 20, y as i32 - 14);
+                let d = ((dx * dx + dy * dy) as f32).sqrt();
+                if (d - 5.0).abs() < 1.5 {
+                    glyph.pixels[y * 182 + x] = 159;
+                }
+            }
+        }
+        assert!(!badge_ring_present(&glyph), "a glyph circle is not the badge");
+    }
+
+    /// The pass-33 property test (brief §2.3, reviewer Q4): for
+    /// every item in the parts universe, take its clean name as a
+    /// read, delete each subset of its tokens (exhaustive — every
+    /// name has ≤ 5 tokens, so ≤ 32 subsets), and run EVERY hold
+    /// path: no path may ever return a different item on evidence
+    /// that is merely partial. (Returning the item itself on
+    /// partial evidence is the decoder working as designed; it is
+    /// counted, not flagged.)
+    ///
+    /// One exception is forced by the universe's own structure,
+    /// and the battery counts it separately rather than hiding it:
+    /// a token subset of one item's name can BE another item's
+    /// exact clean name — deleting "Blueprint" from "Loki Prime
+    /// Systems Blueprint" yields "Loki Prime Systems" (the built
+    /// form, first-class stock under #89 that must hold on its own
+    /// name), and deleting the part word yields "Loki Prime
+    /// Blueprint" (the gear's main blueprint, a different part).
+    /// Such a read is indistinguishable from the sibling read
+    /// cleanly, so the brief's property in its literal form is
+    /// unsatisfiable over form siblings; the asserted property is
+    /// the satisfiable one — a subset read that is NOT itself a
+    /// complete item name never holds a different item. (This is
+    /// also exactly why Pass B needs positive form evidence:
+    /// token evidence alone cannot separate the forms.)
+    ///
+    /// Distinct reads are memoised — the paths are pure functions
+    /// of the read — and the battery runs across the machine's
+    /// cores. Pass 34 adds the fourth path: the line reader's
+    /// text-level hold chain
+    /// ([`crate::lineread::validate_line_read`]).
+    #[test]
+    fn hold_paths_never_hold_a_different_item_on_token_subsets() {
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+        let u = parts_universe();
+        let names: Vec<String> = u.names().to_vec();
+        assert!(names.len() > 500, "the real parts universe");
+        let mut work: Vec<(usize, String)> = Vec::new(); // (item idx, subset read)
+        let mut max_tokens = 0usize;
+        for (idx, name) in names.iter().enumerate() {
+            let toks: Vec<&str> = name.split_whitespace().collect();
+            max_tokens = max_tokens.max(toks.len());
+            assert!(toks.len() <= 6, "subset space stays tractable: {name}");
+            for mask in 0..(1u32 << toks.len()) {
+                let read = toks
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| mask & (1 << i) != 0)
+                    .map(|(_, t)| *t)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                work.push((idx, read));
+            }
+        }
+        let total_pairs = work.len();
+        // Outcome per distinct read: (matcher hold, band decode,
+        // strip decode, line-reader hold — the pass-34 path runs
+        // the same text through the line reader's validation
+        // chain: matcher, band-budget decode, assembled-as-strip
+        // decode).
+        type Outcome = (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        let cache: Mutex<HashMap<String, Outcome>> = Mutex::new(HashMap::new());
+        let violations: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        let self_holds: Mutex<u64> = Mutex::new(0);
+        let name_collisions: Mutex<u64> = Mutex::new(0);
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .min(8);
+        let chunk = work.len().div_ceil(threads);
+        std::thread::scope(|scope| {
+            for part in work.chunks(chunk) {
+                let (u, cache, violations, self_holds, names, name_collisions) = (
+                    &u,
+                    &cache,
+                    &violations,
+                    &self_holds,
+                    &names,
+                    &name_collisions,
+                );
+                scope.spawn(move || {
+                    for (idx, read) in part {
+                        let outcome = {
+                            let hit = cache.lock().unwrap().get(read).cloned();
+                            match hit {
+                                Some(o) => o,
+                                None => {
+                                    let m = validate_read(
+                                        &OcrRead {
+                                            text: read.clone(),
+                                            confidence: 1.0,
+                                            count: None,
+                                            rank: None,
+                                        },
+                                        u,
+                                        0.5,
+                                        0.5,
+                                        0,
+                                    );
+                                    let lr = crate::lineread::validate_line_read(
+                                        &OcrRead {
+                                            text: read.clone(),
+                                            confidence: 1.0,
+                                            count: None,
+                                            rank: None,
+                                        },
+                                        read,
+                                        u,
+                                        0.5,
+                                        0.5,
+                                        0,
+                                        true,
+                                        true,
+                                        RADIUS_TAIL_BUDGET,
+                                    );
+                                    let o: Outcome = (
+                                        if m.held { m.matched.clone() } else { None },
+                                        u.radius_decode(read),
+                                        u.radius_decode_strip(read, read, RADIUS_TAIL_BUDGET),
+                                        if lr.held { lr.matched.clone() } else { None },
+                                    );
+                                    cache.lock().unwrap().insert(read.clone(), o.clone());
+                                    o
+                                }
+                            }
+                        };
+                        let truth = &names[*idx];
+                        for (path, got) in [
+                            ("matcher", &outcome.0),
+                            ("band decoder", &outcome.1),
+                            ("strip decoder", &outcome.2),
+                            ("line reader", &outcome.3),
+                        ] {
+                            match got {
+                                Some(g) if g == truth => {
+                                    *self_holds.lock().unwrap() += 1;
+                                }
+                                // The forced exception, documented
+                                // on the test: the subset read IS
+                                // the held item's exact clean name
+                                // (a form sibling's — deleting
+                                // "Blueprint" from a blueprint name
+                                // yields the built form's name;
+                                // deleting the part word yields
+                                // the gear's own main blueprint).
+                                // The read is indistinguishable
+                                // from that item read cleanly, and
+                                // built forms are first-class stock
+                                // that MUST hold on their own name —
+                                // no hold path can do otherwise.
+                                Some(g) if fold(read) == fold(g) => {
+                                    *name_collisions.lock().unwrap() += 1;
+                                }
+                                Some(g) => {
+                                    violations.lock().unwrap().push(format!(
+                                        "{path} held {g:?} on subset read {read:?} of {truth:?}"
+                                    ));
+                                }
+                                None => {}
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        let distinct_reads = cache.lock().unwrap().len();
+        let violations = violations.into_inner().unwrap();
+        eprintln!(
+            "property test: {} items, {} (item, subset) pairs (exhaustive subsets, max {} tokens/name), {} distinct reads x 4 hold paths, {} self-holds on partial evidence, {} exact-name collisions (forced: subset read is a form sibling's clean name), {} violations",
+            names.len(),
+            total_pairs,
+            max_tokens,
+            distinct_reads,
+            self_holds.into_inner().unwrap(),
+            name_collisions.into_inner().unwrap(),
+            violations.len()
+        );
+        assert!(
+            total_pairs > 5_000,
+            "the battery exercised the subset space ({total_pairs} pairs)"
+        );
+        assert!(
+            violations.is_empty(),
+            "hold paths returned a different item:\n{}",
+            violations
+                .iter()
+                .take(20)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
     }
 
     /// The gate's stress test (pass 29): for every multi-member

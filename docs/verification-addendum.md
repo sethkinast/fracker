@@ -1606,3 +1606,115 @@ it refines the brief where they disagree. For the next worker pass.
     The session-level artefact-repetition layer was
     not needed and was not built. Details:
     docs/thirty-second-pass.md.
+96. **Per-frame reading wastes the session's structure
+    (pass 33, shipped in v0.5.28 with pass 34).** Parts
+    frames are successive viewports over one sorted list,
+    but capture read each frame independently and merged by
+    name: a slot seen in five frames was read five times,
+    any one bad read could mint stock, and no record
+    existed of what a capture had covered without holding.
+    RESOLVED: parts finalization is session-stitched
+    (src/stitch.rs) — per-session row/column pitch fits
+    (185.0px true row pitch against the layout's 180.65),
+    greedy inter-frame linking with <=1px loop closure,
+    median canonical crops cut on integer boundaries
+    (bilinear resampling measurably degrades OCR), a slot
+    agreement protocol (a slot holds only the ONE name any
+    of its canonical + instance reads holds; two names =
+    contested, refused and flagged), ring-gated count
+    badges (template NCC >= 0.50; the built-copy glyph's
+    circles calibrate <= 0.34 and never mint a count), and
+    coverage accounting (Held / SeenNotHeld /
+    NeverFullyVisible per slot, surfaced at finalize).
+    Count votes are consumed only for held slots. The
+    stitch alone did NOT pass its ship gate (standard 157
+    distinct against a 159 bar, 1 false accept; HC 154/0)
+    and was held unshipped until pass 34 completed the
+    combined release — see #99. Details:
+    docs/thirty-third-pass.md.
+97. **Hold permission was enforced per-path, so the paths
+    disagreed (pass 33, shipped in v0.5.28).** The margin
+    matcher carried a head-witness guard (pass 29) and the
+    radius decoder a separate subset guard (pass 30); any
+    future path would have needed a third copy, and the
+    copies could drift. RESOLVED: one predicate,
+    Universe::hold_permitted — head-witness clause plus
+    no-clean-strict-subset clause — gates the matcher and
+    both decoder paths as a hold gate (not score-zeroing),
+    alongside pass 32's evidence floor
+    (RADIUS_MIN_FRAGMENT_CHARS / the |F| >= max(3, |H|-t_H)
+    rule, unchanged). The token-subset property battery
+    (hold_paths_never_hold_a_different_item_on_token_
+    subsets) exercises every hold path over all 7,576
+    (item, subset) pairs of the 747-item parts universe:
+    0 violations. One carve-out is forced by the universe
+    itself and is counted, not hidden: a subset read can BE
+    another item's exact clean name (deleting "Blueprint"
+    yields the built form's name, which MUST hold under
+    #89; deleting the part word yields the gear's main
+    blueprint). The satisfiable property — a subset read
+    that is not itself a complete item name never holds a
+    different item — is what the battery asserts. Pass 34
+    extended the battery to the line reader's hold chain
+    as a fourth path, same accounting.
+98. **Form (blueprint vs built) cannot be read from tokens
+    alone; it is positive evidence in both directions
+    (pass 34, v0.5.28).** The regrid prototype's stage 2
+    minted forms: a dropped "Blueprint" line made a
+    blueprint cell read as its built sibling at full score
+    (24 false cells in the ablation). RESOLVED with three
+    measured channels (src/lineread.rs), each calibrated on
+    both censuses before being trusted: (a) a witnessed
+    Blueprint line (120/120 standard, 133/133 HC blueprint
+    slots; 0 built slots) or detector-certified absence of
+    a third line — certification = no significant run
+    unaccounted (leftover <= 0.05, shadow-below <= 0.20;
+    covers 153/155 + 140/141 built slots, zero dangerous
+    certifications in 682 slots); (b) the blueprint tile's
+    background mesh, a weak per-instance separator
+    (medians 6.07 vs 5.78) trusted only in its tails
+    (>= 7.2 / <= 5.85) — median composites blur the mesh
+    and backward-difference statistics flatter it by a
+    border-phase artefact, both measured and avoided;
+    (c) the built-copy glyph (figure marker = blueprint
+    cell with a built copy owned; Seth-confirmed): NCC
+    template, floor 0.55 against a 0.31 built-truth maximum
+    on both censuses, fires 34/120 standard blueprint slots
+    and 0/155 built — its implication (the built sibling
+    is held stock) is enabled on that zero-FP measurement
+    and is marked as glyph-implied in the coverage
+    accounting. Built verdicts require the full
+    conjunction (certified absence AND no witnessed
+    Blueprint line AND built-tail mesh AND no glyph); the
+    no-witness clause is the Wukong calibration case
+    (built-tail mesh 5.82 on a slot whose Blueprint line is
+    witnessed). Details: docs/thirty-fourth-pass.md.
+99. **An agreeing-wrong read is unreachable by any single
+    reader (pass 34, v0.5.28).** Pass 33's one false accept
+    (Panthera for Acceltra Prime Blueprint) was two
+    sightings agreeing on the wrong name — agreement
+    protocols cannot refuse agreement. RESOLVED by reader
+    independence plus arbitration (src/lineread.rs,
+    src/capture.rs): the line reader (top-hat line
+    detection, per-line PSM 7 tight crops, same matching
+    stack and hold predicate) reads every stitched crop
+    alongside the band reader; a slot holds when both
+    readers agree (subject to no form-channel
+    contradiction), or when one reader holds and the form
+    channels satisfy its form and the other reader does
+    not actively contradict (a refusal is not a
+    contradiction; a different held name is). The Panthera
+    cell dies by name disagreement, not special-casing.
+    The strip phase additionally reads at a uniform
+    {-8, 0, +8}px offset set with cross-offset agreement
+    (pass 33's phase-sensitivity finding). Combined gate
+    (production harness, both censuses): 0 false accepts;
+    distinct 239 standard / 234 HC (bars 200 / 195);
+    Neuroptics 28 / 28 (bars 27 / 26); counts no worse
+    than pass 33 (standard 453/453 held cells; HC 93.2%);
+    all frames alive; property battery green over four
+    hold paths; 303 tests. A/B control with the new
+    machinery off reproduces pass 33's gate exactly
+    (157/1). The boundary-snap cell-cutting ablation was
+    run under the full stack and not adopted (fitted grid
+    stands; numbers in docs/thirty-fourth-pass.md).

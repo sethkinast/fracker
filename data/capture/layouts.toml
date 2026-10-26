@@ -52,7 +52,14 @@ ref_height = 1116
 x0 = 42.0
 cell_w = 141.0
 y0 = 340.0
-cell_h = 140.0
+# Pass 33 (addendum #96): the renderer's true row pitch measures
+# ≈143.4 reference px (185.0 px at 2560x1440 against the capture
+# scale), not 140 — the fixed grid drifted +4.35 capture px per row
+# and misaligned every row below the first. This value is now the
+# session PRIOR only: the stitch fits the pitch per capture session
+# (src/stitch.rs) and falls back to this geometry for frames it
+# cannot place.
+cell_h = 143.4
 # Pass 27 (census, addendum #90): the name is read from a band BELOW the
 # icon (y 0.53-1.00 of the cell), not the whole cell. Whole-cell reads let
 # the count badge land as a junk leading token and the icon's edges spawn
