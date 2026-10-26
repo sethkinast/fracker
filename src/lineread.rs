@@ -910,6 +910,7 @@ impl LineOutcome {
                 count: None,
                 tier: ocr::RefinementTier::Unknown,
                 rank: None,
+                gate_excluded: false,
             },
             lines: Vec::new(),
             assembled: String::new(),

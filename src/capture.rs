@@ -459,6 +459,12 @@ pub struct ReadOptions {
     pub radius_strip: bool,
     pub radius_tail_budget: usize,
     pub strip_offsets: bool,
+    /// Pass 38: the session's owned-brightness reference for the
+    /// relic owned-gate — the running maximum icon highlight over
+    /// the session's earlier relic frames. `None` outside a
+    /// session (folder ingest, replay seams): the gate then works
+    /// from the frame's own split alone.
+    pub relic_bright_ref: Option<f64>,
 }
 
 /// Everything one stitch bundle needs beyond its frames, layout,
@@ -480,6 +486,7 @@ impl CaptureContext<'_> {
             radius_strip: self.radius_strip,
             radius_tail_budget: self.radius_tail_budget,
             strip_offsets: self.strip_offsets,
+            relic_bright_ref: None,
         }
     }
 
@@ -1073,6 +1080,16 @@ pub struct CaptureSession {
     frames_seen: u64,
     frames_read: u64,
     frames_skipped: u64,
+    /// Pass 38: the owned-gate's session brightness reference —
+    /// the running maximum icon highlight over this session's
+    /// relic frames, handed to each frame's read so a catalogue
+    /// page filled entirely with unowned tiles can still be
+    /// judged dim (see ocr::relic_owned_gate).
+    relic_bright_ref: Option<f64>,
+    /// Pass 38: names the owned-gate excluded this session, in
+    /// first-exclusion order, deduplicated — the finalize log's
+    /// record of what a browse sync refused to import.
+    relic_gate_excluded: Vec<String>,
 }
 
 impl CaptureSession {
@@ -1204,6 +1221,21 @@ impl CaptureSession {
         } else {
             Some(format!("capture failsafes: {}", notes.join("; ")))
         }
+    }
+
+    /// Pass 38: the owned-gate's finalize line — how many
+    /// catalogue tiles were refused as unowned this session, and
+    /// which. `None` when the gate excluded nothing (any
+    /// owned-only session, where the gate never fires).
+    pub fn relic_gate_summary(&self) -> Option<String> {
+        if self.relic_gate_excluded.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "relic owned-gate: excluded {} unowned catalogue tile(s): {}",
+            self.relic_gate_excluded.len(),
+            self.relic_gate_excluded.join(", ")
+        ))
     }
 
     /// The union of stacks captured so far (relics/parts/arcanes buckets).
@@ -1363,7 +1395,41 @@ impl CaptureSession {
         }
         self.parts_intake.reset_position();
 
-        let results = read_frame(layout, frame, engine, ctx, ctx.universes.for_class(class));
+        // Pass 38: on relic frames, extend the session's
+        // owned-brightness reference with this frame BEFORE the
+        // read, and hand the running reference to the owned-gate
+        // (a catalogue tail page can be uniformly dim; the bright
+        // tiles of earlier pages are its yardstick).
+        let bright_ref = if class == ScreenClass::Relics {
+            let frame_bright = ocr::relic_frame_bright(frame, layout);
+            self.relic_bright_ref = Some(
+                self.relic_bright_ref
+                    .unwrap_or(0.0)
+                    .max(frame_bright.unwrap_or(0.0)),
+            );
+            self.relic_bright_ref
+        } else {
+            None
+        };
+        let results = read_frame(
+            layout,
+            frame,
+            engine,
+            ctx,
+            ctx.universes.for_class(class),
+            bright_ref,
+        );
+        // Pass 38: record what the owned-gate refused, for the
+        // finalize log (first-exclusion order, deduplicated).
+        for r in &results {
+            if r.gate_excluded {
+                if let Some(name) = &r.matched {
+                    if !self.relic_gate_excluded.contains(name) {
+                        self.relic_gate_excluded.push(name.clone());
+                    }
+                }
+            }
+        }
         let frame_stock = StockState::from_results(&results, ctx.relic_names, ctx.arcane_names);
         self.observe_counts(&frame_stock);
         self.captured = resolve_voted_stock(&self.part_votes, &self.relic_votes, &self.arcane_votes);
@@ -1854,12 +1920,15 @@ pub fn read_frame(
     engine: &dyn OcrEngine,
     ctx: &CaptureContext<'_>,
     universe: &Universe,
+    bright_ref: Option<f64>,
 ) -> Vec<ocr::CellResult> {
     // One batched call for the whole page (addendum #81): the
     // tesseract engine caches by crop hash and batches cache misses
     // into a handful of processes, instead of 2–3 spawns per cell.
     let cells = layout.split(frame);
-    read_cells(&cells, layout, engine, &ctx.read_options(), universe)
+    let mut opts = ctx.read_options();
+    opts.relic_bright_ref = bright_ref;
+    read_cells(&cells, layout, engine, &opts, universe)
 }
 
 /// Validate + decode an already-cut set of cells (pass 33 seam):
@@ -2016,6 +2085,15 @@ pub fn read_cells(
                 result.count = read.count;
             }
         }
+    }
+    // Pass 38 (addendum #103): the relic owned-gate runs last on
+    // relic frames only — after validation, so it sees exactly the
+    // tiles that would enter stock, and only ever REMOVES holds
+    // (on catalogue frames, under the full evidence conjunction;
+    // see ocr::relic_owned_gate). Parts and arcane frames never
+    // reach it, and on owned-only relic frames it is inert.
+    if layout.key == "relic" {
+        ocr::relic_owned_gate(cells, layout, &mut results, opts.relic_bright_ref);
     }
     results
 }
@@ -3200,6 +3278,171 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An engine that names each cell positionally (test seam for
+    /// the read path: validation sees an exact read per cell, so
+    /// the owned-gate is the only thing that can unhold a tile).
+    struct PositionalEngine {
+        names: Vec<String>,
+    }
+
+    impl OcrEngine for PositionalEngine {
+        fn name(&self) -> &str {
+            "positional-test"
+        }
+        fn ocr_cell(&self, _cell: &GrayImage) -> ocr::OcrRead {
+            ocr::OcrRead::empty()
+        }
+        fn ocr_cells_in(
+            &self,
+            cells: &[Option<GrayImage>],
+            _layout: &Layout,
+        ) -> Vec<Option<ocr::OcrRead>> {
+            cells
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    c.as_ref().map(|_| ocr::OcrRead {
+                        text: self.names[i].clone(),
+                        confidence: 1.0,
+                        count: None,
+                        rank: None,
+                    })
+                })
+                .collect()
+        }
+    }
+
+    /// A synthetic relic cell (canonical 168x174): checkerboard
+    /// icon at the bright (210) or faded (52) highlight level, and
+    /// optionally the measured eye template at the badge window.
+    /// The calibration is ocr's own tests' business; this builder
+    /// exists so the read-path test can present a true eye.
+    fn gate_cell(eye: bool, bright: bool) -> GrayImage {
+        let mut cell = GrayImage::blank(168, 174, 6);
+        let (hi, lo) = if bright { (210, 60) } else { (52, 15) };
+        for y in 17..122 {
+            for x in 25..143 {
+                cell.set(x, y, if (x + y) % 2 == 0 { hi } else { lo });
+            }
+        }
+        if eye {
+            // The measured template itself (ocr tests own the
+            // calibration; the read path only needs a true eye).
+            let tpl = ocr::eye_template_for_test();
+            for (ty, row) in tpl.iter().enumerate() {
+                for (tx, &v) in row.iter().enumerate() {
+                    cell.set(tx as u32, ty as u32, v);
+                }
+            }
+        }
+        cell
+    }
+
+    fn relic_layout_capture() -> Layout {
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let layouts =
+            Layout::load_file(&base.join("data/capture/layouts.toml")).unwrap();
+        layouts.get("relic").unwrap().clone()
+    }
+
+    fn gate_read_options() -> ReadOptions {
+        ReadOptions {
+            min_confidence: 0.5,
+            radius_decoder: false,
+            radius_strip: false,
+            radius_tail_budget: crate::ocr::RADIUS_TAIL_BUDGET,
+            strip_offsets: false,
+            relic_bright_ref: None,
+        }
+    }
+
+    #[test]
+    fn read_cells_applies_the_owned_gate_to_relic_frames() {
+        let layout = relic_layout_capture();
+        let names: Vec<String> = [
+            "Lith A1", "Meso B2", "Neo C3", "Axi D4", "Axi E5", "Axi F6",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let universe = Universe::from_names(&names);
+        let engine = PositionalEngine { names: names.clone() };
+        // 3 owned (bright) + 3 unowned (dim + eye): the gate inside
+        // read_cells must unhold exactly the unowned three.
+        let cells: Vec<Option<GrayImage>> = (0..6)
+            .map(|i| Some(gate_cell(i >= 3, i < 3)))
+            .collect();
+        let results = read_cells(&cells, &layout, &engine, &gate_read_options(), &universe);
+        for (i, r) in results.iter().enumerate() {
+            assert_eq!(r.held, i < 3, "cell {i} held");
+            assert_eq!(r.gate_excluded, i >= 3, "cell {i} gate flag");
+        }
+    }
+
+    #[test]
+    fn browse_strip_gate_verdicts() {
+        // The manual-verification gate of pass 38: run the
+        // production read path over Seth's browse screenshot
+        // (fracker-frames/fixtures/browse-strip.png, a
+        // palette-clipped chat upload — verdicts, not thresholds,
+        // are what this asserts). Skips when the strip is absent.
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let strip_path = root.join("../fracker-frames/fixtures/browse-strip.png");
+        if !strip_path.exists() {
+            eprintln!("skip browse-strip: fixture absent");
+            return;
+        }
+        let img = GrayImage::from_bytes(&std::fs::read(&strip_path).unwrap()).unwrap();
+        // The strip is the grid band of a 2560x1440 capture; its
+        // measured grid (pass 38): cells 168x174 at x0 62, y0 15,
+        // pitch (168.2, 174). Pad the 2px the upload clipped off
+        // the right edge so the last column cuts whole.
+        let mut canvas = GrayImage::blank(1912, 363, 0);
+        for y in 0..img.height {
+            for x in 0..img.width {
+                canvas.set(x, y, img.get(x, y));
+            }
+        }
+        let names: [[&str; 11]; 2] = [
+            [
+                "Neo F3", "Neo K9", "Neo O2", "Neo P4", "Neo P7", "Neo P9", "Neo T11",
+                "Neo V7", "Neo V12", "Neo Y1", "Axi A2",
+            ],
+            [
+                "Axi A3", "Axi A6", "Axi A7", "Axi A8", "Axi A12", "Axi A13", "Axi A15",
+                "Axi A19", "Axi A23", "Axi B7", "Axi B9",
+            ],
+        ];
+        let flat: Vec<String> = names
+            .iter()
+            .flatten()
+            .map(|s| s.to_string())
+            .collect();
+        let universe = Universe::from_names(&flat);
+        let engine = PositionalEngine { names: flat.clone() };
+        let layout = relic_layout_capture();
+        let mut cells: Vec<Option<GrayImage>> = Vec::new();
+        for r in 0..2 {
+            for c in 0..11 {
+                let x = (62.0 + c as f64 * 168.2) as u32;
+                let y = (15.0 + r as f64 * 174.0) as u32;
+                cells.push(Some(canvas.crop(x, y, 168, 174)));
+            }
+        }
+        let results = read_cells(&cells, &layout, &engine, &gate_read_options(), &universe);
+        for (i, r) in results.iter().enumerate() {
+            eprintln!(
+                "strip verdict {:>9}: held={} gate_excluded={}",
+                flat[i], r.held, r.gate_excluded
+            );
+            if i < 10 {
+                assert!(r.held, "owned {} must be kept", flat[i]);
+            } else {
+                assert!(!r.held, "unowned {} must not enter stock", flat[i]);
+            }
+        }
     }
 
     #[test]

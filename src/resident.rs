@@ -887,6 +887,12 @@ async fn finalize_capture(
     if let Some(fs) = session.failsafe_summary() {
         log.record("finalizing", &fs);
     }
+    // Pass 38: relic owned-gate exclusions ride the finalize log —
+    // a browse sync states which catalogue tiles it refused, so a
+    // smaller relic bucket reads as a decision, not a loss.
+    if let Some(gs) = session.relic_gate_summary() {
+        log.record("finalizing", &gs);
+    }
     set_capture_stage(status, log, CaptureStage::Idle);
     true
 }

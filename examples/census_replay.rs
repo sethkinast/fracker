@@ -102,7 +102,7 @@ fn main() {
             continue;
         }
         let t0 = Instant::now();
-        let results = read_frame(&layout, &img, &engine, &ctx, universe);
+        let results = read_frame(&layout, &img, &engine, &ctx, universe, None);
         total_read_ms += t0.elapsed().as_secs_f64() * 1000.0;
         let (mut held, mut correct) = (0usize, 0usize);
         for (idx, want) in cells {

@@ -781,6 +781,158 @@ pub fn badge_ring_present(cell: &GrayImage) -> bool {
     best >= BADGE_RING_NCC_MIN
 }
 
+/// The eye badge window: the relic cell's top-left corner, where
+/// the browse screen puts the unowned eye badge (and an owned
+/// stack puts its count label). Cell-relative fractions.
+pub const EYE_WINDOW: [f32; 4] = [0.0, 0.0, 0.24, 0.22];
+/// Canonical size the eye window is resampled to before template
+/// matching — the size at which [`EYE_TEMPLATE`] was measured
+/// (2560x1440 captures), so detection is resolution-independent.
+pub const EYE_WINDOW_W: u32 = 40;
+pub const EYE_WINDOW_H: u32 = 38;
+/// NCC floor for "the eye badge is present". Calibrated on Seth's
+/// browse screenshot (a palette-clipped chat upload): its 12
+/// unowned tiles score 0.81-0.97 against [`EYE_TEMPLATE`], its 10
+/// owned tiles -0.10..0.07 — 0.60 sits in empty space on both
+/// sides of a wide gap.
+pub const EYE_NCC_MIN: f32 = 0.60;
+
+/// The browse screen's unowned eye badge, averaged over the 12
+/// unowned tiles of Seth's 2026-10-26 browse screenshot at the
+/// canonical window scale: 40x38. The badge art is identical on
+/// every tile (deterministic UI rendering), which is what makes
+/// a literal template viable — the same bet [`BADGE_TEMPLATE`]
+/// makes for the parts count badge.
+const EYE_TEMPLATE: [[u8; 40]; 38] = [
+    [5, 5, 6, 6, 5, 6, 4, 5, 7, 5, 5, 6, 6, 5, 4, 7, 5, 5, 6, 5, 6, 5, 6, 5, 5, 4, 4, 6, 5, 5, 5, 6, 5, 6, 6, 6, 5, 5, 6, 5],
+    [5, 6, 6, 5, 5, 6, 5, 6, 6, 6, 6, 5, 6, 6, 6, 5, 5, 5, 6, 5, 5, 6, 6, 5, 5, 5, 5, 4, 5, 6, 7, 6, 6, 5, 6, 6, 5, 5, 6, 6],
+    [6, 6, 5, 5, 5, 6, 6, 5, 6, 5, 6, 6, 6, 4, 5, 5, 5, 6, 5, 6, 6, 5, 5, 5, 5, 5, 6, 6, 5, 6, 6, 6, 6, 5, 4, 4, 6, 5, 5, 5],
+    [5, 5, 6, 6, 5, 4, 6, 6, 5, 6, 6, 5, 5, 6, 5, 6, 4, 6, 5, 5, 5, 5, 5, 4, 6, 6, 5, 5, 6, 5, 6, 6, 5, 6, 6, 6, 5, 6, 6, 5],
+    [6, 5, 7, 6, 6, 5, 5, 6, 5, 5, 6, 5, 6, 5, 5, 4, 6, 5, 4, 6, 4, 5, 5, 5, 5, 5, 5, 6, 5, 5, 5, 4, 6, 6, 5, 5, 5, 5, 5, 6],
+    [6, 6, 6, 6, 5, 5, 5, 5, 5, 6, 5, 4, 6, 4, 6, 7, 6, 5, 6, 6, 5, 6, 5, 5, 7, 4, 6, 6, 5, 5, 5, 6, 6, 5, 6, 5, 6, 5, 6, 6],
+    [5, 5, 5, 6, 6, 5, 5, 5, 6, 6, 6, 6, 4, 6, 5, 5, 6, 5, 5, 5, 5, 6, 5, 6, 6, 5, 6, 5, 6, 5, 5, 5, 5, 4, 5, 5, 6, 6, 4, 6],
+    [5, 5, 4, 6, 5, 5, 4, 5, 5, 5, 6, 5, 6, 5, 6, 5, 6, 5, 6, 6, 5, 6, 6, 4, 6, 6, 6, 5, 5, 5, 5, 5, 6, 5, 6, 6, 5, 5, 6, 6],
+    [6, 5, 6, 6, 6, 5, 5, 6, 4, 5, 6, 6, 7, 8, 9, 9, 9, 8, 8, 7, 8, 9, 8, 8, 8, 7, 8, 8, 9, 8, 8, 10, 8, 10, 9, 8, 8, 8, 8, 8],
+    [5, 5, 5, 6, 5, 5, 5, 5, 6, 6, 5, 6, 8, 14, 18, 18, 18, 18, 18, 18, 18, 18, 18, 19, 19, 18, 18, 18, 18, 17, 18, 18, 19, 19, 18, 18, 18, 18, 18, 18],
+    [6, 4, 5, 5, 6, 5, 4, 5, 6, 6, 5, 6, 8, 14, 22, 23, 23, 23, 23, 23, 22, 23, 23, 23, 23, 23, 23, 23, 24, 23, 23, 23, 23, 23, 22, 23, 22, 22, 23, 23],
+    [5, 6, 6, 5, 5, 5, 7, 5, 5, 6, 5, 6, 10, 16, 19, 13, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 7],
+    [5, 6, 5, 5, 6, 6, 5, 6, 5, 5, 5, 7, 8, 15, 18, 14, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 7],
+    [5, 5, 6, 4, 6, 5, 7, 5, 6, 5, 5, 5, 9, 16, 18, 13, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 7],
+    [5, 5, 5, 5, 5, 4, 4, 5, 5, 6, 5, 5, 9, 16, 19, 13, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 7],
+    [4, 6, 6, 5, 6, 6, 5, 5, 5, 5, 5, 5, 9, 16, 19, 13, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 7],
+    [6, 5, 6, 6, 5, 6, 6, 5, 6, 5, 5, 6, 9, 15, 18, 13, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 7],
+    [5, 5, 5, 5, 6, 6, 5, 4, 5, 5, 6, 7, 8, 15, 19, 13, 5, 5, 5, 5, 5, 5, 5, 5, 7, 11, 17, 18, 18, 15, 9, 5, 5, 5, 5, 5, 5, 5, 5, 7],
+    [5, 5, 6, 5, 4, 5, 5, 6, 4, 5, 6, 6, 9, 15, 18, 14, 5, 5, 5, 5, 5, 5, 5, 9, 34, 84, 131, 142, 138, 112, 61, 15, 5, 5, 5, 5, 5, 5, 5, 7],
+    [5, 5, 5, 5, 5, 6, 5, 4, 5, 6, 6, 6, 9, 15, 19, 13, 5, 5, 5, 5, 5, 6, 16, 48, 99, 135, 147, 149, 148, 142, 120, 76, 29, 7, 5, 5, 5, 5, 5, 8],
+    [5, 5, 5, 6, 5, 5, 5, 5, 4, 6, 6, 6, 8, 16, 19, 13, 5, 5, 5, 5, 6, 15, 44, 86, 103, 73, 46, 43, 45, 57, 86, 102, 70, 24, 8, 5, 5, 5, 5, 7],
+    [5, 4, 5, 6, 6, 5, 6, 5, 6, 5, 4, 6, 8, 15, 19, 13, 5, 5, 5, 9, 27, 57, 74, 61, 36, 20, 23, 31, 29, 20, 25, 47, 70, 70, 44, 15, 5, 5, 5, 7],
+    [5, 5, 4, 4, 5, 5, 6, 5, 5, 5, 6, 5, 8, 15, 19, 13, 5, 5, 8, 20, 51, 84, 85, 45, 10, 23, 57, 89, 79, 40, 12, 23, 62, 93, 72, 34, 12, 5, 5, 7],
+    [6, 6, 5, 4, 6, 6, 5, 5, 6, 6, 5, 6, 8, 15, 19, 13, 5, 5, 20, 48, 67, 56, 61, 42, 14, 48, 103, 138, 126, 79, 28, 20, 50, 68, 56, 59, 42, 5, 5, 7],
+    [6, 5, 5, 6, 6, 5, 5, 5, 6, 5, 6, 5, 8, 15, 18, 13, 5, 5, 18, 46, 67, 61, 63, 41, 15, 52, 110, 143, 132, 85, 30, 20, 52, 74, 63, 60, 40, 5, 5, 7],
+    [6, 7, 5, 5, 4, 4, 5, 5, 5, 5, 6, 6, 8, 14, 19, 13, 5, 5, 6, 17, 52, 93, 91, 42, 8, 17, 54, 94, 84, 34, 7, 22, 64, 104, 84, 33, 8, 5, 5, 7],
+    [5, 5, 4, 5, 6, 5, 6, 6, 5, 5, 5, 6, 8, 15, 18, 13, 5, 5, 5, 7, 19, 49, 80, 78, 44, 17, 17, 25, 23, 16, 26, 59, 86, 73, 35, 10, 5, 5, 5, 7],
+    [5, 5, 6, 5, 5, 5, 5, 5, 6, 5, 4, 6, 9, 15, 19, 13, 5, 5, 5, 5, 6, 14, 41, 82, 102, 85, 77, 75, 76, 80, 92, 95, 68, 22, 8, 5, 5, 5, 5, 7],
+    [4, 5, 6, 6, 5, 6, 5, 6, 5, 6, 5, 6, 8, 14, 18, 13, 5, 5, 5, 5, 5, 6, 16, 51, 102, 139, 152, 154, 153, 147, 124, 79, 31, 7, 5, 5, 5, 5, 5, 7],
+    [6, 5, 4, 5, 6, 5, 5, 5, 5, 4, 6, 5, 9, 15, 18, 13, 5, 5, 5, 5, 5, 5, 6, 13, 38, 75, 98, 101, 99, 89, 59, 23, 7, 5, 5, 5, 5, 5, 5, 7],
+    [5, 5, 6, 6, 5, 4, 5, 5, 5, 5, 6, 6, 8, 15, 18, 13, 5, 5, 5, 5, 5, 5, 5, 5, 5, 6, 7, 8, 8, 6, 5, 5, 5, 5, 5, 5, 5, 5, 5, 7],
+    [6, 6, 5, 5, 5, 6, 5, 5, 5, 4, 5, 6, 8, 14, 18, 13, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 7],
+    [5, 5, 5, 6, 5, 5, 6, 5, 6, 5, 6, 6, 9, 14, 18, 13, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 7],
+    [4, 6, 4, 4, 5, 5, 5, 6, 5, 5, 5, 5, 9, 15, 19, 13, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 7],
+    [4, 6, 6, 5, 5, 6, 4, 6, 5, 5, 5, 6, 8, 15, 19, 13, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 7],
+    [5, 4, 4, 5, 5, 5, 6, 5, 5, 4, 4, 4, 8, 15, 18, 13, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 7],
+    [5, 5, 5, 5, 4, 4, 5, 6, 4, 5, 5, 7, 9, 15, 21, 20, 19, 19, 19, 20, 20, 19, 20, 19, 20, 19, 19, 19, 19, 19, 19, 20, 19, 19, 19, 19, 19, 19, 20, 20],
+    [5, 5, 6, 5, 5, 6, 6, 5, 5, 4, 5, 5, 10, 16, 24, 26, 24, 23, 25, 23, 25, 24, 24, 24, 24, 24, 25, 25, 24, 24, 24, 25, 25, 24, 24, 24, 24, 24, 24, 24],
+];
+
+/// Template NCC of the eye badge over the canonical badge window
+/// (pass 38, addendum #103): the pixel-evidence leg of the relic
+/// owned-gate. Mirrors [`badge_ring_present`]'s resample-then-NCC
+/// shape, at the single nominal offset — the layout cut is
+/// grid-fitted, so the badge's phase is fixed, and the calibration
+/// strip (hand-cut, phase jitter and all) still separated by 0.74.
+/// A cell whose window is too small to judge scores 0: an
+/// unreadable corner is never an eye.
+pub fn eye_badge_score(cell: &GrayImage) -> f32 {
+    let win = crop_region(cell, EYE_WINDOW);
+    if win.width < 16 || win.height < 10 {
+        return 0.0;
+    }
+    let win = resize_bilinear(&win, EYE_WINDOW_W, EYE_WINDOW_H);
+    let (tw, th) = (EYE_WINDOW_W as usize, EYE_WINDOW_H as usize);
+    let tmean: f32 =
+        EYE_TEMPLATE.iter().flatten().map(|&v| v as f32).sum::<f32>() / (tw * th) as f32;
+    let tcent: Vec<f32> = EYE_TEMPLATE
+        .iter()
+        .flatten()
+        .map(|&v| v as f32 - tmean)
+        .collect();
+    let tnorm: f32 = tcent.iter().map(|v| v * v).sum::<f32>().sqrt();
+    if tnorm <= f32::EPSILON {
+        return 0.0;
+    }
+    let pmean: f32 = win.pixels.iter().map(|&p| p as f32).sum::<f32>() / (tw * th) as f32;
+    let (mut num, mut pss) = (0.0f32, 0.0f32);
+    for (i, &p) in win.pixels.iter().enumerate() {
+        let pc = p as f32 - pmean;
+        num += pc * tcent[i];
+        pss += pc * pc;
+    }
+    if pss <= f32::EPSILON {
+        return 0.0;
+    }
+    num / (pss.sqrt() * tnorm)
+}
+
+/// Is the browse screen's unowned eye badge present in this cell?
+pub fn eye_badge_present(cell: &GrayImage) -> bool {
+    eye_badge_score(cell) >= EYE_NCC_MIN
+}
+
+/// The measured eye template, exposed for capture-path tests
+/// (the calibration itself is owned by this module's tests).
+#[cfg(test)]
+pub fn eye_template_for_test() -> &'static [[u8; 40]; 38] {
+    &EYE_TEMPLATE
+}
+
+/// The relic icon region (the orb), cell-relative fractions: the
+/// surface the browse fade dims.
+pub const RELIC_ICON_REGION: [f32; 4] = [0.15, 0.10, 0.85, 0.70];
+
+/// The icon's highlight level: the 90th-percentile luminance of
+/// the icon region. The browse fade scales the whole tile, so a
+/// faded icon's specular highlights collapse — on Seth's strip,
+/// owned tiles measure 122-124 and unowned 49-55 (at the upload's
+/// clipped scale) — while different eras' art keeps a similar
+/// highlight structure when owned. The top decile measures the
+/// fade where a mean would entangle the art.
+pub fn icon_highlight(cell: &GrayImage) -> f64 {
+    let band = crop_region(cell, RELIC_ICON_REGION);
+    if band.pixels.is_empty() {
+        return 0.0;
+    }
+    let mut v = band.pixels.clone();
+    v.sort_unstable();
+    let idx = ((v.len() as f64 * 0.90) as usize).min(v.len() - 1);
+    v[idx] as f64
+}
+
+/// The brightest icon highlight among a frame's cells under this
+/// layout (`None` when no cell is cut). The capture session
+/// carries the running maximum across a session's relic frames
+/// as the owned-brightness reference: the catalogue's unowned
+/// tail can fill a whole late viewport, where a per-frame split
+/// has no bright cluster to find.
+pub fn relic_frame_bright(frame: &GrayImage, layout: &Layout) -> Option<f64> {
+    layout
+        .split(frame)
+        .iter()
+        .filter_map(|c| c.as_ref().map(icon_highlight))
+        .fold(None, |acc: Option<f64>, v| {
+            Some(acc.map_or(v, |a| a.max(v)))
+        })
+}
+
 /// Cache key for one cropped region: dimensions + a caller salt,
 /// hashed over pixels quantised to 4 bits (`p >> 4` tolerates the
 /// sub-quantisation noise a re-render can introduce; a genuinely
@@ -2500,6 +2652,10 @@ pub struct CellResult {
     pub tier: RefinementTier,
     /// Arcane rank read from the pip row; `None` on screens without pips.
     pub rank: Option<u8>,
+    /// Pass 38 (addendum #103): the relic owned-gate excluded this
+    /// tile as an unowned catalogue entry. `held` is already false;
+    /// this flag is the observable record the capture report lists.
+    pub gate_excluded: bool,
 }
 
 /// Ambiguity guard: the runner-up name must trail the winner by at least
@@ -2524,6 +2680,7 @@ pub fn validate_read(
         count: None,
         tier: RefinementTier::Unknown,
         rank: read.rank,
+        gate_excluded: false,
     };
     if read.confidence < min_confidence {
         return out;
@@ -2548,6 +2705,170 @@ pub fn validate_read(
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Relic owned-gate (pass 38, addendum #103)
+// ---------------------------------------------------------------------------
+//
+// The relic BROWSE screen shows the full catalogue: unowned tiles
+// render faded with an eye badge top-left, and their name bands
+// read as cleanly as owned ones — under the count contract (no
+// label means exactly one) every unowned tile the scroll passes
+// enters stock as x1 Intact, and a browse finalize REPLACES the
+// relic bucket wholesale. The selection/refinement screens show
+// owned tiles only, so the gate is built to be inert there and
+// strict only where the evidence is clear:
+//
+// 1. Catalogue detection is per frame: one tile with a clear eye
+//    badge ([`eye_badge_present`]) marks the frame browse-type.
+//    Outside catalogue frames nothing changes — bit-identical.
+// 2. Inside a catalogue frame, a held tile is excluded only when
+//    EVERY leg agrees it is unowned: no parsed count label (a
+//    label is positive owned evidence), a clear eye badge on the
+//    tile itself, and an icon highlight in the frame's dim
+//    cluster (a per-frame Otsu split that must separate cleanly),
+//    or — when the frame has no clean split because the unowned
+//    tail fills it — below 70% of the session's owned-brightness
+//    reference. Any leg missing or ambiguous keeps the tile: a
+//    phantom is the known bug; a false exclusion of a real relic
+//    would be a worse, new one.
+
+/// The minimum bright/dim separation a per-frame Otsu split must
+/// show before it counts as a split at all (bright-cluster minimum
+/// over dim-cluster maximum). Seth's strip separates at 2.2x; an
+/// owned-only frame's art variance stays near 1.0x and never
+/// splits.
+const GATE_SPLIT_MIN_RATIO: f64 = 1.35;
+
+/// With no clean per-frame split, a tile counts as dim only below
+/// this fraction of the session's owned-brightness reference.
+const GATE_REF_DIM_FRACTION: f64 = 0.70;
+
+/// One frame's owned-gate outcome (pass 38).
+#[derive(Debug, Clone, Default)]
+pub struct RelicGateOutcome {
+    /// The frame is a catalogue (browse) frame.
+    pub catalogue: bool,
+    /// Names of the held tiles the gate excluded, in cell order.
+    pub excluded: Vec<String>,
+}
+
+/// The Otsu split of one frame's held-tile icon highlights:
+/// `Some(threshold)` with dim tiles at or below it, but only when
+/// the split separates cleanly ([`GATE_SPLIT_MIN_RATIO`] between
+/// the clusters it makes). A unimodal frame gets `None` — Otsu
+/// always returns a cut; the ratio is what makes it evidence.
+fn otsu_dim_threshold(values: &[f64]) -> Option<f64> {
+    if values.len() < 2 {
+        return None;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let total: f64 = sorted.iter().sum();
+    let total_sq: f64 = sorted.iter().map(|v| v * v).sum();
+    let n = sorted.len() as f64;
+    let mean = total / n;
+    let total_var = total_sq / n - mean * mean;
+    if total_var <= f64::EPSILON {
+        return None;
+    }
+    let mut best: Option<(f64, usize)> = None; // (between-class var, split idx)
+    let mut sum0 = 0.0f64;
+    for i in 0..sorted.len() - 1 {
+        sum0 += sorted[i];
+        if sorted[i + 1] <= sorted[i] {
+            continue; // a cut separates distinct values only
+        }
+        let n0 = (i + 1) as f64;
+        let n1 = n - n0;
+        let mu0 = sum0 / n0;
+        let mu1 = (total - sum0) / n1;
+        let between = (n0 / n) * (n1 / n) * (mu0 - mu1) * (mu0 - mu1);
+        if best.map(|(b, _)| between > b).unwrap_or(true) {
+            best = Some((between, i));
+        }
+    }
+    let (_, i) = best?;
+    let (dim_max, bright_min) = (sorted[i], sorted[i + 1]);
+    if dim_max > 0.0 && bright_min >= GATE_SPLIT_MIN_RATIO * dim_max {
+        Some(dim_max)
+    } else {
+        None
+    }
+}
+
+/// Apply the owned-gate to one relic frame's validated results,
+/// positionally aligned with `cells`. Excluded results get
+/// `held = false` and `gate_excluded = true`; everything else is
+/// untouched, and non-relic layouts return immediately. The
+/// caller owns the session's brightness reference: pass the
+/// running owned-brightness maximum of the session's earlier
+/// relic frames (see [`relic_frame_bright`]).
+pub fn relic_owned_gate(
+    cells: &[Option<GrayImage>],
+    layout: &Layout,
+    results: &mut [CellResult],
+    bright_ref: Option<f64>,
+) -> RelicGateOutcome {
+    let mut outcome = RelicGateOutcome::default();
+    if layout.key != "relic" {
+        return outcome;
+    }
+    // Per-cell eye scores over every cut cell (held or not): one
+    // clear eye anywhere marks the frame as browse-type.
+    let eye: Vec<Option<f32>> = cells
+        .iter()
+        .map(|c| c.as_ref().map(eye_badge_score))
+        .collect();
+    outcome.catalogue = eye
+        .iter()
+        .flatten()
+        .any(|&s| s >= EYE_NCC_MIN);
+    if !outcome.catalogue {
+        return outcome;
+    }
+    // Icon highlights of the held tiles (the split population: a
+    // tile is present iff the reader held a name on it — on this
+    // screen names read reliably, which is the bug's premise).
+    let highlights: Vec<f64> = results
+        .iter()
+        .zip(cells.iter())
+        .filter(|(r, _)| r.held)
+        .map(|(_, c)| c.as_ref().map(icon_highlight).unwrap_or(0.0))
+        .collect();
+    let split = otsu_dim_threshold(&highlights);
+    // The reference for the no-split case: the session's earlier
+    // frames, extended by this frame's own brightest tile. At a
+    // cold start on an all-unowned frame the reference is a dim
+    // value and the 70% cut sits below every tile — fail-safe.
+    let frame_max = highlights.iter().copied().fold(0.0f64, f64::max);
+    let eff_ref = bright_ref.unwrap_or(0.0).max(frame_max);
+    for (i, result) in results.iter_mut().enumerate() {
+        if !result.held || result.count.is_some() {
+            continue; // not held anyway, or a label proves ownership
+        }
+        let Some(cell) = cells.get(i).and_then(|c| c.as_ref()) else {
+            continue;
+        };
+        if eye.get(i).copied().flatten().unwrap_or(0.0) < EYE_NCC_MIN {
+            continue; // no clear eye on THIS tile: ambiguous, stays
+        }
+        let hl = icon_highlight(cell);
+        let dim = match split {
+            Some(thr) => hl <= thr,
+            None => eff_ref > 0.0 && hl < GATE_REF_DIM_FRACTION * eff_ref,
+        };
+        if !dim {
+            continue;
+        }
+        result.held = false;
+        result.gate_excluded = true;
+        if let Some(name) = &result.matched {
+            outcome.excluded.push(name.clone());
+        }
+    }
+    outcome
 }
 
 // ---------------------------------------------------------------------------
@@ -3435,11 +3756,12 @@ pub fn ingest_folder(
         // One batched call per page (addendum #81), as in capture.
         let cells = layout.split(&img);
         let reads = engine.ocr_cells_in(&cells, layout);
+        let mut page_results: Vec<CellResult> = Vec::with_capacity(reads.len());
         for read in reads {
-            let index = results.len();
+            let index = results.len() + page_results.len();
             // Partial cell at the page edge: never read, never held.
             let read = read.unwrap_or_else(OcrRead::empty);
-            results.push(validate_read(
+            page_results.push(validate_read(
                 &read,
                 universe,
                 min_confidence,
@@ -3447,6 +3769,15 @@ pub fn ingest_folder(
                 index,
             ));
         }
+        // Pass 38: the owned-gate applies to folder ingest exactly
+        // as to live capture — a browsed catalogue page must not
+        // import its unowned tiles through the back door. No
+        // session reference exists here; the gate works from the
+        // page's own split.
+        if layout.key == "relic" {
+            relic_owned_gate(&cells, layout, &mut page_results, None);
+        }
+        results.extend(page_results);
     }
     let stock = StockState::from_results(&results, relic_names, arcane_names);
     Ok((stock, results))
@@ -4103,6 +4434,168 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
         res.ok().map(|(_, results)| results)
+    }
+
+    /// A synthetic relic cell at the canonical capture size
+    /// (168x174): dark card, a checkerboard icon whose highlight
+    /// percentile is the `bright` level (210) or its faded
+    /// quarter (52), and — when `eye` — the measured eye template
+    /// pasted at the badge window's nominal position.
+    fn relic_cell(eye: bool, bright: bool) -> GrayImage {
+        let mut cell = GrayImage::blank(168, 174, 6);
+        let (hi, lo) = if bright { (210, 60) } else { (52, 15) };
+        for y in 17..122 {
+            for x in 25..143 {
+                cell.set(x, y, if (x + y) % 2 == 0 { hi } else { lo });
+            }
+        }
+        if eye {
+            for (ty, row) in EYE_TEMPLATE.iter().enumerate() {
+                for (tx, &v) in row.iter().enumerate() {
+                    cell.set(tx as u32, ty as u32, v);
+                }
+            }
+        }
+        cell
+    }
+
+    fn held_cell_result(index: usize, name: &str, count: Option<u32>) -> CellResult {
+        CellResult {
+            index,
+            raw_text: name.to_owned(),
+            confidence: 1.0,
+            matched: Some(name.to_owned()),
+            match_score: 1.0,
+            held: true,
+            count,
+            tier: RefinementTier::Intact,
+            rank: None,
+            gate_excluded: false,
+        }
+    }
+
+    fn relic_layout() -> Layout {
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let layouts = Layout::load_file(&base.join("data/capture/layouts.toml")).unwrap();
+        layouts.get("relic").unwrap().clone()
+    }
+
+    #[test]
+    fn eye_badge_score_separates_template_from_plain_corner() {
+        assert!(
+            eye_badge_score(&relic_cell(true, true)) >= 0.99,
+            "the pasted template scores ~1"
+        );
+        assert!(
+            eye_badge_score(&relic_cell(false, true)) < EYE_NCC_MIN,
+            "an owned corner (icon texture, no badge) is not an eye"
+        );
+        assert!(
+            icon_highlight(&relic_cell(false, true)) > 200.0,
+            "bright icon highlight"
+        );
+        assert!(
+            icon_highlight(&relic_cell(false, false)) < 60.0,
+            "faded icon highlight collapses"
+        );
+    }
+
+    #[test]
+    fn owned_gate_excludes_only_dim_badged_uncounted_tiles() {
+        // A mixed catalogue frame: 4 owned (2 labelled x3, 2 plain
+        // x1) and 4 unowned (dim + eye, no label). Only the
+        // unowned four may be excluded.
+        let layout = relic_layout();
+        let mut cells: Vec<Option<GrayImage>> = Vec::new();
+        let mut results: Vec<CellResult> = Vec::new();
+        let names = [
+            "Lith A1", "Lith B2", "Meso C3", "Meso D4", "Neo E5", "Neo F6", "Axi G7",
+            "Axi H8",
+        ];
+        for (i, name) in names.iter().enumerate() {
+            let owned_tile = i < 4;
+            cells.push(Some(relic_cell(!owned_tile, owned_tile)));
+            let count = if i < 2 { Some(3) } else { None };
+            results.push(held_cell_result(i, name, count));
+        }
+        let out = relic_owned_gate(&cells, &layout, &mut results, None);
+        assert!(out.catalogue, "an eye anywhere marks the frame");
+        assert_eq!(
+            out.excluded,
+            vec!["Neo E5", "Neo F6", "Axi G7", "Axi H8"],
+            "exactly the unowned tiles"
+        );
+        for (i, r) in results.iter().enumerate() {
+            assert_eq!(r.held, i < 4, "tile {i} held state");
+            assert_eq!(r.gate_excluded, i >= 4, "tile {i} exclusion flag");
+        }
+    }
+
+    #[test]
+    fn owned_gate_keeps_ambiguous_tiles() {
+        // Every ambiguity resolves to KEEP: a dim tile with no eye
+        // (no badge corroboration), a bright tile with an eye
+        // (owned evidence wins), a dim badged tile with a parsed
+        // count (the label proves ownership).
+        let layout = relic_layout();
+        let cells: Vec<Option<GrayImage>> = vec![
+            Some(relic_cell(true, true)),  // eye trigger + bright owner
+            Some(relic_cell(false, false)), // dim, no eye
+            Some(relic_cell(true, true)),  // bright + eye
+            Some(relic_cell(true, false)), // dim + eye + count (below)
+        ];
+        let mut results = vec![
+            held_cell_result(0, "Lith A1", None),
+            held_cell_result(1, "Meso B2", None),
+            held_cell_result(2, "Neo C3", None),
+            held_cell_result(3, "Axi D4", Some(3)),
+        ];
+        let out = relic_owned_gate(&cells, &layout, &mut results, None);
+        assert!(out.catalogue);
+        assert!(out.excluded.is_empty(), "nothing here is provably unowned");
+        assert!(results.iter().all(|r| r.held));
+    }
+
+    #[test]
+    fn owned_gate_inert_without_an_eye() {
+        // Owned-only screens (and any frame with no badge) are
+        // bit-identical: even uniformly dim tiles are untouched.
+        let layout = relic_layout();
+        let cells: Vec<Option<GrayImage>> = (0..4)
+            .map(|_| Some(relic_cell(false, false)))
+            .collect();
+        let mut results: Vec<CellResult> = (0..4)
+            .map(|i| held_cell_result(i, &format!("Axi A{i}"), None))
+            .collect();
+        let out = relic_owned_gate(&cells, &layout, &mut results, None);
+        assert!(!out.catalogue);
+        assert!(out.excluded.is_empty());
+        assert!(results.iter().all(|r| r.held));
+    }
+
+    #[test]
+    fn owned_gate_uniform_dim_frame_needs_the_session_reference() {
+        // The catalogue tail: a whole frame of unowned tiles has
+        // no bright cluster to split against. With the session's
+        // owned-brightness reference the gate still excludes;
+        // without it (cold start) it keeps everything — fail-safe.
+        let layout = relic_layout();
+        let mk = || {
+            let cells: Vec<Option<GrayImage>> = (0..4)
+                .map(|_| Some(relic_cell(true, false)))
+                .collect();
+            let results: Vec<CellResult> = (0..4)
+                .map(|i| held_cell_result(i, &format!("Axi B{i}"), None))
+                .collect();
+            (cells, results)
+        };
+        let (cells, mut results) = mk();
+        let out = relic_owned_gate(&cells, &layout, &mut results, Some(210.0));
+        assert_eq!(out.excluded.len(), 4, "the reference exposes the tail");
+        let (cells, mut results) = mk();
+        let out = relic_owned_gate(&cells, &layout, &mut results, None);
+        assert!(out.excluded.is_empty(), "no reference, no split, no exclusion");
+        assert!(results.iter().all(|r| r.held));
     }
 
     #[test]
