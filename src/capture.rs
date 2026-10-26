@@ -447,6 +447,52 @@ pub struct CaptureContext<'a> {
     pub debug_dir: Option<PathBuf>,
 }
 
+/// The read-path subset of [`CaptureContext`] (pass 36): the
+/// scalar evidence/decoding switches [`read_cells`] and the line
+/// reader actually consume. Split out so a stitch bundle's inputs
+/// are owned values — a background stitch thread cannot borrow a
+/// `CaptureContext`, but it can own this.
+#[derive(Debug, Clone, Copy)]
+pub struct ReadOptions {
+    pub min_confidence: f32,
+    pub radius_decoder: bool,
+    pub radius_strip: bool,
+    pub radius_tail_budget: usize,
+    pub strip_offsets: bool,
+}
+
+/// Everything one stitch bundle needs beyond its frames, layout,
+/// and universe (pass 36): the read options plus the stitch-path
+/// orchestration switches. Owned and `Send` by construction.
+#[derive(Debug, Clone, Copy)]
+pub struct StitchOptions {
+    pub read: ReadOptions,
+    pub line_reader: bool,
+    pub snap_cells: bool,
+}
+
+impl CaptureContext<'_> {
+    /// The read-path options this context implies.
+    pub fn read_options(&self) -> ReadOptions {
+        ReadOptions {
+            min_confidence: self.min_confidence,
+            radius_decoder: self.radius_decoder,
+            radius_strip: self.radius_strip,
+            radius_tail_budget: self.radius_tail_budget,
+            strip_offsets: self.strip_offsets,
+        }
+    }
+
+    /// The stitch-bundle options this context implies.
+    pub fn stitch_options(&self) -> StitchOptions {
+        StitchOptions {
+            read: self.read_options(),
+            line_reader: self.line_reader,
+            snap_cells: self.snap_cells,
+        }
+    }
+}
+
 /// Live per-bucket stack counts shown in the tray while capturing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CaptureCounts {
@@ -461,6 +507,340 @@ impl CaptureCounts {
     }
 }
 
+/// Pass 36 failsafe + intake constants. The arithmetic behind
+/// each is stated in docs/thirty-sixth-pass.md; in short, they
+/// are sized from Seth's real inventory (~293 parts ≈ 27 rows
+/// ≈ 9 viewports) and his observed scroll (~48 s for the parts
+/// list at ~3 s per viewport settle).
+
+/// Accepted frames per viewport position at intake (scope 1):
+/// the canonical median needs 3 pooled instances; a fourth
+/// leaves headroom for the gain check to exclude a transient
+/// and still pool 3. Seth's stuck run accepted 31 of one page.
+pub const VIEWPORT_ACCEPT_CAP: usize = 4;
+/// Most frames in one stitch bundle (the pass-33 flush cap's
+/// memory envelope, kept: 48 frames × ~3.7 MB ≈ 180 MB peak).
+pub const BUNDLE_MAX_FRAMES: usize = 48;
+/// Fewest frames in one stitch bundle before a progress flush
+/// is honoured. The stitch's pitch/segment fit needs context:
+/// measured on the HC census, a 4-frame head bundle fit its
+/// region independently of the main bundle and produced 29
+/// instance-disagreement flags and +15 marginal slots against
+/// the single-bundle run (0 flags), costing 2 distinct holds at
+/// merge; the unsplit run reproduces the shipped numbers
+/// exactly. 8 frames ≈ 2–3 viewport positions at the accept cap
+/// is the smallest bundle whose fit is self-supporting; live
+/// bundles collect it from 2–3 settles, so the floor costs no
+/// responsiveness — bundles still close every ~2 viewports of
+/// scroll, nowhere near the incident's 48-of-two-viewports.
+pub const BUNDLE_MIN_FRAMES: usize = 8;
+/// Frames of drained bundles that may wait (coalesced) for the
+/// stitch thread: two bundles' worth. Together with one bundle
+/// in flight and the accumulating one, worst-case buffered
+/// frames stay under ~200 (≈740 MB transient at 1440p, only
+/// when processing has fallen badly behind a fast scroll).
+pub const BUNDLE_QUEUE_MAX_FRAMES: usize = 96;
+/// Failsafe (addendum item 1): hard cap on accepted parts
+/// frames per session. A full scroll needs ≈ 9 viewports ×
+/// (4 settles + a few transition frames) ≈ 60; a hesitant,
+/// micro-stopped scroll might triple that. 512 is ~3× the
+/// padded estimate and ~8× the typical need — past it the
+/// session is not scrolling, it is leaking, and intake stops
+/// (the frames are counted, the session still finalizes).
+pub const PARTS_SESSION_FRAME_CAP: u64 = 512;
+/// Failsafe (addendum item 3): a capture session's maximum
+/// wall-clock duration before `run_capture` auto-finalizes.
+/// Seth's full three-screen scroll takes ~2–4 minutes; 15 is
+/// ~4× that, and bounds how long a forgotten capture can hold
+/// the portal stream open (the idle auto-stop never fires on a
+/// static inventory screen — it classifies Parts forever).
+pub const SESSION_MAX_DURATION: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// What the parts intake decided about one frame (pass 36).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntakeVerdict {
+    /// Into the stitch pool; `flush` asks the session to close
+    /// the pending bundle BEFORE this frame is pushed (the
+    /// frame opens a new bundle): a viewport of panorama
+    /// progress has accumulated over the positions already
+    /// pooled, and the boundary falls between positions.
+    Accept { flush: bool },
+    /// Same viewport as the last accepted frame, past the
+    /// per-position cap: dropped at intake, counted.
+    DropDuplicate,
+    /// The session frame cap tripped: dropped at intake,
+    /// counted; the session still finalizes normally.
+    DropSessionCap,
+}
+
+/// Content-aware parts intake (pass 36, brief scope 1+2). Each
+/// offered frame is fingerprinted on the grid region in
+/// gradient form ([`crate::stitch::viewport_print`]) and
+/// compared against the last ACCEPTED frame: same viewport
+/// (≥90% of cells the same content, ≤3 differing) is accepted
+/// only up to [`VIEWPORT_ACCEPT_CAP`] frames per position —
+/// the stitch pool wants a few instances per position, not
+/// thirty-one — and contributes its small displacement to the
+/// bundle progress regardless, so a slow creep still flushes.
+/// A genuinely new position resets the run, adds its measured
+/// displacement to the progress, and asks for a flush once a
+/// viewport of panorama has accumulated since the last one.
+/// Pure frame-in/decision-out (no engine, no session state), so
+/// the whole policy is unit-testable.
+pub struct PartsIntake {
+    anchor: Option<crate::stitch::ViewportPrint>,
+    /// Accepted frames at the anchor's position (incl. the
+    /// frame that set the anchor).
+    run: usize,
+    /// |displacement| accumulated since the last flush (px).
+    progress: f32,
+    accepted_total: u64,
+    session_cap: u64,
+    cap_tripped: bool,
+}
+
+impl Default for PartsIntake {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PartsIntake {
+    pub fn new() -> Self {
+        Self::with_session_cap(PARTS_SESSION_FRAME_CAP)
+    }
+
+    pub fn with_session_cap(session_cap: u64) -> Self {
+        Self {
+            anchor: None,
+            run: 0,
+            progress: 0.0,
+            accepted_total: 0,
+            session_cap,
+            cap_tripped: false,
+        }
+    }
+
+    pub fn accepted_total(&self) -> u64 {
+        self.accepted_total
+    }
+
+    pub fn cap_tripped(&self) -> bool {
+        self.cap_tripped
+    }
+
+    /// The screen changed away from Parts: the next parts frame
+    /// is a new position wherever it lands. (The session total
+    /// and the cap are session-scoped and persist.)
+    pub fn reset_position(&mut self) {
+        self.anchor = None;
+        self.run = 0;
+        self.progress = 0.0;
+    }
+
+    /// A bundle drained: progress restarts.
+    pub fn note_flush(&mut self) {
+        self.progress = 0.0;
+    }
+
+    /// Offer one parts-classified frame.
+    pub fn offer(&mut self, frame: &GrayImage, layout: &Layout) -> IntakeVerdict {
+        if self.accepted_total >= self.session_cap {
+            self.cap_tripped = true;
+            return IntakeVerdict::DropSessionCap;
+        }
+        let print = crate::stitch::viewport_print(frame, layout);
+        let rect = crate::stitch::GridRect::of(layout, frame);
+        let pitch = rect.layout_row_pitch(layout).max(1.0);
+        let viewport_px = pitch * layout.rows.max(1) as f32;
+        let Some(anchor) = &self.anchor else {
+            self.anchor = Some(print);
+            self.run = 1;
+            self.accepted_total += 1;
+            return IntakeVerdict::Accept { flush: false };
+        };
+        let dy = crate::stitch::estimate_scroll_dy(anchor, &print, pitch);
+        if crate::stitch::same_viewport(anchor, &print) {
+            // Creep counts toward progress even when the frame
+            // itself is dropped: fifty 2px creeps are 100px of
+            // travel the bundle boundary must not lose.
+            self.progress += dy.abs().min(pitch * 0.5);
+            if self.run < VIEWPORT_ACCEPT_CAP {
+                self.anchor = Some(print);
+                self.run += 1;
+                self.accepted_total += 1;
+                // Never a boundary: this frame belongs to the
+                // current position, and a bundle boundary inside
+                // a position would stitch that position twice.
+                return IntakeVerdict::Accept { flush: false };
+            }
+            return IntakeVerdict::DropDuplicate;
+        }
+        // A new position. If the positions already pooled cover
+        // a viewport of progress, the bundle closes before this
+        // frame: boundaries fall between positions, never inside
+        // one. A position split across bundles is stitched twice
+        // under independent fits and its counts sum at merge —
+        // measured on the HC duplicate-inflation simulation
+        // (7 names doubled, 6 lost, 1 slot-level form false
+        // accept); positions are atomic to the stitch, whose own
+        // segments likewise break at frames, never within one.
+        let boundary = self.progress >= viewport_px;
+        self.progress += dy.abs();
+        self.anchor = Some(print);
+        self.run = 1;
+        self.accepted_total += 1;
+        IntakeVerdict::Accept { flush: boundary }
+    }
+}
+
+/// The worker-side queue of drained bundles waiting for the
+/// stitch thread (pass 36, addendum item 2). Bundles are
+/// consecutive ranges of one scroll, so a waiting bundle simply
+/// concatenates onto the queue (coalescing — the stitch plans
+/// the union exactly as it would have planned the concatenation
+/// of both bundles). The queue is frame-capped; overflow drops
+/// the incoming frames, counts them, and trips its flag rather
+/// than growing without bound behind a slow stitch.
+pub struct BundleQueue {
+    frames: Vec<GrayImage>,
+    cap: usize,
+    /// Bundles merged into a non-empty queue.
+    pub coalesced: u64,
+    /// Incoming frames dropped past the cap.
+    pub dropped_frames: u64,
+    pub cap_tripped: bool,
+}
+
+impl Default for BundleQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BundleQueue {
+    pub fn new() -> Self {
+        Self::with_cap(BUNDLE_QUEUE_MAX_FRAMES)
+    }
+
+    pub fn with_cap(cap: usize) -> Self {
+        Self {
+            frames: Vec::new(),
+            cap,
+            coalesced: 0,
+            dropped_frames: 0,
+            cap_tripped: false,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.frames.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.frames.is_empty()
+    }
+
+    /// Add one drained bundle, coalescing onto whatever waits.
+    pub fn push(&mut self, bundle: Vec<GrayImage>) {
+        if bundle.is_empty() {
+            return;
+        }
+        if !self.frames.is_empty() {
+            self.coalesced += 1;
+        }
+        let room = self.cap.saturating_sub(self.frames.len());
+        let take = room.min(bundle.len());
+        if take < bundle.len() {
+            self.dropped_frames += (bundle.len() - take) as u64;
+            self.cap_tripped = true;
+        }
+        self.frames.extend(bundle.into_iter().take(take));
+    }
+
+    /// Take up to `max` frames as the next stitch job.
+    pub fn take_job(&mut self, max: usize) -> Vec<GrayImage> {
+        let n = max.min(self.frames.len());
+        self.frames.drain(..n).collect()
+    }
+}
+
+/// One stitch bundle's owned inputs (pass 36): everything
+/// [`stitch_parts_session`] needs, with no borrows, so the job
+/// can cross to the stitch thread.
+struct StitchJob {
+    frames: Vec<GrayImage>,
+    layout: Layout,
+    universe: Universe,
+    opts: StitchOptions,
+}
+
+/// The background stitch thread (pass 36, brief scope 3). One
+/// thread, one job in flight: it owns a DEDICATED engine
+/// instance because the frame engine's cache lock is held for
+/// the whole duration of a batched read (forensic finding) — a
+/// background stitch sharing that engine would serialise
+/// against header/relic reads for the bundle's whole runtime.
+/// Reports come back in job order (single thread, FIFO), so
+/// merges on the worker thread are deterministic.
+struct StitchDispatcher {
+    job_tx: std::sync::mpsc::Sender<StitchJob>,
+    report_rx: std::sync::mpsc::Receiver<StitchReport>,
+    handle: Option<std::thread::JoinHandle<()>>,
+    busy: bool,
+}
+
+impl StitchDispatcher {
+    fn start(engine: Box<dyn OcrEngine + Send>) -> Self {
+        let (job_tx, job_rx) = std::sync::mpsc::channel::<StitchJob>();
+        let (report_tx, report_rx) = std::sync::mpsc::channel::<StitchReport>();
+        let handle = std::thread::spawn(move || {
+            while let Ok(job) = job_rx.recv() {
+                let report = stitch_parts_session(
+                    &job.frames,
+                    &job.layout,
+                    &*engine,
+                    &job.opts,
+                    &job.universe,
+                );
+                if report_tx.send(report).is_err() {
+                    return;
+                }
+            }
+        });
+        Self {
+            job_tx,
+            report_rx,
+            handle: Some(handle),
+            busy: false,
+        }
+    }
+
+    fn send(&mut self, job: StitchJob) {
+        // A failed send means the thread died (a panic inside
+        // the stitch); the report wait in finish_parts observes
+        // the closed channel and stops waiting.
+        let _ = self.job_tx.send(job);
+        self.busy = true;
+    }
+
+    /// Close the job queue and join the thread. Callers ensure
+    /// no job is in flight (every report merged), so the thread
+    /// is idle-blocked on its queue and exits at once — the
+    /// bounded join the finalize contract needs.
+    fn shutdown(self) {
+        let StitchDispatcher {
+            job_tx,
+            handle,
+            ..
+        } = self;
+        drop(job_tx);
+        if let Some(h) = handle {
+            let _ = h.join();
+        }
+    }
+}
+
 /// The accumulating capture state. Folding a frame is a UNION over stack
 /// identity: the same stack seen in ten frames counts once, never ten
 /// times — this is what makes scroll capture dedupe work. The COUNT a
@@ -470,7 +850,11 @@ impl CaptureCounts {
 /// x8 once — no longer outvotes every frame that saw the true count.
 /// A stack observed only once keeps that single observation; voting
 /// cannot fix a phantom nobody contradicted.
-#[derive(Debug, Default)]
+///
+/// (No `Debug` derive since pass 36: the session can own a
+/// background stitch thread and a boxed engine, neither of
+/// which is `Debug`.)
+#[derive(Default)]
 pub struct CaptureSession {
     captured: StockState,
     /// Count observations per stack identity: count -> frames that
@@ -489,6 +873,29 @@ pub struct CaptureSession {
     /// The stitch reports this session produced (pass 33), one
     /// per `finish_parts` call — the coverage accounting record.
     stitch_reports: Vec<StitchReport>,
+    /// Pass 35 × 36 integration: the session-level synthesis
+    /// adjudication's summary, recorded when `finish_parts`
+    /// runs the post-pass over the merged reports.
+    synth_summary: Option<crate::synth::SynthSummary>,
+    /// Pass 36: the content-aware parts intake (dedupe +
+    /// progress accounting + the session frame cap).
+    parts_intake: PartsIntake,
+    /// Pass 36: drained bundles waiting for the stitch thread.
+    bundle_queue: BundleQueue,
+    /// Pass 36: the dedicated stitch engine, when the driver
+    /// provided one ([`Self::set_stitch_engine`]). Without one,
+    /// bundles are stitched synchronously on the capture thread
+    /// with the frame engine (unit tests, stub sessions) —
+    /// identical results, no backgrounding.
+    stitch_engine: Option<Box<dyn OcrEngine + Send>>,
+    /// Pass 36: the background stitch thread, once started.
+    stitch: Option<StitchDispatcher>,
+    /// Intake duplicates dropped past the per-position cap.
+    parts_dupes_dropped: u64,
+    /// Parts frames refused by the session frame cap.
+    parts_frames_capped: u64,
+    /// The session duration cap tripped (set by `run_capture`).
+    duration_cap_tripped: bool,
     /// Evidence for a zero-collection diagnosis: the first few
     /// (class, header OCR text) pairs this session classified.
     pub header_samples: Vec<(ScreenClass, String)>,
@@ -524,13 +931,72 @@ impl CaptureSession {
     /// for an OCR training sample, bounded disk.
     const MAX_DEBUG_PER_NAME: u32 = 60;
 
-    /// Pending-parts cap (pass 33): a stitch flushes mid-session
-    /// rather than buffering a whole scroll unboundedly (a 1440p
-    /// frame is ~3.7 MB; 48 pending is a bounded, transient peak).
-    const PARTS_STITCH_FLUSH_AT: usize = 48;
-
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Provide the dedicated engine for the background stitch
+    /// thread (pass 36). The driver (run_capture, the census
+    /// harness) probes a second engine instance; sessions that
+    /// never get one stitch synchronously with the frame engine.
+    pub fn set_stitch_engine(&mut self, engine: Box<dyn OcrEngine + Send>) {
+        self.stitch_engine = Some(engine);
+    }
+
+    /// Parts frames the intake accepted this session.
+    pub fn parts_frames_accepted(&self) -> u64 {
+        self.parts_intake.accepted_total()
+    }
+
+    /// Intake duplicates dropped past the per-position cap.
+    pub fn parts_dupes_dropped(&self) -> u64 {
+        self.parts_dupes_dropped
+    }
+
+    /// Parts frames refused by the session frame cap.
+    pub fn parts_frames_capped(&self) -> u64 {
+        self.parts_frames_capped
+    }
+
+    /// Whether the session duration cap tripped.
+    pub fn duration_cap_tripped(&self) -> bool {
+        self.duration_cap_tripped
+    }
+
+    pub(crate) fn note_duration_cap(&mut self) {
+        self.duration_cap_tripped = true;
+    }
+
+    /// One finalize-visible line naming every failsafe that
+    /// tripped this session (pass 36 addendum: caps trip LOUD,
+    /// never silent), or `None` when none did. Coalescing
+    /// without drops is routine back-pressure and is reported
+    /// only alongside a trip.
+    pub fn failsafe_summary(&self) -> Option<String> {
+        let mut notes: Vec<String> = Vec::new();
+        if self.parts_intake.cap_tripped() {
+            notes.push(format!(
+                "parts frame cap ({PARTS_SESSION_FRAME_CAP}) tripped: {} frames refused at intake",
+                self.parts_frames_capped
+            ));
+        }
+        if self.bundle_queue.cap_tripped {
+            notes.push(format!(
+                "bundle queue cap ({BUNDLE_QUEUE_MAX_FRAMES} frames) tripped: {} queued frames dropped, {} bundles coalesced",
+                self.bundle_queue.dropped_frames, self.bundle_queue.coalesced
+            ));
+        }
+        if self.duration_cap_tripped {
+            notes.push(format!(
+                "session duration cap ({}s) tripped: auto-finalized",
+                SESSION_MAX_DURATION.as_secs()
+            ));
+        }
+        if notes.is_empty() {
+            None
+        } else {
+            Some(format!("capture failsafes: {}", notes.join("; ")))
+        }
     }
 
     /// The union of stacks captured so far (relics/parts/arcanes buckets).
@@ -646,19 +1112,43 @@ impl CaptureSession {
             ScreenClass::Other => {}
         }
 
-        // Pass 33: parts frames accumulate for the stitch; a
-        // non-parts frame flushes the pending parts first, so a
-        // screen change closes the stitch where the scroll ended.
+        // Pass 36: merges from any completed background bundle
+        // land before this frame is folded, so the counts the
+        // driver reads after process_frame returns climb during
+        // the scroll (the pass-33 deferral made them read 0
+        // until finalize).
+        self.poll_stitch(ctx);
+
+        // Pass 33/36: parts frames accumulate for the stitch —
+        // through the content-aware intake, which drops
+        // same-viewport duplicates past a small cap and drains
+        // the pending bundle on panorama progress. A non-parts
+        // frame drains the pending parts first, so a screen
+        // change closes the stitch where the scroll ended.
         if class == ScreenClass::Parts {
-            self.parts_pending.push(frame.clone());
-            if self.parts_pending.len() >= Self::PARTS_STITCH_FLUSH_AT {
-                self.finish_parts(ctx, engine);
+            match self.parts_intake.offer(frame, layout) {
+                IntakeVerdict::Accept { flush } => {
+                    // A boundary verdict closes the pending
+                    // bundle before this frame is pushed — the
+                    // frame opens the next bundle (positions are
+                    // atomic; see PartsIntake::offer).
+                    if flush && self.parts_pending.len() >= BUNDLE_MIN_FRAMES {
+                        self.drain_bundle(ctx, engine);
+                    }
+                    self.parts_pending.push(frame.clone());
+                    if self.parts_pending.len() >= BUNDLE_MAX_FRAMES {
+                        self.drain_bundle(ctx, engine);
+                    }
+                }
+                IntakeVerdict::DropDuplicate => self.parts_dupes_dropped += 1,
+                IntakeVerdict::DropSessionCap => self.parts_frames_capped += 1,
             }
             return;
         }
         if !self.parts_pending.is_empty() {
-            self.finish_parts(ctx, engine);
+            self.drain_bundle(ctx, engine);
         }
+        self.parts_intake.reset_position();
 
         let results = read_frame(layout, frame, engine, ctx, ctx.universes.for_class(class));
         let frame_stock = StockState::from_results(&results, ctx.relic_names, ctx.arcane_names);
@@ -666,18 +1156,55 @@ impl CaptureSession {
         self.captured = resolve_voted_stock(&self.part_votes, &self.relic_votes, &self.arcane_votes);
     }
 
-    /// Stitch and fold every pending parts frame (pass 33).
-    /// Called when the screen changes away from Parts, when the
-    /// pending list hits its cap, and at the end of `run_capture`.
-    /// Each held slot contributes one count vote per usable
-    /// instance — the stitched equivalent of the per-frame
-    /// observations the vote was designed for (a ×1 instance, its
-    /// ring-gated read absent, votes 1).
-    pub fn finish_parts(&mut self, ctx: &CaptureContext<'_>, engine: &dyn OcrEngine) {
+    /// Drain the pending parts bundle (pass 36): hand it to the
+    /// background stitch thread (or the bounded queue behind it)
+    /// when a stitch engine was provided; stitch it synchronously
+    /// with the frame engine otherwise. Bundle boundaries are
+    /// the intake's progress flush, the bundle frame cap, a
+    /// screen change, and `finish_parts` — never a raw
+    /// accumulated-frame count on its own.
+    fn drain_bundle(&mut self, ctx: &CaptureContext<'_>, engine: &dyn OcrEngine) {
         if self.parts_pending.is_empty() {
             return;
         }
         let frames = std::mem::take(&mut self.parts_pending);
+        self.parts_intake.note_flush();
+        if self.stitch.is_none() {
+            match self.stitch_engine.take() {
+                Some(e) => self.stitch = Some(StitchDispatcher::start(e)),
+                None => {
+                    self.stitch_sync(frames, ctx, engine);
+                    return;
+                }
+            }
+        }
+        let busy = self.stitch.as_ref().map(|d| d.busy).unwrap_or(false);
+        if busy {
+            self.bundle_queue.push(frames);
+            return;
+        }
+        let Some(layout) = ctx.layouts.get("parts") else {
+            return;
+        };
+        let job = StitchJob {
+            frames,
+            layout: layout.clone(),
+            universe: ctx.universes.for_class(ScreenClass::Parts).clone(),
+            opts: ctx.stitch_options(),
+        };
+        if let Some(d) = &mut self.stitch {
+            d.send(job);
+        }
+    }
+
+    /// The pass-34 path, kept for sessions without a stitch
+    /// engine: stitch a bundle on this thread, now.
+    fn stitch_sync(
+        &mut self,
+        frames: Vec<GrayImage>,
+        ctx: &CaptureContext<'_>,
+        engine: &dyn OcrEngine,
+    ) {
         let Some(layout) = ctx.layouts.get("parts") else {
             return;
         };
@@ -685,55 +1212,219 @@ impl CaptureSession {
             &frames,
             layout,
             engine,
-            ctx,
+            &ctx.stitch_options(),
             ctx.universes.for_class(ScreenClass::Parts),
         );
-        for slot in &report.slots {
-            // Coverage is the authoritative verdict: a contested
-            // slot's stored result is the canonical read kept for
-            // diagnostics, and it must not vote.
-            if slot.coverage != SlotCoverage::Held {
-                continue;
+        self.merge_report(report);
+    }
+
+    /// Dispatch the next queued bundle if the stitch thread is
+    /// free. Returns whether a job was sent.
+    fn dispatch_queued(&mut self, ctx: &CaptureContext<'_>) -> bool {
+        let busy = match &self.stitch {
+            Some(d) => d.busy,
+            None => return false,
+        };
+        if busy || self.bundle_queue.is_empty() {
+            return false;
+        }
+        let Some(layout) = ctx.layouts.get("parts") else {
+            return false;
+        };
+        let frames = self.bundle_queue.take_job(BUNDLE_MAX_FRAMES);
+        if frames.is_empty() {
+            return false;
+        }
+        let job = StitchJob {
+            frames,
+            layout: layout.clone(),
+            universe: ctx.universes.for_class(ScreenClass::Parts).clone(),
+            opts: ctx.stitch_options(),
+        };
+        if let Some(d) = &mut self.stitch {
+            d.send(job);
+        }
+        true
+    }
+
+    /// Merge every stitch report that has completed since the
+    /// last poll (non-blocking), dispatching queued bundles as
+    /// the thread frees. Runs on the capture worker thread, so
+    /// `captured.parts` — and the tray counts read from it —
+    /// update during the scroll.
+    fn poll_stitch(&mut self, ctx: &CaptureContext<'_>) {
+        loop {
+            let report = self
+                .stitch
+                .as_ref()
+                .and_then(|d| d.report_rx.try_recv().ok());
+            match report {
+                Some(report) => {
+                    self.merge_report(report);
+                    if let Some(d) = &mut self.stitch {
+                        d.busy = false;
+                    }
+                    self.dispatch_queued(ctx);
+                }
+                None => break,
             }
-            let Some(result) = &slot.result else { continue };
-            let Some(name) = &result.matched else { continue };
-            if slot.instance_counts.is_empty() {
-                *self
-                    .part_votes
-                    .entry(name.clone())
-                    .or_default()
-                    .entry(result.count.unwrap_or(1))
-                    .or_insert(0) += 1;
-            } else {
-                for c in &slot.instance_counts {
-                    *self
-                        .part_votes
-                        .entry(name.clone())
-                        .or_default()
-                        .entry(c.unwrap_or(1))
-                        .or_insert(0) += 1;
+        }
+    }
+
+    /// Finish the parts stitch (pass 33/36): drain the pending
+    /// bundle, then collect every outstanding bundle — the
+    /// bounded join. Outstanding work is bounded by construction
+    /// (one job in flight plus the frame-capped queue), reports
+    /// merge in dispatch order, and the stitch thread is retired
+    /// before returning, so finalize = join + merge + (for the
+    /// final partial bundle) one last stitch.
+    pub fn finish_parts(&mut self, ctx: &CaptureContext<'_>, engine: &dyn OcrEngine) {
+        self.drain_bundle(ctx, engine);
+        if self.stitch.is_some() {
+            loop {
+                self.poll_stitch(ctx);
+                let busy = self.stitch.as_ref().map(|d| d.busy).unwrap_or(false);
+                if !busy && self.bundle_queue.is_empty() {
+                    break;
+                }
+                if !busy && !self.dispatch_queued(ctx) {
+                    // Not busy, queue non-empty, and nothing can
+                    // be dispatched (no parts layout): abandon
+                    // the queue rather than wait forever.
+                    break;
+                }
+                let report = self
+                    .stitch
+                    .as_ref()
+                    .and_then(|d| d.report_rx.recv().ok());
+                match report {
+                    Some(report) => {
+                        self.merge_report(report);
+                        if let Some(d) = &mut self.stitch {
+                            d.busy = false;
+                        }
+                        self.dispatch_queued(ctx);
+                    }
+                    // The thread died (a panic in the stitch):
+                    // stop waiting; what merged stands.
+                    None => break,
                 }
             }
-            // Pass 34: the built-copy glyph on a held blueprint
-            // slot records its built sibling as held stock (one
-            // ×1 vote — the twin's own count is not observed).
-            if let Some(implied) = &slot.glyph_implied {
-                *self
-                    .part_votes
-                    .entry(implied.clone())
-                    .or_default()
-                    .entry(1)
-                    .or_insert(0) += 1;
+            if let Some(d) = self.stitch.take() {
+                d.shutdown();
             }
+        }
+        // Pass 35 × 36 integration: the synthesis post-pass runs
+        // ONCE per session, here at finalize, over the merged
+        // bundle reports — never per bundle. This preserves the
+        // v0.5.29 whole-session semantics (one calibration over
+        // the session's both-readers-held slots, one exclusion
+        // set over the session's holds) that the per-bundle hook
+        // inside `stitch_parts_session` could not express once
+        // bundles moved to the background thread. The post-pass
+        // consumes the canonical crops retained on the slots it
+        // touches; its holds are voted exactly like reader holds
+        // and stock is re-resolved.
+        if ctx.synthesis && !self.stitch_reports.is_empty() {
+            if let Some(layout) = ctx.layouts.get("parts") {
+                let universe = ctx.universes.for_class(ScreenClass::Parts);
+                let mut reports = std::mem::take(&mut self.stitch_reports);
+                let summary = crate::synth::adjudicate_session(
+                    &mut reports,
+                    layout,
+                    engine,
+                    &ctx.read_options(),
+                    universe,
+                );
+                let mut any = false;
+                for report in &reports {
+                    for slot in &report.slots {
+                        if slot.coverage == SlotCoverage::Held
+                            && slot.held_via == Some(crate::lineread::Via::Synthesis)
+                        {
+                            self.vote_held_slot(slot);
+                            any = true;
+                        }
+                    }
+                }
+                if any {
+                    self.captured = resolve_voted_stock(
+                        &self.part_votes,
+                        &self.relic_votes,
+                        &self.arcane_votes,
+                    );
+                }
+                self.synth_summary = Some(summary);
+                self.stitch_reports = reports;
+            }
+        }
+    }
+
+    /// Fold one stitch report into the session (pass 33 merge,
+    /// pass 36 split out so background bundles merge identically
+    /// whenever they land). Each held slot contributes one count
+    /// vote per read instance — the stitched equivalent of the
+    /// per-frame observations the vote was designed for (a ×1
+    /// instance, its ring-gated read absent, votes 1).
+    fn merge_report(&mut self, report: StitchReport) {
+        for slot in &report.slots {
+            self.vote_held_slot(slot);
         }
         self.captured =
             resolve_voted_stock(&self.part_votes, &self.relic_votes, &self.arcane_votes);
         self.stitch_reports.push(report);
     }
 
+    /// One held slot's session votes (the merge body, split out
+    /// so the finalize-time synthesis holds vote identically to
+    /// reader holds). Coverage is the authoritative verdict: a
+    /// contested slot's stored result is the canonical read kept
+    /// for diagnostics, and it must not vote.
+    fn vote_held_slot(&mut self, slot: &SlotReport) {
+        if slot.coverage != SlotCoverage::Held {
+            return;
+        }
+        let Some(result) = &slot.result else { return };
+        let Some(name) = &result.matched else { return };
+        if slot.instance_counts.is_empty() {
+            *self
+                .part_votes
+                .entry(name.clone())
+                .or_default()
+                .entry(result.count.unwrap_or(1))
+                .or_insert(0) += 1;
+        } else {
+            for c in &slot.instance_counts {
+                *self
+                    .part_votes
+                    .entry(name.clone())
+                    .or_default()
+                    .entry(c.unwrap_or(1))
+                    .or_insert(0) += 1;
+            }
+        }
+        // Pass 34: the built-copy glyph on a held blueprint
+        // slot records its built sibling as held stock (one
+        // ×1 vote — the twin's own count is not observed).
+        if let Some(implied) = &slot.glyph_implied {
+            *self
+                .part_votes
+                .entry(implied.clone())
+                .or_default()
+                .entry(1)
+                .or_insert(0) += 1;
+        }
+    }
+
     /// Every stitch report this session produced (pass 33).
     pub fn stitch_reports(&self) -> &[StitchReport] {
         &self.stitch_reports
+    }
+
+    /// The session-level synthesis adjudication summary, when
+    /// `finish_parts` ran the post-pass (pass 35 × 36).
+    pub fn synth_summary(&self) -> Option<&crate::synth::SynthSummary> {
+        self.synth_summary.as_ref()
     }
 
     /// Coverage accounting across all stitch reports (pass 33):
@@ -747,6 +1438,7 @@ impl CaptureSession {
         }
         let (mut held, mut seen, mut never, mut flagged) = (0usize, 0usize, 0usize, 0usize);
         let mut implied = 0usize;
+        let mut synth_held = 0usize;
         for r in &self.stitch_reports {
             for s in &r.slots {
                 match s.coverage {
@@ -760,10 +1452,13 @@ impl CaptureSession {
                 if s.glyph_implied.is_some() {
                     implied += 1;
                 }
+                if s.held_via == Some(crate::lineread::Via::Synthesis) {
+                    synth_held += 1;
+                }
             }
         }
         Some(format!(
-            "stitch coverage: {held} held, {seen} seen-not-held, {never} never-fully-visible, {flagged} instance-disagreement flagged, {implied} glyph-implied built-form holds ({} stitch report(s))",
+            "stitch coverage: {held} held, {seen} seen-not-held, {never} never-fully-visible, {flagged} instance-disagreement flagged, {implied} glyph-implied built-form holds, {synth_held} synthesis holds ({} stitch report(s))",
             self.stitch_reports.len()
         ))
     }
@@ -944,7 +1639,7 @@ pub fn read_frame(
     // tesseract engine caches by crop hash and batches cache misses
     // into a handful of processes, instead of 2–3 spawns per cell.
     let cells = layout.split(frame);
-    read_cells(&cells, layout, engine, ctx, universe)
+    read_cells(&cells, layout, engine, &ctx.read_options(), universe)
 }
 
 /// Validate + decode an already-cut set of cells (pass 33 seam):
@@ -958,7 +1653,7 @@ pub fn read_cells(
     cells: &[Option<GrayImage>],
     layout: &Layout,
     engine: &dyn OcrEngine,
-    ctx: &CaptureContext<'_>,
+    opts: &ReadOptions,
     universe: &Universe,
 ) -> Vec<ocr::CellResult> {
     let reads = engine.ocr_cells_in(cells, layout);
@@ -969,7 +1664,7 @@ pub fn read_cells(
         results.push(ocr::validate_read(
             &read,
             universe,
-            ctx.min_confidence,
+            opts.min_confidence,
             layout.min_score,
             index,
         ));
@@ -981,7 +1676,7 @@ pub fn read_cells(
     // inside a derived radius) replaces the margin/score gates for
     // the cells it accepts; counts ride along exactly as on the
     // margin path. Relic and arcane frames never reach this block.
-    if ctx.radius_decoder && layout.key == "parts" {
+    if opts.radius_decoder && layout.key == "parts" {
         // Phase 1: band decodes — pure matcher work, no OCR.
         let mut strip_pending: Vec<usize> = Vec::new();
         for (index, result) in results.iter_mut().enumerate() {
@@ -995,12 +1690,12 @@ pub fn read_cells(
                 continue;
             }
             if let Some(name) =
-                universe.radius_decode_budget(&read.text, ctx.radius_tail_budget)
+                universe.radius_decode_budget(&read.text, opts.radius_tail_budget)
             {
                 result.matched = Some(name);
                 result.held = true;
                 result.count = read.count;
-            } else if ctx.radius_strip {
+            } else if opts.radius_strip {
                 strip_pending.push(index);
             }
         }
@@ -1046,7 +1741,7 @@ pub fn read_cells(
             // cell holds only when the offsets that decode AGREE
             // on one name (the agreement discipline the stitch
             // applies across sightings, applied across phases).
-            let offsets_px: &[f32] = if ctx.strip_offsets {
+            let offsets_px: &[f32] = if opts.strip_offsets {
                 &[-8.0, 0.0, 8.0]
             } else {
                 &[0.0]
@@ -1081,7 +1776,7 @@ pub fn read_cells(
                     continue;
                 };
                 if let Some(name) =
-                    universe.radius_decode_strip(&read.text, text, ctx.radius_tail_budget)
+                    universe.radius_decode_strip(&read.text, text, opts.radius_tail_budget)
                 {
                     if !decodes[pi].contains(&name) {
                         decodes[pi].push(name);
@@ -1175,6 +1870,13 @@ pub struct SlotReport {
     /// post-pass adjudicated (candidates + scores + outcome);
     /// `None` for held slots and slots it never considered.
     pub synth: Option<crate::synth::SynthDiag>,
+    /// Pass 36 integration: the slot's canonical crop, retained
+    /// only for the two slot classes the finalize-time synthesis
+    /// adjudication touches — held via both readers (its
+    /// calibration pool) and seen-not-held (its eligible pool) —
+    /// so the session-level post-pass can run after the bundle
+    /// frames have been dropped. `None` for every other slot.
+    pub canonical_crop: Option<GrayImage>,
 }
 
 /// One stitched parts session: the plan plus every slot's outcome.
@@ -1200,6 +1902,15 @@ impl StitchReport {
     }
 }
 
+/// Pass 36: the most instance crops per slot the readers
+/// consume, on top of the canonical crop (which is always read).
+/// Set from census + duplicate-inflation evidence
+/// (docs/thirty-sixth-pass.md): the censuses run ~2
+/// sightings/slot, so the cap rarely binds there, while at live
+/// density (~16 sightings/slot) it cuts the per-slot OCR volume
+/// roughly fourfold against the uncapped pass-34 stack.
+const READER_INSTANCE_CAP: usize = 3;
+
 /// Stitch one accumulated parts session and read every slot
 /// (pass 33): plan the session ([`crate::stitch::plan_session`]),
 /// build each slot's canonical crop from its usable instances,
@@ -1219,7 +1930,7 @@ impl StitchReport {
 /// pipeline had: items at the OCR margin are held by one of
 /// their several sightings, rarely by a designated one.)
 ///
-/// Pass 34 adds the second reader: with `ctx.line_reader` on,
+/// Pass 34 adds the second reader: with the line reader on,
 /// every crop is ALSO read by the line reader
 /// ([`crate::lineread::read_cells_lines`]) under the same
 /// agreement rule, the slot's form channels are measured, and
@@ -1232,7 +1943,7 @@ pub fn stitch_parts_session(
     frames: &[GrayImage],
     layout: &Layout,
     engine: &dyn OcrEngine,
-    ctx: &CaptureContext<'_>,
+    opts: &StitchOptions,
     universe: &Universe,
 ) -> StitchReport {
     let refs: Vec<&GrayImage> = frames.iter().collect();
@@ -1244,7 +1955,7 @@ pub fn stitch_parts_session(
         let ch = seg.pitch.row_pitch.round().max(1.0) as u32;
         // Pass 34 ablation (§4): snap crop origins to detected
         // tile boundaries instead of the fitted grid.
-        let slots = if ctx.snap_cells {
+        let slots = if opts.snap_cells {
             slots
                 .iter()
                 .map(|s| crate::stitch::snap_slot(s, &refs, cw, ch))
@@ -1264,12 +1975,23 @@ pub fn stitch_parts_session(
             canons.push(cc);
         }
         let mut inst_ranges: Vec<std::ops::Range<usize>> = Vec::with_capacity(slots.len());
+        // Pass 36 reader instance cap: the readers consume the
+        // canonical crop plus at most READER_INSTANCE_CAP
+        // best-ranked usable instance crops per slot (ranked by
+        // the canonical criteria — margin, gain agreement, link
+        // residual). At census density (~2 sightings/slot) the
+        // cap rarely binds; at live density (~16) the uncapped
+        // list was the bundle cost driver. Counts and the mesh
+        // channel read the same capped set.
+        let mut read_sets: Vec<Vec<usize>> = Vec::with_capacity(slots.len());
         for slot in &slots {
-            let usable: Vec<&crate::stitch::Instance> =
-                slot.instances.iter().filter(|i| i.usable()).collect();
+            let usable_n = slot.instances.iter().filter(|i| i.usable()).count();
+            let read_set =
+                crate::stitch::rank_instances(slot, &refs, cw, ch, READER_INSTANCE_CAP);
             let start = cells.len();
-            if usable.len() > 1 {
-                for i in &usable {
+            if usable_n > 1 {
+                for &ii in &read_set {
+                    let i = &slot.instances[ii];
                     cells.push(Some(crate::stitch::crop_integer(
                         &frames[i.frame],
                         i.fx, i.fy, cw, ch,
@@ -1277,13 +1999,14 @@ pub fn stitch_parts_session(
                 }
             }
             inst_ranges.push(start..cells.len());
+            read_sets.push(read_set);
         }
-        let results = read_cells(&cells, layout, engine, ctx, universe);
+        let results = read_cells(&cells, layout, engine, &opts.read, universe);
         // Pass 34: the line reader over the SAME crops (canonical
         // + instances, same order), when enabled.
-        let line_outcomes = if ctx.line_reader {
+        let line_outcomes = if opts.line_reader {
             Some(crate::lineread::read_cells_lines(
-                &cells, layout, engine, ctx, universe,
+                &cells, layout, engine, &opts.read, universe,
             ))
         } else {
             None
@@ -1294,9 +2017,12 @@ pub fn stitch_parts_session(
                 Some(cc) => {
                     let usable: Vec<&crate::stitch::Instance> =
                         slot.instances.iter().filter(|i| i.usable()).collect();
-                    let icells: Vec<Option<GrayImage>> = usable
+                    // Counts vote from the reader-capped instance
+                    // set (pass 36), not every usable sighting.
+                    let icells: Vec<Option<GrayImage>> = read_sets[idx]
                         .iter()
-                        .map(|i| {
+                        .map(|&ii| {
+                            let i = &slot.instances[ii];
                             Some(crate::stitch::crop_integer(
                                 &frames[i.frame],
                                 i.fx, i.fy, cw, ch,
@@ -1498,6 +2224,16 @@ pub fn stitch_parts_session(
                         glyph_score: channels.map(|c| c.glyph_score).unwrap_or(0.0),
                         mesh_score: channels.map(|c| c.mesh_score).unwrap_or(0.0),
                         synth: None,
+                        // Retain the canonical crop for exactly
+                        // the classes the finalize-time synthesis
+                        // adjudication consumes (see the field).
+                        canonical_crop: if held_via == Some(crate::lineread::Via::Both)
+                            || !held
+                        {
+                            Some(cc.image.clone())
+                        } else {
+                            None
+                        },
                     });
                 }
                 _ => {
@@ -1522,24 +2258,24 @@ pub fn stitch_parts_session(
                         glyph_score: 0.0,
                         mesh_score: 0.0,
                         synth: None,
+                        canonical_crop: None,
                     });
                 }
             }
         }
     }
-    let mut report = StitchReport {
+    // Pass 36 integration: no synthesis hook here. The post-pass
+    // adjudicates ONCE per session over the merged bundle
+    // reports at finalize (`CaptureSession::finish_parts` →
+    // `crate::synth::adjudicate_session`), preserving the
+    // v0.5.29 whole-session semantics; it consumes the canonical
+    // crops retained on the slots it touches, so this per-bundle
+    // function stays free of session state.
+    StitchReport {
         plan,
         slots: slots_out,
         synth_calib: None,
-    };
-    // Pass 35: the synthesis post-pass adjudicates the slots
-    // the readers left unheld (additive tail phase; it
-    // re-derives what it needs from the plan and mutates only
-    // unheld slots' verdicts — see `crate::synth`).
-    if ctx.synthesis {
-        crate::synth::adjudicate_report(&mut report, frames, layout, engine, ctx, universe);
     }
-    report
 }
 
 /// A coarse change signature: a 24x14 grid of block means, hashed. Two
@@ -1612,10 +2348,54 @@ pub fn run_capture(
     source: &mut dyn FrameSource,
     stop: &AtomicBool,
     idle_stop_frames: u64,
+    on_progress: impl FnMut(&CaptureSession),
+) -> Result<CaptureSession, String> {
+    run_capture_limited(
+        ctx,
+        engine,
+        source,
+        stop,
+        idle_stop_frames,
+        SESSION_MAX_DURATION,
+        on_progress,
+    )
+}
+
+/// [`run_capture`] with the session duration cap as a parameter
+/// (pass 36 addendum item 3 — a test needs the cap in
+/// milliseconds, production gets [`SESSION_MAX_DURATION`]).
+/// When the cap trips, draining stops and the session
+/// auto-finalizes through the ordinary finish path; the trip
+/// is recorded on the session and surfaces in the finalize
+/// output via [`CaptureSession::failsafe_summary`].
+pub fn run_capture_limited(
+    ctx: &CaptureContext<'_>,
+    engine: &dyn OcrEngine,
+    source: &mut dyn FrameSource,
+    stop: &AtomicBool,
+    idle_stop_frames: u64,
+    max_duration: std::time::Duration,
     mut on_progress: impl FnMut(&CaptureSession),
 ) -> Result<CaptureSession, String> {
     let mut session = CaptureSession::new();
+    // Pass 36: when a tesseract engine can be probed for the
+    // parts layout, the session's bundles stitch on a background
+    // thread with that dedicated instance (the frame engine's
+    // cache lock is held across whole batched reads, so sharing
+    // it would serialise the scroll against the stitch — the
+    // forensic cache-lock finding). No second engine (a stub
+    // session, tests) keeps the synchronous pass-34 path.
+    if let Some(parts_layout) = ctx.layouts.get("parts") {
+        if let Some(e) = crate::ocr::TesseractCliEngine::probe(parts_layout.clone()) {
+            session.set_stitch_engine(Box::new(e));
+        }
+    }
+    let started = std::time::Instant::now();
     while !stop.load(Ordering::Relaxed) {
+        if started.elapsed() >= max_duration {
+            session.note_duration_cap();
+            break;
+        }
         match source.next_frame()? {
             Some(frame) => {
                 session.process_frame(ctx, engine, &frame);
@@ -2672,5 +3452,279 @@ mod tests {
         let text = std::fs::read_to_string(log.path()).unwrap();
         assert!(text.contains("[finalizing] writing 2 relic stacks"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------------------------------------------------------------
+    // Pass 36: intake dedupe, progress bundles, failsafes.
+    // ---------------------------------------------------------------
+
+    fn intake_layout() -> Layout {
+        Layout {
+            key: "parts".to_owned(),
+            cols: 4,
+            rows: 3,
+            ref_width: 460,
+            ref_height: 300,
+            x0: 20.0,
+            cell_w: 100.0,
+            y0: 60.0,
+            cell_h: 50.0,
+            name: [0.0, 0.53, 1.0, 1.0],
+            count: [0.06, 0.0, 0.32, 0.16],
+            count_style: crate::ocr::CountStyle::Badge,
+            name_psm: 11,
+            count_psm: 7,
+            name_upscale: 4,
+            count_upscale: 8,
+            name_upper: None,
+            pips: None,
+            min_score: 0.5,
+        }
+    }
+
+    fn xorshift(state: &mut u64) -> u64 {
+        let mut x = *state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *state = x;
+        x
+    }
+
+    /// One synthetic inventory frame at `seed`: every grid cell
+    /// carries a 5x3 mosaic of seeded flat levels. The gradient
+    /// lives at the level borders — a step map that is distinct
+    /// per cell (per-pixel noise would average out of the
+    /// block-mean thumbnails and make every cell look alike) —
+    /// and the whole frame is scaled by `gain`, the
+    /// animated-background proxy.
+    fn mosaic_frame(layout: &Layout, seed: u64, gain: f32) -> GrayImage {
+        let (w, h) = (460u32, 300u32);
+        let mut img = GrayImage::blank(w, h, 8);
+        let rect = crate::stitch::GridRect::of(layout, &img);
+        let cw = rect.w / layout.cols as f32;
+        let ch = rect.h / layout.rows as f32;
+        for r in 0..layout.rows {
+            for c in 0..layout.cols {
+                let x0 = (rect.x0 + c as f32 * cw) as u32;
+                let y0 = (rect.y0 + r as f32 * ch) as u32;
+                let x1 = (rect.x0 + (c + 1) as f32 * cw) as u32;
+                let y1 = (rect.y0 + (r + 1) as f32 * ch) as u32;
+                for by in 0..3u32 {
+                    for bx in 0..5u32 {
+                        let mut st = seed
+                            ^ ((r as u64) << 24)
+                            ^ ((c as u64) << 16)
+                            ^ ((by as u64) << 8)
+                            ^ bx as u64
+                            ^ 0x9E37_79B9;
+                        let level = 40.0 + (xorshift(&mut st) % 180) as f32;
+                        let sx0 = x0 + bx * (x1 - x0) / 5;
+                        let sx1 = x0 + (bx + 1) * (x1 - x0) / 5;
+                        let sy0 = y0 + by * (y1 - y0) / 3;
+                        let sy1 = y0 + (by + 1) * (y1 - y0) / 3;
+                        for y in sy0..sy1.min(h) {
+                            for x in sx0..sx1.min(w) {
+                                let v = (level * gain).clamp(0.0, 255.0) as u8;
+                                img.set(x, y, v);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        img
+    }
+
+    #[test]
+    fn intake_collapses_a_static_viewport_to_the_cap() {
+        // The incident's shape: the same viewport offered over
+        // and over (with gain jitter standing in for the
+        // animated background) must collapse to at most
+        // VIEWPORT_ACCEPT_CAP accepted frames; the rest are
+        // counted drops.
+        let layout = intake_layout();
+        let base = mosaic_frame(&layout, 7, 1.0);
+        let mut intake = PartsIntake::new();
+        let (mut accepted, mut dropped) = (0usize, 0usize);
+        for i in 0..16 {
+            let gain = 1.0 + ((i % 5) as f32 - 2.0) * 0.015;
+            let frame = if i == 0 {
+                base.clone()
+            } else {
+                // Same pixels, global gain — viewport_print's
+                // soft normalisation must see through it.
+                let mut f = base.clone();
+                for p in &mut f.pixels {
+                    *p = ((*p as f32) * gain).clamp(0.0, 255.0) as u8;
+                }
+                f
+            };
+            match intake.offer(&frame, &layout) {
+                IntakeVerdict::Accept { .. } => accepted += 1,
+                IntakeVerdict::DropDuplicate => dropped += 1,
+                IntakeVerdict::DropSessionCap => panic!("session cap must not trip here"),
+            }
+        }
+        assert_eq!(accepted, VIEWPORT_ACCEPT_CAP, "static viewport collapses to the cap");
+        assert_eq!(dropped, 16 - VIEWPORT_ACCEPT_CAP);
+        assert_eq!(intake.accepted_total() as usize, VIEWPORT_ACCEPT_CAP);
+        // A different page is a new position, accepted at once.
+        let other = mosaic_frame(&layout, 99, 1.0);
+        assert!(matches!(
+            intake.offer(&other, &layout),
+            IntakeVerdict::Accept { .. }
+        ));
+    }
+
+    #[test]
+    fn intake_flushes_after_a_viewport_of_progress() {
+        // A panorama of 9 textured rows; frames are 3-row
+        // windows stepped one row (one pitch) at a time. A flush
+        // must be requested once a viewport (3 pitches) of
+        // progress has accumulated.
+        let layout = intake_layout();
+        // 10 rows: the last window (step 4) crops y 200..500.
+        // (Boundary semantics fire the flush on the first frame
+        // of the position AFTER the crossing, one offer later
+        // than the pre-36 verdict timing this fixture was sized
+        // for — the crop at step 4 must exist.)
+        let pano_rows = 10u32;
+        let pano_h = pano_rows * 50;
+        let mut pano = GrayImage::blank(460, pano_h, 8);
+        for r in 0..pano_rows {
+            // Paint row r of the panorama with the mosaic frame
+            // seeded by r: rows are mutually distinct content.
+            let f = mosaic_frame(&layout, 1000 + r as u64, 1.0);
+            for y in 0..50u32 {
+                for x in 0..460u32 {
+                    let v = f.get(x, 60 + y);
+                    pano.set(x, r * 50 + y, v);
+                }
+            }
+        }
+        let mut intake = PartsIntake::new();
+        let mut flush_at = None;
+        for k in 0..5u32 {
+            let frame = pano.crop(0, k * 50, 460, 300);
+            match intake.offer(&frame, &layout) {
+                IntakeVerdict::Accept { flush: true } => {
+                    flush_at = Some(k);
+                    break;
+                }
+                IntakeVerdict::Accept { flush: false } => {}
+                other => panic!("scroll frames are never dropped: {other:?}"),
+            }
+        }
+        let k = flush_at.expect("a viewport of progress must request a flush");
+        assert!(k <= 4, "flush within a viewport + one step (got step {k})");
+    }
+
+    #[test]
+    fn intake_session_cap_trips_and_is_reported() {
+        let layout = intake_layout();
+        let mut intake = PartsIntake::with_session_cap(5);
+        let (mut accepted, mut capped) = (0usize, 0usize);
+        for i in 0..9u64 {
+            // Distinct position per offer (distinct mosaic seed).
+            let frame = mosaic_frame(&layout, 500 + i * 17, 1.0);
+            match intake.offer(&frame, &layout) {
+                IntakeVerdict::Accept { .. } => accepted += 1,
+                IntakeVerdict::DropSessionCap => capped += 1,
+                IntakeVerdict::DropDuplicate => panic!("distinct positions never duplicate-drop"),
+            }
+        }
+        assert_eq!(accepted, 5);
+        assert_eq!(capped, 4);
+        assert!(intake.cap_tripped(), "the trip is recorded, not silent");
+    }
+
+    #[test]
+    fn bundle_queue_coalesces_and_drops_loudly() {
+        let frame = || GrayImage::blank(4, 4, 9);
+        let mut q = BundleQueue::with_cap(10);
+        q.push(vec![frame(), frame(), frame(), frame()]);
+        assert_eq!(q.len(), 4);
+        assert_eq!(q.coalesced, 0, "the first bundle queues, nothing to merge into");
+        // Second bundle coalesces onto the waiting first; the
+        // queue cap (10) drops the overflow of the third.
+        q.push(vec![frame(), frame(), frame(), frame()]);
+        assert_eq!(q.coalesced, 1);
+        assert_eq!(q.len(), 8);
+        q.push(vec![frame(), frame(), frame(), frame()]);
+        assert_eq!(q.len(), 10, "the queue is frame-capped");
+        assert_eq!(q.dropped_frames, 2);
+        assert!(q.cap_tripped, "the drop is recorded, not silent");
+        // Jobs drain in bounded chunks.
+        assert_eq!(q.take_job(4).len(), 4);
+        assert_eq!(q.take_job(48).len(), 6);
+        assert!(q.is_empty());
+    }
+
+    struct SlowSource {
+        remaining: usize,
+        delay: std::time::Duration,
+    }
+
+    impl FrameSource for SlowSource {
+        fn next_frame(&mut self) -> Result<Option<GrayImage>, String> {
+            if self.remaining == 0 {
+                return Ok(None);
+            }
+            std::thread::sleep(self.delay);
+            self.remaining -= 1;
+            Ok(Some(GrayImage::blank(4, 4, 7)))
+        }
+    }
+
+    #[test]
+    fn run_capture_duration_cap_auto_finalizes() {
+        let universes = UniverseSet::default();
+        let layouts = HashMap::new();
+        let relic_names = HashSet::new();
+        let arcane_names = HashSet::new();
+        let classifier = classifier();
+        let ctx = CaptureContext {
+            layouts: &layouts,
+            universes: &universes,
+            relic_names: &relic_names,
+            arcane_names: &arcane_names,
+            classifier: &classifier,
+            min_confidence: 0.5,
+            radius_decoder: true,
+            radius_strip: true,
+            radius_tail_budget: crate::ocr::RADIUS_TAIL_BUDGET,
+            line_reader: false,
+            strip_offsets: false,
+            snap_cells: false,
+            synthesis: false,
+            debug_dir: None,
+        };
+        let stop = AtomicBool::new(false);
+        let mut src = SlowSource {
+            remaining: 10_000,
+            delay: std::time::Duration::from_millis(10),
+        };
+        let started = std::time::Instant::now();
+        let session = run_capture_limited(
+            &ctx,
+            &crate::ocr::StubEngine,
+            &mut src,
+            &stop,
+            0,
+            std::time::Duration::from_millis(55),
+            |_| {},
+        )
+        .unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the cap ends the drain promptly (took {:?})",
+            started.elapsed()
+        );
+        assert!(session.duration_cap_tripped(), "the trip is recorded");
+        let summary = session
+            .failsafe_summary()
+            .expect("the trip surfaces in the finalize output");
+        assert!(summary.contains("duration cap"), "summary names the cap: {summary}");
     }
 }

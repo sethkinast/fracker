@@ -145,8 +145,8 @@ fn main() {
             }
             inst_ranges.push(start..cell_imgs.len());
         }
-        let band_results = read_cells(&cell_imgs, &layout, &engine, &ctx, universe);
-        let line_outcomes = lineread::read_cells_lines(&cell_imgs, &layout, &engine, &ctx, universe);
+        let band_results = read_cells(&cell_imgs, &layout, &engine, &ctx.read_options(), universe);
+        let line_outcomes = lineread::read_cells_lines(&cell_imgs, &layout, &engine, &ctx.read_options(), universe);
 
         for (idx, slot) in slots.iter().enumerate() {
             let truth = slot_truth

@@ -1766,3 +1766,55 @@ it refines the brief where they disagree. For the next worker pass.
     agreement 0.909 std / 0.954 HC) but was exercised by
     no live case in either census. 309 tests (303 + 6).
     Residue census: docs/thirty-fifth-pass.md.
+101. **Live capture re-architected around the stream
+    (pass 36, branch `pass36-hotfix` — base gate met,
+    duplicate-inflation gate FAILED on HC, not shipped).**
+    The v0.5.28 live defect (finalize-time stitch blocking
+    the portal while near-duplicate frames of two viewports
+    filled the bundle) is answered structurally
+    (src/capture.rs, src/stitch.rs): content-aware intake
+    dedupe on grid-region gradient prints (same-viewport =
+    ≥90% of cells matching soft-normalised gradient
+    thumbnails; at most K = 4 accepted per position, the
+    rest dropped and counted); bundle boundaries on
+    accumulated panorama progress with boundaries falling
+    between positions, never inside one, and an 8-frame
+    minimum bundle (a 4-frame head bundle cost HC 2
+    distinct through independent-fit disagreement, 29
+    flags vs the single-bundle control's 0; the control
+    through the new async path reproduces the shipped
+    numbers exactly); bundle stitching on a dedicated
+    thread with a dedicated second engine instance (the
+    frame engine's cache lock is held across batched
+    reads), reports merged on the capture worker so the
+    tray counter climbs during the scroll, stop = bounded
+    join inside run_capture; reader instance cap N = 3
+    (canonical + best-ranked by gain-inliers, margin,
+    gain deviation, link residual; N = 6 byte-identical
+    results at +46% finish time). Runaway failsafes, each
+    trip-tested and surfaced in the finalize output:
+    512 accepted-frame session cap (~3× the padded
+    full-scroll estimate), 96-frame coalescing bundle
+    queue with counted drops, 900 s session duration cap
+    with auto-finalize. Base gate (production harness,
+    both censuses) reproduces the shipped result: std
+    239 distinct / 0 FA / Neuroptics 28 / counts 452/452
+    (denominator one below the shipped 453 — one cell's
+    slot attribution moved under split segmentation; no
+    count wrong); HC 234 / 0 / 28 / 93.2%; suite 309
+    green. Duplicate-inflation simulation (×8, whole-frame
+    gain/gamma jitter): std passes (241 / 0 FA; join-free
+    stock diff +3 gained, −1 lost, no doubling). HC FAILS:
+    231 distinct, 1 false accept — "Akbronco Prime Link"
+    held at slot and stock level where the truth is the
+    Blueprint form, recurring with pixel-identical cell
+    content in a background-only-jitter diagnostic (216),
+    which attributes it to dense-pool arbitration plus
+    bundle-placement sensitivity, not jitter; 6 names lost
+    / 3 gained net on the resolved stock, and partial
+    count doubling on panorama rows shared across a bundle
+    boundary. Per the brief's stop rule this is reported,
+    not tuned; remedies (cross-bundle reconciliation,
+    position-counted floor, dense-pool form arbitration)
+    are scoped in docs/thirty-sixth-pass.md §Open items.
+    Details: docs/thirty-sixth-pass.md.

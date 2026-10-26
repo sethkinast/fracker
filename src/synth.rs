@@ -26,16 +26,17 @@
 //! tuned against a census truth label; the pass doc states the
 //! distributions and the plateau the thresholds sit in.
 //!
-//! Integration is deliberately a post-pass: [`adjudicate_report`]
-//! re-derives each needed slot's canonical crop and line
-//! detection from the stitch plan (the same public stitch /
-//! lineread functions production used), re-reads the canonical
-//! crops for evidence, and mutates only unheld slots'
-//! verdicts. The session pipeline's structure is untouched.
+//! Integration is deliberately a post-pass: [`adjudicate_session`]
+//! runs once per session at finalize over the merged stitch
+//! reports (pass 36 integration), observes the canonical crops
+//! retained on the slots it touches when each bundle was
+//! stitched, re-reads those crops for evidence, and mutates
+//! only unheld slots' verdicts. The session pipeline's
+//! structure is untouched.
 
 use std::collections::{HashMap, HashSet};
 
-use crate::capture::{CaptureContext, SlotCoverage, SlotReport, StitchReport};
+use crate::capture::{ReadOptions, SlotCoverage, SlotReport, StitchReport};
 use crate::lineread::{self, FormVerdict, LineDetection, Via};
 use crate::ocr::{CellResult, GrayImage, Layout, OcrEngine, Universe};
 use crate::ttf::TtfFont;
@@ -1204,7 +1205,7 @@ pub fn decide(
 }
 
 // ---------------------------------------------------------------------------
-// Session post-pass over a StitchReport
+// Session post-pass over the session's StitchReports
 // ---------------------------------------------------------------------------
 
 /// The calibration record of one session, in reportable form:
@@ -1287,17 +1288,22 @@ pub struct SynthSummary {
     pub eligible: usize,
 }
 
-/// Adjudicate one stitched session's unheld slots. Mutates
-/// `report` in place (held verdicts, `held_via = Synthesis`,
-/// per-slot diagnostics) and returns the summary. A session
-/// that cannot calibrate (too few agreement slots, font
-/// failure) is left untouched.
-pub fn adjudicate_report(
-    report: &mut StitchReport,
-    frames: &[GrayImage],
+/// Adjudicate one capture session's unheld slots, over the
+/// session's merged stitch reports (pass 36 integration: the
+/// post-pass runs once at finalize, NOT per bundle — one
+/// calibration over the session's pooled both-readers-held
+/// slots, one exclusion set over the session's pooled holds,
+/// exactly the whole-session semantics v0.5.29 measured when a
+/// session produced a single report). Mutates the reports in
+/// place (held verdicts, `held_via = Synthesis`, per-slot
+/// diagnostics, the session calibration record on each) and
+/// returns the summary. A session that cannot calibrate (too
+/// few agreement slots, font failure) is left untouched.
+pub fn adjudicate_session(
+    reports: &mut [StitchReport],
     layout: &Layout,
     engine: &dyn OcrEngine,
-    ctx: &CaptureContext<'_>,
+    read_opts: &ReadOptions,
     universe: &Universe,
 ) -> SynthSummary {
     let mut summary = SynthSummary::default();
@@ -1305,63 +1311,60 @@ pub fn adjudicate_report(
         Ok(f) => f,
         Err(_) => return summary,
     };
-    let refs: Vec<&GrayImage> = frames.iter().collect();
-    // Report-slot lookup by (segment, row, col).
-    let mut slot_idx: HashMap<(usize, i32, u32), usize> = HashMap::new();
-    for (i, s) in report.slots.iter().enumerate() {
-        slot_idx.insert((s.segment, s.row, s.col), i);
-    }
-    // Names held anywhere (exclusion set for candidates),
-    // including glyph-implied twins.
+    // Names held anywhere in the session (exclusion set for
+    // candidates), including glyph-implied twins — pooled over
+    // every bundle report.
     let mut held_elsewhere: HashSet<String> = HashSet::new();
-    for s in &report.slots {
-        if s.coverage == SlotCoverage::Held {
-            if let Some(n) = s.result.as_ref().and_then(|r| r.matched.clone()) {
-                held_elsewhere.insert(n);
+    for report in reports.iter() {
+        for s in &report.slots {
+            if s.coverage == SlotCoverage::Held {
+                if let Some(n) = s.result.as_ref().and_then(|r| r.matched.clone()) {
+                    held_elsewhere.insert(n);
+                }
+            }
+            if let Some(imp) = &s.glyph_implied {
+                held_elsewhere.insert(imp.clone());
             }
         }
-        if let Some(imp) = &s.glyph_implied {
-            held_elsewhere.insert(imp.clone());
-        }
     }
-    summary.name_disagreements = report
-        .slots
+    summary.name_disagreements = reports
         .iter()
+        .flat_map(|r| r.slots.iter())
         .filter(|s| s.refuse_reason == Some("name-disagreement"))
         .count();
 
-    // Re-derive canonical crops + observations for every slot
-    // we might touch: calibration (held via Both) and eligible
-    // (seen-not-held). Instance crops are NOT re-derived — the
-    // canonical crop is the synthesis subject by design.
+    // Collect the slots this post-pass touches: calibration
+    // (held via Both) and eligible (seen-not-held), pooled over
+    // all bundle reports in session order. The canonical crops
+    // were retained on exactly these slots when each bundle was
+    // stitched (the bundle frames themselves are gone by
+    // finalize), so no plan re-derivation is needed here; the
+    // canonical crop is the synthesis subject by design, and
+    // instance crops are never re-derived.
     struct Work {
         report_i: usize,
+        slot_i: usize,
         cell: GrayImage,
         obs: SlotObs,
     }
     let mut calib_work: Vec<Work> = Vec::new();
     let mut elig_work: Vec<Work> = Vec::new();
-    for (si, seg) in report.plan.segments.iter().enumerate() {
-        let slots = crate::stitch::slot_instances(&report.plan, si, &refs, layout);
-        let cw = seg.pitch.col_pitch.round().max(1.0) as u32;
-        let ch = seg.pitch.row_pitch.round().max(1.0) as u32;
-        for slot in &slots {
-            let Some(&ri) = slot_idx.get(&(si, slot.row, slot.col)) else {
-                continue;
-            };
-            let rep = &report.slots[ri];
-            let want_calib = rep.coverage == SlotCoverage::Held && rep.held_via == Some(Via::Both);
+    for (ri, report) in reports.iter().enumerate() {
+        for (si, rep) in report.slots.iter().enumerate() {
+            let want_calib =
+                rep.coverage == SlotCoverage::Held && rep.held_via == Some(Via::Both);
             let want_elig = rep.coverage == SlotCoverage::SeenNotHeld;
             if !want_calib && !want_elig {
                 continue;
             }
-            let Some(cc) = crate::stitch::canonical_crop(slot, &refs, cw, ch) else {
+            let Some(cell) = rep.canonical_crop.clone() else {
                 continue;
             };
-            let (obs, _det) = observe_slot(&cc.image, layout);
+            let (obs, _det) = observe_slot(&cell, layout);
             let w = Work {
                 report_i: ri,
-                cell: cc.image,
+                slot_i: si,
+                cell,
                 obs,
             };
             if want_calib {
@@ -1380,9 +1383,9 @@ pub fn adjudicate_report(
     // for calibration wrong-enumeration and eligible
     // nominations alike.
     let read_evidence = |cells: &[GrayImage]| -> Vec<Vec<String>> {
-        let opts: Vec<Option<GrayImage>> = cells.iter().cloned().map(Some).collect();
-        let band = crate::capture::read_cells(&opts, layout, engine, ctx, universe);
-        let line = lineread::read_cells_lines(&opts, layout, engine, ctx, universe);
+        let opt_cells: Vec<Option<GrayImage>> = cells.iter().cloned().map(Some).collect();
+        let band = crate::capture::read_cells(&opt_cells, layout, engine, read_opts, universe);
+        let line = lineread::read_cells_lines(&opt_cells, layout, engine, read_opts, universe);
         band.iter()
             .zip(line.iter())
             .map(|(b, l)| {
@@ -1402,7 +1405,7 @@ pub fn adjudicate_report(
     let mut bank = ExemplarBank::default();
     let mut calib_slots: Vec<CalibSlot> = Vec::with_capacity(calib_work.len());
     for (i, w) in calib_work.iter().enumerate() {
-        let truth = report.slots[w.report_i]
+        let truth = reports[w.report_i].slots[w.slot_i]
             .result
             .as_ref()
             .and_then(|r| r.matched.clone())
@@ -1418,33 +1421,43 @@ pub fn adjudicate_report(
         return summary;
     };
     summary.calibrated = true;
-    report.synth_calib = Some(SynthCalibSummary::from(&calib));
+    // One session calibration, recorded on every bundle report
+    // so any consumer of the merged reports sees the same record.
+    let calib_summary = SynthCalibSummary::from(&calib);
+    for report in reports.iter_mut() {
+        report.synth_calib = Some(calib_summary.clone());
+    }
     let mut scorer = Scorer::new(font.clone(), calib.fit);
 
     // Held panorama neighbours per segment (sort-interval
-    // bounds), in report order within each segment.
-    let held_by_seg: HashMap<usize, Vec<(usize, String)>> = {
-        let mut m: HashMap<usize, Vec<(usize, String)>> = HashMap::new();
-        for s in &report.slots {
-            if s.coverage == SlotCoverage::Held {
-                if let Some(n) = s.result.as_ref().and_then(|r| r.matched.clone()) {
-                    m.entry(s.segment).or_default().push((s_col_key(s), n));
+    // bounds), in report order within each segment — computed
+    // per owning bundle report: a slot's sort interval is
+    // bounded by the held slots of its own bundle's panorama.
+    let held_by_seg: Vec<HashMap<usize, Vec<(usize, String)>>> = reports
+        .iter()
+        .map(|report| {
+            let mut m: HashMap<usize, Vec<(usize, String)>> = HashMap::new();
+            for s in &report.slots {
+                if s.coverage == SlotCoverage::Held {
+                    if let Some(n) = s.result.as_ref().and_then(|r| r.matched.clone()) {
+                        m.entry(s.segment).or_default().push((s_col_key(s), n));
+                    }
                 }
             }
-        }
-        m
-    };
+            m
+        })
+        .collect();
 
     summary.eligible = elig_work.len();
     for (wi, w) in elig_work.iter().enumerate() {
-        let rep = &report.slots[w.report_i];
+        let rep = &reports[w.report_i].slots[w.slot_i];
         // Hold-vs-hold disagreements stay refused (contract).
         if rep.band_held.is_some() && rep.line_held.is_some() {
             continue;
         }
         // Panorama neighbours: nearest held slots before/after
         // this one in its segment's slot order.
-        let (prev_held, next_held) = neighbours(&held_by_seg, rep);
+        let (prev_held, next_held) = neighbours(&held_by_seg[w.report_i], rep);
         let mut ev = Evidence {
             band_held: rep.band_held.clone(),
             line_held: rep.line_held.clone(),
@@ -1459,7 +1472,7 @@ pub fn adjudicate_report(
             next_held.as_deref(),
         );
         if candidates.is_empty() {
-            report.slots[w.report_i].synth = Some(SynthDiag {
+            reports[w.report_i].slots[w.slot_i].synth = Some(SynthDiag {
                 candidates: Vec::new(),
                 best: None,
                 best_score: 0.0,
@@ -1481,7 +1494,7 @@ pub fn adjudicate_report(
         );
         let diag = decision.diag;
         if let Some(name) = decision.hold {
-            let slot = &mut report.slots[w.report_i];
+            let slot = &mut reports[w.report_i].slots[w.slot_i];
             let mut result = slot.result.clone().unwrap_or(CellResult {
                 index: 0,
                 raw_text: String::new(),
@@ -1509,7 +1522,7 @@ pub fn adjudicate_report(
             held_elsewhere.insert(name);
             summary.held += 1;
         } else {
-            report.slots[w.report_i].synth = Some(diag);
+            reports[w.report_i].slots[w.slot_i].synth = Some(diag);
             summary.refused += 1;
         }
     }

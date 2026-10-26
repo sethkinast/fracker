@@ -46,7 +46,7 @@
 //! those paths) — the predicate gains a caller, not a variant,
 //! and pass 32's evidence floor stays where it was.
 
-use crate::capture::CaptureContext;
+use crate::capture::ReadOptions;
 use crate::ocr::{
     self, CellResult, GrayImage, Layout, OcrEngine, OcrRead, Universe,
 };
@@ -980,7 +980,7 @@ pub fn read_cells_lines(
     cells: &[Option<GrayImage>],
     layout: &Layout,
     engine: &dyn OcrEngine,
-    ctx: &CaptureContext<'_>,
+    opts: &ReadOptions,
     universe: &Universe,
 ) -> Vec<LineOutcome> {
     // Detect lines per cell and gather every line crop into one
@@ -1048,12 +1048,12 @@ pub fn read_cells_lines(
             &read,
             &line1,
             universe,
-            ctx.min_confidence,
+            opts.min_confidence,
             layout.min_score,
             ci,
-            ctx.radius_decoder,
-            ctx.radius_strip,
-            ctx.radius_tail_budget,
+            opts.radius_decoder,
+            opts.radius_strip,
+            opts.radius_tail_budget,
         );
         out.push(LineOutcome {
             bp_line: blueprint_line_witnessed(&lines),

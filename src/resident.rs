@@ -834,6 +834,12 @@ async fn finalize_capture(
     if let Some(cov) = session.coverage_summary() {
         log.record("finalizing", &cov);
     }
+    // Pass 36: any failsafe that tripped (frame cap, bundle
+    // queue cap, duration cap) is stated in the finalize output
+    // — caps trip loud, never silent.
+    if let Some(fs) = session.failsafe_summary() {
+        log.record("finalizing", &fs);
+    }
     set_capture_stage(status, log, CaptureStage::Idle);
     true
 }
