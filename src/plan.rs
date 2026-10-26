@@ -340,6 +340,13 @@ pub struct CrackInfo {
     pub traces: u32,
     /// Other wanted parts the same relic drops (`+2 also`).
     pub covers: usize,
+    /// The radshare verdict for this crack when sharing beats solo
+    /// (pass 38, addendum #103): the full verdict line, carried so
+    /// the queue row and the Hunt crack line can render their
+    /// `radshare` marker. `None` whenever the verdict does not
+    /// recommend sharing. Computed by the same helper that feeds
+    /// the goal action text, so the surfaces cannot disagree.
+    pub radshare: Option<String>,
     pub fissure_node: String,
     pub fissure_mission: String,
     pub steel_path: bool,
@@ -807,6 +814,42 @@ pub fn radshare_lfg(relic: &str) -> String {
     format!("LF {relic} rad")
 }
 
+/// The radshare verdict for one chosen crack (pass 38): the single
+/// computation behind both the goal action text and the chunk's
+/// [`CrackInfo`], so the rendered surfaces can never disagree with
+/// the prose about the same crack. `gear_recent` is the last-two-
+/// releases gate (older recruiting never fills); scarcity is the
+/// chosen relic's known holdings against the tuned cap, with
+/// unknown stock counting as scarce.
+fn radshare_for(
+    input: &PlanInput<'_>,
+    gear: &str,
+    cand: &CrackCandidate,
+    pick: &FissurePick,
+) -> Option<String> {
+    let gear_norm = norm_name(gear);
+    let gear_recent = input.recent_gear.iter().any(|g| {
+        let g = norm_name(g);
+        g.contains(&gear_norm) || gear_norm.contains(&g)
+    });
+    let mpc = input
+        .tuning
+        .missions
+        .minutes_per_crack(&pick.fissure.mission_type, cand.batch);
+    let scarce = cand
+        .owned
+        .map(|s| s <= input.tuning.planner.scarce_max_held)
+        .unwrap_or(true);
+    radshare_verdict(
+        &input.tuning.planner,
+        cand.chance,
+        cand_rarity(input.tuning, cand),
+        mpc,
+        scarce,
+        gear_recent,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Goal cards (BRIEF §17)
 // ---------------------------------------------------------------------------
@@ -1165,27 +1208,7 @@ fn derive_action(
             text.push_str(&format!(" ({} traces)", cand.trace_cost));
         }
         // Squad verdict (pre-decided line, never a choice).
-        let gear_norm = norm_name(gear);
-        let gear_recent = input.recent_gear.iter().any(|g| {
-            let g = norm_name(g);
-            g.contains(&gear_norm) || gear_norm.contains(&g)
-        });
-        let mpc = input
-            .tuning
-            .missions
-            .minutes_per_crack(&pick.fissure.mission_type, cand.batch);
-        let scarce = cand
-            .owned
-            .map(|s| s <= input.tuning.planner.scarce_max_held)
-            .unwrap_or(true);
-        if let Some(v) = radshare_verdict(
-            &input.tuning.planner,
-            cand.chance,
-            cand_rarity(input.tuning, &cand),
-            mpc,
-            scarce,
-            gear_recent,
-        ) {
+        if let Some(v) = radshare_for(input, gear, &cand, &pick) {
             text.push_str(&format!(" {} {}", v, radshare_lfg(&cand.relic)));
         }
         return GoalAction {
@@ -1588,6 +1611,7 @@ fn build_chunks(
                 batch: cand.batch,
                 traces: cand.trace_cost,
                 covers: cand.coverage,
+                radshare: radshare_for(input, &gear, &cand, &pick),
                 fissure_node: pick.fissure.node.clone(),
                 fissure_mission: pick.fissure.mission_type.clone(),
                 steel_path: pick.fissure.is_hard,
@@ -2078,6 +2102,91 @@ mod tests {
             radshare_verdict(&t.planner, 25.33, Rarity::Common, 5.0, false, true),
             None,
             "cheap volume runs never share"
+        );
+    }
+
+    #[test]
+    fn radshare_verdict_reaches_crack_info() {
+        // Pass 38 (addendum #103): the verdict used to die in the
+        // goal action text, which no surface renders. It must now
+        // land on the chunk's CrackInfo — the structure both the
+        // queue row and the Hunt crack line render from — whenever
+        // it recommends sharing, and stay None when it does not.
+        let roster = Roster::from_json(
+            r#"[{"name": "A Prime", "vaulted": false, "type": "warframe",
+                  "parts": [{"name": "A Prime Blueprint"}]}]"#,
+        )
+        .unwrap();
+        let text = r#"{
+            "relics": {
+                "Lith A1": {"name": "Lith A1",
+                    "rewards": [{"name": "A Prime Blueprint", "chance": {"Intact": 2, "Radiant": 10}}],
+                    "vaulted": false, "sources": {}}
+            },
+            "sources": {}
+        }"#;
+        let tables = RelicTables::from_json(text).unwrap();
+        let mut world = WorldState::default();
+        world.fissures = vec![syn_fissure(
+            "Mantle (Earth)",
+            "Exterminate",
+            "Lith",
+            "2026-10-15T23:00:00Z",
+        )];
+        let owned = OwnedEquipment::empty();
+        let stock = RelicStock::Unknown;
+        let wants = vec!["A Prime Blueprint".to_owned()];
+        let now: DateTime<Utc> = "2026-10-15T21:00:00Z".parse().unwrap();
+        let mk = |recent: &HashSet<String>| {
+            plan(&PlanInput {
+                now,
+                world: &world,
+                owned: &owned,
+                wants: &wants,
+                roster: &roster,
+                relics: &tables,
+                stock: &stock,
+                part_stock: no_part_stock(),
+                unverified_parts: no_unverified(),
+                pins: &[],
+                recent_gear: recent,
+                steel_path_tiebreak: true,
+                completed_missions: &[],
+                item_names: test_item_names(),
+                tuning: &tuning(),
+            })
+        };
+        let recent: HashSet<String> = ["A Prime".to_owned()].into_iter().collect();
+        let p = mk(&recent);
+        let chunk = p
+            .chunks
+            .iter()
+            .find(|c| c.crack.is_some())
+            .expect("a live crack chunk exists");
+        let ci = chunk.crack.as_ref().unwrap();
+        let verdict = ci
+            .radshare
+            .as_ref()
+            .expect("recent + rare + scarce crack carries the verdict");
+        assert!(
+            verdict.contains("radshare"),
+            "verdict text reaches CrackInfo: {verdict}"
+        );
+        assert!(
+            p.goals[0].action.text.contains("Best as a radshare"),
+            "action text and CrackInfo agree: {}",
+            p.goals[0].action.text
+        );
+        let stale: HashSet<String> = HashSet::new();
+        let p2 = mk(&stale);
+        let chunk2 = p2
+            .chunks
+            .iter()
+            .find(|c| c.crack.is_some())
+            .expect("the crack itself still exists for old gear");
+        assert!(
+            chunk2.crack.as_ref().unwrap().radshare.is_none(),
+            "no verdict for gear outside the recent releases"
         );
     }
 

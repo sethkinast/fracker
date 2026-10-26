@@ -603,6 +603,14 @@ fn crack_queue_panel(plan: &Plan, ctx: &RenderContext<'_>) -> String {
             } else {
                 String::new()
             };
+            // Pass 38: the radshare marker rides the relic column —
+            // the same literal the Hunt crack line renders, present
+            // only when the verdict recommends sharing.
+            let rad = if ci.radshare.is_some() {
+                " <em class=rad>radshare</em>"
+            } else {
+                ""
+            };
             let mut class = String::from("row ch tick");
             if i == 0 {
                 class.push_str(" next");
@@ -614,7 +622,7 @@ fn crack_queue_panel(plan: &Plan, ctx: &RenderContext<'_>) -> String {
                 class.push_str(" dead");
             }
             h.push_str(&format!(
-                "<label class=\"{class}\">\n<input type=\"checkbox\" data-id=\"{id}\"{checked}>\n{icon}\n<div><b>{gear}</b>{next}<br><span class=\"sm {rarity}\">{part}{extra}</span></div>\n<div class=\"rl\"><b class=\"cy\">{relic}</b><br><span class=\"mut sm\">{refine}</span></div>\n</label>\n",
+                "<label class=\"{class}\">\n<input type=\"checkbox\" data-id=\"{id}\"{checked}>\n{icon}\n<div><b>{gear}</b>{next}<br><span class=\"sm {rarity}\">{part}{extra}</span></div>\n<div class=\"rl\"><b class=\"cy\">{relic}</b><br><span class=\"mut sm\">{refine}</span>{rad}</div>\n</label>\n",
                 class = class,
                 id = esc(&c.id),
                 checked = if proven { " checked" } else { "" },
@@ -626,6 +634,7 @@ fn crack_queue_panel(plan: &Plan, ctx: &RenderContext<'_>) -> String {
                 rarity = rarity_css(ci.rarity),
                 relic = esc(&ci.relic),
                 refine = esc(&ci.refinement),
+                rad = rad,
             ));
         }
     }
@@ -881,12 +890,21 @@ fn hunt_card_html(
             "<div class=\"gf\"><span class=\"fa vz\">◆ In Varzia · {ends} left</span></div>\n"
         ));
     } else if let Some(ci) = crack {
+        // Pass 38: the same `radshare` marker the crack queue row
+        // renders, appended to the crack line when the verdict
+        // recommends sharing.
+        let rad = if ci.radshare.is_some() {
+            " · <em class=rad>radshare</em>"
+        } else {
+            ""
+        };
         h.push_str(&format!(
-            "<div class=\"gf\"><span class=\"fa\">▸ <b>{relic}</b> ×{batch} · {refine} → {part}</span></div>\n",
+            "<div class=\"gf\"><span class=\"fa\">▸ <b>{relic}</b> ×{batch} · {refine} → {part}{rad}</span></div>\n",
             relic = esc(&ci.relic),
             batch = ci.batch,
             refine = esc(&refinement_abbrev(&ci.refinement)),
             part = esc(&short_part(&ci.part, &ci.gear)),
+            rad = rad,
         ));
     } else if let Some(d) = g
         .parts
@@ -1243,7 +1261,7 @@ h3{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--mut)
 .row{display:grid;align-items:center;gap:12px;padding:9px 0;border-top:1px solid #1c2330}.row:first-of-type{border-top:0}
 .ev{grid-template-columns:64px 1fr auto}.ch{grid-template-columns:40px 1fr auto auto}
 .tm{font-size:21px;font-weight:700;color:var(--tx)}.tm.hot{color:var(--amb)}.tm.warm{color:var(--gold)}
-.rl{text-align:right}.ch b{font-size:17px}.nx{font-style:normal;font-size:10px;letter-spacing:.12em;color:var(--cy);border:1px solid var(--cy);padding:0 5px;margin-left:8px}
+.rl{text-align:right}.ch b{font-size:17px}.nx{font-style:normal;font-size:10px;letter-spacing:.12em;color:var(--cy);border:1px solid var(--cy);padding:0 5px;margin-left:8px}.rad{font-style:normal;font-size:10px;letter-spacing:.12em;color:var(--gold);border:1px solid var(--gold);padding:0 5px}
 .ch.next{position:relative;background:linear-gradient(90deg,rgba(174,227,239,.07),transparent)}
 .ch.next::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--cy)}
 .mi{width:22px;height:22px;flex:none;position:relative;overflow:hidden;display:inline-flex;align-items:center;justify-content:center;font:700 12px Rajdhani,sans-serif;color:var(--gold);background:#0d1117;border:1px solid var(--line)}
@@ -2120,6 +2138,7 @@ mod tests {
                     batch: 4,
                     traces: 400,
                     covers: 2,
+                    radshare: None,
                     fissure_node: "Circulus (Lua)".to_owned(),
                     fissure_mission: "Survival".to_owned(),
                     steel_path: true,
@@ -2186,6 +2205,77 @@ mod tests {
             "no batch framing in the queue header (addendum #72)"
         );
         assert!(!p1.contains("long human title"), "mock phrasing replaces prose");
+    }
+
+    /// Pass 38 (addendum #103): the radshare verdict carried on
+    /// CrackInfo renders the same compact marker on the crack-queue
+    /// row and the Hunt card's crack line — and only there: no
+    /// verdict, no marker on either surface.
+    #[test]
+    fn radshare_marker_on_queue_row_and_hunt_line() {
+        let t = crate::tuning::Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let ctx = empty_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
+        let mk = |radshare: Option<String>| Plan {
+            goals: vec![goal(
+                "Caliban Prime",
+                "Caliban Prime Systems Blueprint",
+                false,
+                false,
+            )],
+            chunks: vec![Chunk {
+                id: "t2-crack-neo-c8".to_owned(),
+                tier: 2,
+                title: "title".to_owned(),
+                minutes_label: "~22m".to_owned(),
+                why: "why".to_owned(),
+                kind: "target crack".to_owned(),
+                expiry: None,
+                gear: Some("Caliban Prime".to_owned()),
+                crack: Some(CrackInfo {
+                    gear: "Caliban Prime".to_owned(),
+                    part: "Caliban Prime Systems Blueprint".to_owned(),
+                    relic: "Neo C8".to_owned(),
+                    refinement: "Radiant".to_owned(),
+                    chance: 10.0,
+                    rarity: crate::plan::Rarity::Rare,
+                    batch: 4,
+                    traces: 400,
+                    covers: 0,
+                    radshare,
+                    fissure_node: "Circulus (Lua)".to_owned(),
+                    fissure_mission: "Survival".to_owned(),
+                    steel_path: false,
+                    vaulted: false,
+                    unobtainable: false,
+                }),
+            }],
+            ..Default::default()
+        };
+        let verdict =
+            Some("Best as a radshare (solo ~10 cracks vs ~3 shared).".to_owned());
+        let html = render_plan(&mk(verdict), &ctx);
+        assert!(
+            page(&html, "p1").contains("<em class=rad>radshare</em>"),
+            "queue row carries the marker"
+        );
+        assert!(
+            page(&html, "p2").contains("<em class=rad>radshare</em>"),
+            "hunt crack line carries the marker"
+        );
+        let html = render_plan(&mk(None), &ctx);
+        assert!(
+            !page(&html, "p1").contains("radshare"),
+            "no verdict, no marker (queue)"
+        );
+        assert!(
+            !page(&html, "p2").contains("radshare"),
+            "no verdict, no marker (hunt)"
+        );
     }
 
     #[test]
