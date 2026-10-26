@@ -175,6 +175,20 @@ fn main() {
 /// round((g_f − φ_anchor)/P) + r in f's segment. Instances mapping
 /// to one slot must agree on truth — a disagreement is a stitch
 /// defect and is reported as such.
+///
+/// Pass 36: the session stitches through the background bundle
+/// machinery (progress-flushed bundles, one report per bundle),
+/// so the join is per report. A census frame's position inside
+/// its bundle is its ACCEPTED ordinal (tracked through the
+/// session's intake counter — intake-dropped frames never reach
+/// a bundle) minus the cumulative frame counts of the bundles
+/// before it.
+///
+/// `--simulate-live` inflates every census frame x8 with small
+/// deterministic brightness/gamma jitter (an animated-background
+/// proxy): the intake dedupe must collapse the copies and the
+/// session must produce the same distinct-held and 0 FA as the
+/// base run, with bundle processing off the intake path.
 #[allow(clippy::too_many_lines)]
 fn session_main(
     frames_dir: &std::path::Path,
@@ -205,11 +219,22 @@ fn session_main(
     }
     frame_order.sort();
     let truth_distinct: HashSet<&str> = cells.iter().map(|c| c.truth.as_str()).collect();
+    let argv: Vec<String> = std::env::args().collect();
+    let simulate_bg = argv.iter().any(|a| a == "--simulate-live-bg");
+    let simulate_live =
+        simulate_bg || argv.iter().any(|a| a == "--simulate-live");
     println!(
-        "session census: {} frames in order, {} cells, {} distinct truth",
+        "session census: {} frames in order, {} cells, {} distinct truth{}",
         frame_order.len(),
         cells.len(),
-        truth_distinct.len()
+        truth_distinct.len(),
+        if simulate_bg {
+            " [simulate-live-bg x8 — diagnostic]"
+        } else if simulate_live {
+            " [simulate-live x8]"
+        } else {
+            ""
+        }
     );
 
     let data = CaptureData::load(data_dir).expect("load capture data");
@@ -218,7 +243,6 @@ fn session_main(
     // CaptureData::context): --line-reader off reproduces the
     // pass-33 stack; --snap on runs the boundary-snap ablation;
     // --strip-offsets off isolates the strip phase policy.
-    let argv: Vec<String> = std::env::args().collect();
     if argv.iter().any(|a| a == "--line-reader") {
         ctx.line_reader = arg(&argv, "--line-reader").as_deref() != Some("off");
     }
@@ -235,37 +259,115 @@ fn session_main(
     let layout = ctx.layouts.get("parts").expect("parts layout").clone();
     let engine = TesseractCliEngine::probe(layout.clone()).expect("tesseract engine");
 
-    let t0 = Instant::now();
     let mut session = CaptureSession::new();
-    // Production dedupes consecutive identical frames by content
-    // signature, so a byte-identical repeat never reaches the
-    // stitch — and placement indices count FED frames, not CSV
-    // frames. Replicate the dedupe and remember the mapping (the
-    // HC census lists a byte-identical first-00/parts-00 pair).
-    let mut session_index: HashMap<usize, usize> = HashMap::new();
-    {
-        let mut prev_bytes: Option<Vec<u8>> = None;
-        let mut fed = 0usize;
-        for (ci, name) in frame_order.iter().enumerate() {
-            let bytes = std::fs::read(frames_dir.join(name))
-                .unwrap_or_else(|e| panic!("read frame {name}: {e}"));
-            if prev_bytes.as_deref() == Some(bytes.as_slice()) {
-                session_index.insert(ci, fed - 1);
+    // Pass 36: the background stitch path is the production path
+    // — run the gate through it (second engine instance, bundle
+    // dispatch in process_frame, blocking drain at finish).
+    session.set_stitch_engine(Box::new(
+        TesseractCliEngine::probe(layout.clone()).expect("tesseract stitch engine"),
+    ));
+
+    // Feed the frames, tracking each census frame's ACCEPTED
+    // ordinal (its index among the frames the intake let into
+    // the stitch pool). Base mode replicates production's
+    // byte-identical pre-dedupe: a byte-identical repeat never
+    // reaches process_frame at all, and its cells join the twin
+    // frame's slots. Simulate-live feeds every copy; a census
+    // frame whose first copy the intake dropped as a duplicate
+    // (only possible for the byte-identical twin) falls back to
+    // its twin's ordinal the same way.
+    let frame_bytes: Vec<Vec<u8>> = frame_order
+        .iter()
+        .map(|name| {
+            std::fs::read(frames_dir.join(name))
+                .unwrap_or_else(|e| panic!("read frame {name}: {e}"))
+        })
+        .collect();
+    let mut ordinal_of: HashMap<usize, usize> = HashMap::new();
+    // Pass 36 sim repair: EVERY accepted ordinal per census
+    // frame, not just the representative. A bundle boundary can
+    // split one position's accepted copies across two bundles;
+    // the representative sits in the first bundle while the
+    // second bundle's slots for the same position then join no
+    // cells (and the next position's representative lands in a
+    // later segment, orphaning the second bundle's head slots).
+    // The join below tries every accepted ordinal and takes the
+    // first placement whose slot key hits — a slot is the union
+    // of its instances, so any instance's placement is a valid
+    // attribution. Base mode has exactly one ordinal per frame
+    // and is unchanged.
+    let mut ordinals_of: HashMap<usize, Vec<usize>> = HashMap::new();
+    let t0 = Instant::now();
+    if simulate_live {
+        for (ci, bytes) in frame_bytes.iter().enumerate() {
+            let img = GrayImage::from_bytes(bytes).expect("decode frame png");
+            for copy in 0..8usize {
+                let f = if copy == 0 {
+                    img.clone()
+                } else if simulate_bg {
+                    jitter_frame_bg(&img, &layout, ci * 16 + copy)
+                } else {
+                    jitter_frame(&img, ci * 16 + copy)
+                };
+                let before = session.parts_frames_accepted();
+                session.process_frame(&ctx, &engine, &f);
+                if session.parts_frames_accepted() > before {
+                    ordinals_of.entry(ci).or_default().push(before as usize);
+                    if copy == 0 {
+                        ordinal_of.insert(ci, before as usize);
+                    }
+                } else if copy == 0 && ci > 0 && frame_bytes[ci] == frame_bytes[ci - 1] {
+                    if let Some(&o) = ordinal_of.get(&(ci - 1)) {
+                        ordinal_of.insert(ci, o);
+                    }
+                    if let Some(v) = ordinals_of.get(&(ci - 1)).cloned() {
+                        ordinals_of.insert(ci, v);
+                    }
+                }
+            }
+        }
+    } else {
+        let mut prev_bytes: Option<&[u8]> = None;
+        for (ci, bytes) in frame_bytes.iter().enumerate() {
+            if prev_bytes == Some(bytes.as_slice()) {
+                if let Some(&o) = ordinal_of.get(&(ci - 1)) {
+                    ordinal_of.insert(ci, o);
+                }
+                if let Some(v) = ordinals_of.get(&(ci - 1)).cloned() {
+                    ordinals_of.insert(ci, v);
+                }
                 continue;
             }
-            let img = GrayImage::from_bytes(&bytes).expect("decode frame png");
+            let img = GrayImage::from_bytes(bytes).expect("decode frame png");
+            let before = session.parts_frames_accepted();
             session.process_frame(&ctx, &engine, &img);
-            session_index.insert(ci, fed);
-            fed += 1;
+            if session.parts_frames_accepted() > before {
+                ordinal_of.insert(ci, before as usize);
+                ordinals_of.entry(ci).or_default().push(before as usize);
+            }
             prev_bytes = Some(bytes);
         }
     }
+    let feed_secs = t0.elapsed().as_secs_f64();
+    let t1 = Instant::now();
     session.finish_parts(&ctx, &engine);
+    let finish_secs = t1.elapsed().as_secs_f64();
     println!(
-        "session wall time: {:.1} s for {} frames",
-        t0.elapsed().as_secs_f64(),
+        "session wall time: feed {:.1} s, finish {:.1} s, total {:.1} s ({} census frames)",
+        feed_secs,
+        finish_secs,
+        feed_secs + finish_secs,
         frame_order.len()
     );
+    println!(
+        "intake: {} parts frames accepted, {} duplicates dropped, {} cap-refused",
+        session.parts_frames_accepted(),
+        session.parts_dupes_dropped(),
+        session.parts_frames_capped()
+    );
+    if let Some(fs) = session.failsafe_summary() {
+        println!("{fs}");
+    }
     println!(
         "coverage: {}",
         session.coverage_summary().unwrap_or_default()
@@ -280,29 +382,20 @@ fn session_main(
     // pass runs after the slot loop below via a second sweep;
     // see `implied_sweep` note in the gate section.
     let stock = session.stock().clone();
-
-    let reports = session.stitch_reports();
-    assert_eq!(
-        reports.len(),
-        1,
-        "census session must stitch in one finish (frame count under the flush cap)"
-    );
-    let report = &reports[0];
-    println!(
-        "session row pitch {:.2}, col pitch {:.2}",
-        report.plan.session_row_pitch, report.plan.session_col_pitch
-    );
-    for (si, seg) in report.plan.segments.iter().enumerate() {
-        println!(
-            "segment {si}: {} frames, row pitch {:.2}, col pitch {:.2}, relinked {}",
-            seg.frames.len(),
-            seg.pitch.row_pitch,
-            seg.pitch.col_pitch,
-            seg.relinked
-        );
+    // Pass 36 diagnostic: the resolved stock, join-free. The
+    // cell join below attributes slots to census cells; the
+    // stock is what production actually writes, and diffing it
+    // across modes isolates system behaviour from join noise.
+    for (name, count) in &stock.parts {
+        println!("STOCK {name} = {count}");
     }
 
-    // frame index -> (segment, scroll_rows). With
+    let reports = session.stitch_reports();
+    assert!(
+        !reports.is_empty(),
+        "census session produced no stitch reports"
+    );
+    // Ordinal -> (report, segment, scroll_rows). With
     // --legibility-join (the HC census's convention: its rows are
     // content rows assigned by name legibility in the nominal
     // layout cell, per hc_truth.py / HC_REPORT), a frame whose
@@ -314,47 +407,77 @@ fn session_main(
     // census numbers rows on the fitted lattice itself, so it
     // joins with delta 0 throughout (verified: zero truth
     // disagreements across all 495 cells).
-    let mut placement: HashMap<usize, (usize, i32)> = HashMap::new();
-    for (si, seg) in report.plan.segments.iter().enumerate() {
-        let phi_anchor = seg.frames.first().map(|p| p.phase).unwrap_or(0.0);
-        for p in &seg.frames {
-            let sr = ((p.g - phi_anchor) / seg.pitch.row_pitch).round() as i32;
-            let delta = if legibility_join && p.phase > 0.235 * seg.pitch.row_pitch {
-                -1
-            } else {
-                0
-            };
-            placement.insert(p.frame, (si, sr + delta));
+    let mut placement: HashMap<usize, (usize, usize, i32)> = HashMap::new();
+    let mut bundle_base = 0usize;
+    for (ri, report) in reports.iter().enumerate() {
+        println!(
+            "bundle {ri}: {} frames; session row pitch {:.2}, col pitch {:.2}",
+            report.plan.frame_pitches.len(),
+            report.plan.session_row_pitch,
+            report.plan.session_col_pitch
+        );
+        for (si, seg) in report.plan.segments.iter().enumerate() {
             println!(
-                "frame {} seg {si} phase {:.1} g {:.1} scroll_rows {sr} delta {delta}",
-                p.frame, p.phase, p.g
+                "  segment {si}: {} frames, row pitch {:.2}, col pitch {:.2}, relinked {}",
+                seg.frames.len(),
+                seg.pitch.row_pitch,
+                seg.pitch.col_pitch,
+                seg.relinked
             );
+            let phi_anchor = seg.frames.first().map(|p| p.phase).unwrap_or(0.0);
+            for p in &seg.frames {
+                let sr = ((p.g - phi_anchor) / seg.pitch.row_pitch).round() as i32;
+                let delta = if legibility_join && p.phase > 0.235 * seg.pitch.row_pitch {
+                    -1
+                } else {
+                    0
+                };
+                let ord = bundle_base + p.frame;
+                placement.insert(ord, (ri, si, sr + delta));
+                println!(
+                    "  frame ordinal {} seg {si} phase {:.1} g {:.1} scroll_rows {sr} delta {delta}",
+                    ord, p.phase, p.g
+                );
+            }
         }
+        bundle_base += report.plan.frame_pitches.len();
     }
-    // slot key -> report slot index
-    let mut slot_idx: HashMap<(usize, i32, u32), usize> = HashMap::new();
-    for (i, s) in report.slots.iter().enumerate() {
-        slot_idx.insert((s.segment, s.row, s.col), i);
+    // (report, segment, row, col) -> (report, slot index)
+    let mut slot_idx: HashMap<(usize, usize, i32, u32), (usize, usize)> = HashMap::new();
+    for (ri, report) in reports.iter().enumerate() {
+        for (i, s) in report.slots.iter().enumerate() {
+            slot_idx.insert((ri, s.segment, s.row, s.col), (ri, i));
+        }
     }
 
     // Join cells to slots.
-    let mut slot_truths: HashMap<usize, HashSet<String>> = HashMap::new();
-    let mut slot_cells: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut slot_truths: HashMap<(usize, usize), HashSet<String>> = HashMap::new();
+    let mut slot_cells: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
     let mut unjoined = 0usize;
     for (ci, cell) in cells.iter().enumerate() {
         let fi_csv = frame_order.iter().position(|f| f == &cell.frame).unwrap();
-        let fi = session_index[&fi_csv];
-        let Some(&(si, sr)) = placement.get(&fi) else {
-            unjoined += 1;
-            continue;
+        let candidates: &[usize] = match ordinals_of.get(&fi_csv) {
+            Some(v) => v,
+            None => match ordinal_of.get(&fi_csv) {
+                Some(o) => std::slice::from_ref(o),
+                None => &[],
+            },
         };
-        let key = (si, sr + cell.row, cell.col);
-        match slot_idx.get(&key) {
-            Some(&s) => {
+        let mut joined = false;
+        for &ord in candidates {
+            let Some(&(ri, si, sr)) = placement.get(&ord) else {
+                continue;
+            };
+            let key = (ri, si, sr + cell.row, cell.col);
+            if let Some(&s) = slot_idx.get(&key) {
                 slot_truths.entry(s).or_default().insert(cell.truth.clone());
                 slot_cells.entry(s).or_default().push(ci);
+                joined = true;
+                break;
             }
-            None => unjoined += 1,
+        }
+        if !joined {
+            unjoined += 1;
         }
     }
     if unjoined > 0 {
@@ -368,75 +491,78 @@ fn session_main(
     let mut cell_count_ok = 0usize;
     let mut cell_count_total = 0usize;
     // frame -> correctly-held slots it contributed a usable instance to
-    let mut frame_alive: HashMap<usize, HashSet<usize>> = HashMap::new();
+    let mut frame_alive: HashMap<usize, HashSet<(usize, usize)>> = HashMap::new();
 
-    for (s, slot) in report.slots.iter().enumerate() {
-        let held = if slot.coverage == fracker::capture::SlotCoverage::Held {
-            slot.result.as_ref().and_then(|r| r.matched.clone())
-        } else {
-            None
-        };
-        let truths = slot_truths.get(&s);
-        match (&held, truths) {
-            (Some(h), Some(ts)) if ts.len() == 1 => {
-                let t = ts.iter().next().unwrap();
-                if h == t {
-                    distinct_correct.insert(t.clone());
-                    // counts: resolved session count vs truth
-                    let resolved = stock.parts.get(h).copied().unwrap_or(1);
-                    let cell_list = &slot_cells[&s];
-                    let mut counts: Vec<u32> =
-                        cell_list.iter().map(|&ci| cells[ci].truth_count).collect();
-                    counts.sort_unstable();
-                    let truth_mode = counts[counts.len() / 2];
-                    slot_count_total += 1;
-                    if resolved == truth_mode {
-                        slot_count_ok += 1;
-                    }
-                    for &ci in cell_list {
-                        cell_count_total += 1;
-                        if resolved == cells[ci].truth_count {
-                            cell_count_ok += 1;
+    for (ri, report) in reports.iter().enumerate() {
+        for (s, slot) in report.slots.iter().enumerate() {
+            let key = (ri, s);
+            let held = if slot.coverage == fracker::capture::SlotCoverage::Held {
+                slot.result.as_ref().and_then(|r| r.matched.clone())
+            } else {
+                None
+            };
+            let truths = slot_truths.get(&key);
+            match (&held, truths) {
+                (Some(h), Some(ts)) if ts.len() == 1 => {
+                    let t = ts.iter().next().unwrap();
+                    if h == t {
+                        distinct_correct.insert(t.clone());
+                        // counts: resolved session count vs truth
+                        let resolved = stock.parts.get(h).copied().unwrap_or(1);
+                        let cell_list = &slot_cells[&key];
+                        let mut counts: Vec<u32> =
+                            cell_list.iter().map(|&ci| cells[ci].truth_count).collect();
+                        counts.sort_unstable();
+                        let truth_mode = counts[counts.len() / 2];
+                        slot_count_total += 1;
+                        if resolved == truth_mode {
+                            slot_count_ok += 1;
                         }
-                        let fi = frame_order
-                            .iter()
-                            .position(|f| f == &cells[ci].frame)
-                            .unwrap();
-                        // usable contribution is approximated by
-                        // the cell being fully in its frame's grid;
-                        // census cells are all in-grid sightings.
-                        frame_alive.entry(fi).or_default().insert(s);
+                        for &ci in cell_list {
+                            cell_count_total += 1;
+                            if resolved == cells[ci].truth_count {
+                                cell_count_ok += 1;
+                            }
+                            let fi = frame_order
+                                .iter()
+                                .position(|f| f == &cells[ci].frame)
+                                .unwrap();
+                            // usable contribution is approximated by
+                            // the cell being fully in its frame's grid;
+                            // census cells are all in-grid sightings.
+                            frame_alive.entry(fi).or_default().insert(key);
+                        }
+                    } else {
+                        false_accepts.push(format!(
+                            "slot b{ri} seg{} row{} col{}: held {h:?}, truth {t:?} (cells: {}) [band={:?} line={:?} verdict={:?} via={:?} refuse={:?} glyph={:.2} mesh={:.2}]",
+                            slot.segment,
+                            slot.row,
+                            slot.col,
+                            cell_list_str(&slot_cells[&key], &cells, &frame_order),
+                            slot.band_held,
+                            slot.line_held,
+                            slot.form_verdict,
+                            slot.held_via,
+                            slot.refuse_reason,
+                            slot.glyph_score,
+                            slot.mesh_score
+                        ));
                     }
-                } else {
+                }
+                (Some(h), Some(ts)) => {
                     false_accepts.push(format!(
-                        "slot seg{} row{} col{}: held {h:?}, truth {t:?} (cells: {}) [band={:?} line={:?} verdict={:?} via={:?} refuse={:?} glyph={:.2} mesh={:.2}]",
-                        slot.segment,
-                        slot.row,
-                        slot.col,
-                        cell_list_str(&slot_cells[&s], &cells, &frame_order),
-                        slot.band_held,
-                        slot.line_held,
-                        slot.form_verdict,
-                        slot.held_via,
-                        slot.refuse_reason,
-                        slot.glyph_score,
-                        slot.mesh_score
+                        "slot b{ri} seg{} row{} col{}: held {h:?} but its cells DISAGREE on truth {ts:?} — stitch defect",
+                        slot.segment, slot.row, slot.col
                     ));
                 }
+                (Some(h), None) => {
+                    unmapped_held.push(format!(
+                        "slot b{ri} seg{} row{} col{}: held {h:?}, no census cell maps here",
+                        slot.segment, slot.row, slot.col
+                    ));
+                }
+                _ => {}
             }
-            (Some(h), Some(ts)) => {
-                false_accepts.push(format!(
-                    "slot seg{} row{} col{}: held {h:?} but its cells DISAGREE on truth {ts:?} — stitch defect",
-                    slot.segment, slot.row, slot.col
-                ));
-            }
-            (Some(h), None) => {
-                unmapped_held.push(format!(
-                    "slot seg{} row{} col{}: held {h:?}, no census cell maps here",
-                    slot.segment, slot.row, slot.col
-                ));
-            }
-            _ => {}
         }
     }
 
@@ -445,45 +571,49 @@ fn session_main(
     {
         let mut via_counts: std::collections::BTreeMap<String, usize> =
             std::collections::BTreeMap::new();
-        for slot in &report.slots {
-            if slot.coverage == fracker::capture::SlotCoverage::Held {
-                *via_counts.entry(format!("{:?}", slot.held_via)).or_default() += 1;
+        for report in reports {
+            for slot in &report.slots {
+                if slot.coverage == fracker::capture::SlotCoverage::Held {
+                    *via_counts.entry(format!("{:?}", slot.held_via)).or_default() += 1;
+                }
             }
         }
         println!("held-slot arbitration attribution: {via_counts:?}");
-        for (s, slot) in report.slots.iter().enumerate() {
-            let Some(implied) = &slot.glyph_implied else {
-                continue;
-            };
-            let own_correct = slot_truths
-                .get(&s)
-                .map(|truths| {
-                    let h = slot.result.as_ref().and_then(|r| r.matched.as_deref());
-                    truths.len() == 1 && h == truths.iter().next().map(|x| x.as_str())
-                })
-                .unwrap_or(false);
-            if !own_correct {
-                println!(
-                    "glyph-implied {implied:?} from seg{} row{} col{}: implying slot not itself correct — not counted",
-                    slot.segment, slot.row, slot.col
-                );
-            } else if truth_distinct.contains(implied.as_str()) {
-                if distinct_correct.insert(implied.clone()) {
+        for (ri, report) in reports.iter().enumerate() {
+            for (s, slot) in report.slots.iter().enumerate() {
+                let Some(implied) = &slot.glyph_implied else {
+                    continue;
+                };
+                let own_correct = slot_truths
+                    .get(&(ri, s))
+                    .map(|truths| {
+                        let h = slot.result.as_ref().and_then(|r| r.matched.as_deref());
+                        truths.len() == 1 && h == truths.iter().next().map(|x| x.as_str())
+                    })
+                    .unwrap_or(false);
+                if !own_correct {
                     println!(
-                        "glyph-implied distinct gain: {implied:?} (from seg{} row{} col{})",
+                        "glyph-implied {implied:?} from b{ri} seg{} row{} col{}: implying slot not itself correct — not counted",
                         slot.segment, slot.row, slot.col
                     );
+                } else if truth_distinct.contains(implied.as_str()) {
+                    if distinct_correct.insert(implied.clone()) {
+                        println!(
+                            "glyph-implied distinct gain: {implied:?} (from b{ri} seg{} row{} col{})",
+                            slot.segment, slot.row, slot.col
+                        );
+                    } else {
+                        println!(
+                            "glyph-implied {implied:?} from b{ri} seg{} row{} col{}: twin already held directly — corroborated, no gain",
+                            slot.segment, slot.row, slot.col
+                        );
+                    }
                 } else {
                     println!(
-                        "glyph-implied {implied:?} from seg{} row{} col{}: twin already held directly — corroborated, no gain",
+                        "glyph-implied {implied:?} from b{ri} seg{} row{} col{}: twin absent from census truth — UNVERIFIABLE, not counted",
                         slot.segment, slot.row, slot.col
                     );
                 }
-            } else {
-                println!(
-                    "glyph-implied {implied:?} from seg{} row{} col{}: twin absent from census truth — UNVERIFIABLE, not counted",
-                    slot.segment, slot.row, slot.col
-                );
             }
         }
     }
@@ -533,6 +663,49 @@ fn session_main(
     }
 }
 
+/// Pass-36 simulation jitter: a deterministic per-copy
+/// gain/gamma perturbation (gain 0.960–1.040, gamma 0.960–1.040,
+/// hashed from the copy's seed) standing in for the inventory
+/// screens' animated background.
+/// Diagnostic variant of [`jitter_frame`]: the gain/gamma
+/// jitter applies only OUTSIDE the parts grid. Production
+/// duplicate frames are pixel-identical inside the grid (the
+/// game re-renders the same cell bitmaps — Seth's diagnosis of
+/// the incident run was frames of page 1 identical); only the
+/// background animates. `--simulate-live-bg` measures the
+/// hotfix against that faithful duplicate model. The brief's
+/// gate remains the whole-frame `--simulate-live`; this mode
+/// exists to localise a gate failure, not to replace the gate.
+fn jitter_frame_bg(img: &GrayImage, layout: &fracker::ocr::Layout, seed: usize) -> GrayImage {
+    let mut out = jitter_frame(img, seed);
+    let sx = img.width as f32 / layout.ref_width as f32;
+    let sy = img.height as f32 / layout.ref_height as f32;
+    let x0 = (layout.x0 * sx) as u32;
+    let y0 = (layout.y0 * sy) as u32;
+    let x1 = ((layout.x0 + layout.cols as f32 * layout.cell_w) * sx) as u32;
+    let y1 = ((layout.y0 + layout.rows as f32 * layout.cell_h) * sy) as u32;
+    for y in y0..y1.min(img.height) {
+        for x in x0..x1.min(img.width) {
+            out.set(x, y, img.get(x, y));
+        }
+    }
+    out
+}
+
+fn jitter_frame(img: &GrayImage, seed: usize) -> GrayImage {
+    let mut h = (seed as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xA076_1D64_78BD_642F;
+    h ^= h << 13;
+    h ^= h >> 7;
+    h ^= h << 17;
+    let gain = 0.96 + ((h % 81) as f32) / 1000.0;
+    let gamma = 0.96 + (((h >> 8) % 81) as f32) / 1000.0;
+    let mut out = img.clone();
+    for p in &mut out.pixels {
+        let v = (*p as f32) / 255.0;
+        *p = (255.0 * v.powf(gamma) * gain).clamp(0.0, 255.0) as u8;
+    }
+    out
+}
 #[derive(Clone)]
 struct SessionCell {
     frame: String,

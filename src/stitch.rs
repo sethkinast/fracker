@@ -1476,6 +1476,39 @@ mod tests {
     }
 
     #[test]
+    fn rank_instances_caps_and_prefers_margin() {
+        // Six usable sightings of one cell, margins ascending
+        // with index; the cap keeps the three largest-margin
+        // instances, best first (pass 36 reader cap ranking).
+        let pano = panorama(4);
+        let frame = frame_at(&pano, 0.0);
+        let frames = [frame];
+        let refs: Vec<&GrayImage> = frames.iter().collect();
+        let slot = Slot {
+            segment: 0,
+            row: 0,
+            col: 0,
+            instances: (0..6)
+                .map(|i| Instance {
+                    frame: 0,
+                    fx: 20.0,
+                    fy: 60.0,
+                    margin: 4.0 + 4.0 * i as f32,
+                    link_residual: 0.0,
+                })
+                .collect(),
+        };
+        let ranked = rank_instances(&slot, &refs, 100, 52, 3);
+        assert_eq!(ranked.len(), 3);
+        assert_eq!(ranked[0], 5, "largest margin first");
+        assert_eq!(ranked[1], 4);
+        assert_eq!(ranked[2], 3);
+        // Under the cap, everything usable comes back.
+        let all = rank_instances(&slot, &refs, 100, 52, 8);
+        assert_eq!(all.len(), 6);
+    }
+
+    #[test]
     fn unfitted_frames_keep_layout_geometry() {
         // Blank frames carry no periodic signal: no fit, layout
         // pitch, phase 0, and no links — each falls back to its own
@@ -1612,4 +1645,277 @@ pub fn canonical_crop(
         median: false,
         worst_mad: worst,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Pass 36: intake viewport fingerprints + instance ranking.
+//
+// The live PipeWire feed delivers frames far faster than the
+// viewport changes (Seth's 2026-10-25 run: 31 frames of page 1,
+// a transition, 16 of page 2), and the inventory screens' slight
+// animated background means no two frames are ever pixel-equal,
+// so exact-signature dedupe never fires. The intake therefore
+// compares frames on the GRID REGION in gradient form — the
+// domain the linker already correlates in, where the background
+// shimmer (smooth, low-gradient) all but vanishes and the tile
+// content (icons, text, borders) carries the signal.
+// ---------------------------------------------------------------------------
+
+/// Thumbnail blocks per cell in a [`ViewportPrint`]: 10 across,
+/// 5 down. A block is ~18x37 page px at 1440p — coarse enough
+/// that a few px of phase difference between two sightings of
+/// one viewport barely moves a block mean, fine enough that a
+/// different item in the cell changes most blocks.
+pub const THUMB_W: usize = 10;
+pub const THUMB_H: usize = 5;
+/// Per-cell thumbnail distance (mean absolute difference of
+/// soft-normalised block means) under which two sightings of a
+/// cell count as the same content. Identical pixels give 0; the
+/// animation-proxy jitter used by the pass-36 simulation gate
+/// (gamma/gain a few percent) measures ~0.05; a different item in
+/// the cell measures ~0.5 and up.
+pub const CELL_SAME_DIST: f32 = 0.30;
+
+/// A frame's comparable fingerprint over the parts grid: one
+/// gradient thumbnail per cell, plus the grid's gradient row
+/// profile (the displacement estimator's input).
+#[derive(Debug, Clone)]
+pub struct ViewportPrint {
+    pub width: u32,
+    pub height: u32,
+    /// One thumbnail per grid cell, row-major, each soft-
+    /// normalised (divided by its mean + 1) so a global gain or
+    /// gamma shift barely moves it while a flat cell stays flat.
+    pub cells: Vec<[f32; THUMB_W * THUMB_H]>,
+    /// Gradient row profile over the whole page (see
+    /// [`row_profile`]); only the grid span is compared.
+    pub profile: Vec<f32>,
+    /// Grid span in page rows: [grid_y0, grid_y1).
+    pub grid_y0: usize,
+    pub grid_y1: usize,
+}
+
+/// Fingerprint `frame`'s grid region for intake comparison.
+pub fn viewport_print(frame: &GrayImage, layout: &Layout) -> ViewportPrint {
+    let rect = GridRect::of(layout, frame);
+    let gx0 = rect.x0.max(0.0) as u32;
+    let gy0 = rect.y0.max(0.0) as u32;
+    let gx1 = ((rect.x0 + rect.w) as u32).min(frame.width);
+    let gy1 = ((rect.y0 + rect.h) as u32).min(frame.height);
+    let profile = row_profile(frame, &rect);
+    let mut cells = Vec::new();
+    if gx1 > gx0 && gy1 > gy0 {
+        let region = frame.crop(gx0, gy0, gx1 - gx0, gy1 - gy0);
+        let grad = gradient_image(&region);
+        let cw = rect.w / layout.cols.max(1) as f32;
+        let ch = rect.h / layout.rows.max(1) as f32;
+        for r in 0..layout.rows {
+            for c in 0..layout.cols {
+                // Cell box in gradient-image coordinates.
+                let bx0 = (rect.x0 + c as f32 * cw) as i32 - gx0 as i32;
+                let by0 = (rect.y0 + r as f32 * ch) as i32 - gy0 as i32;
+                let bx1 = (rect.x0 + (c + 1) as f32 * cw) as i32 - gx0 as i32;
+                let by1 = (rect.y0 + (r + 1) as f32 * ch) as i32 - gy0 as i32;
+                let mut thumb = [0.0f32; THUMB_W * THUMB_H];
+                for ty in 0..THUMB_H {
+                    for tx in 0..THUMB_W {
+                        let sx0 = bx0 + (tx as i32 * (bx1 - bx0)) / THUMB_W as i32;
+                        let sx1 = bx0 + ((tx + 1) as i32 * (bx1 - bx0)) / THUMB_W as i32;
+                        let sy0 = by0 + (ty as i32 * (by1 - by0)) / THUMB_H as i32;
+                        let sy1 = by0 + ((ty + 1) as i32 * (by1 - by0)) / THUMB_H as i32;
+                        let (mut sum, mut n) = (0.0f32, 0u32);
+                        for y in sy0.max(0)..sy1.min(grad.height as i32) {
+                            for x in sx0.max(0)..sx1.min(grad.width as i32) {
+                                sum += grad.get(x as u32, y as u32) as f32;
+                                n += 1;
+                            }
+                        }
+                        thumb[ty * THUMB_W + tx] = if n > 0 { sum / n as f32 } else { 0.0 };
+                    }
+                }
+                let mean = thumb.iter().sum::<f32>() / thumb.len() as f32;
+                let denom = mean + 1.0;
+                for v in &mut thumb {
+                    *v /= denom;
+                }
+                cells.push(thumb);
+            }
+        }
+    }
+    ViewportPrint {
+        width: frame.width,
+        height: frame.height,
+        cells,
+        profile,
+        grid_y0: gy0 as usize,
+        grid_y1: gy1 as usize,
+    }
+}
+
+/// How many of `b`'s cells carry the same content as `a`'s, cell
+/// by cell. Prints of different geometry are incomparable
+/// (returns 0).
+pub fn cells_matching(a: &ViewportPrint, b: &ViewportPrint) -> usize {
+    if a.width != b.width || a.height != b.height || a.cells.len() != b.cells.len() {
+        return 0;
+    }
+    a.cells
+        .iter()
+        .zip(b.cells.iter())
+        .filter(|(ta, tb)| {
+            let d: f32 = ta
+                .iter()
+                .zip(tb.iter())
+                .map(|(x, y)| (x - y).abs())
+                .sum::<f32>()
+                / ta.len() as f32;
+            d <= CELL_SAME_DIST
+        })
+        .count()
+}
+
+/// Same viewport: at least 90% of cells carry the same content
+/// and at most 3 cells differ — the brief's "most cells
+/// unchanged", tolerating one hovered cell and a couple of
+/// shimmer-heavy cells, never a scrolled-by-a-row frame (every
+/// cell's content changes) or a different page.
+pub fn same_viewport(a: &ViewportPrint, b: &ViewportPrint) -> bool {
+    let total = a.cells.len();
+    if total == 0 || b.cells.len() != total || a.width != b.width || a.height != b.height {
+        return false;
+    }
+    let m = cells_matching(a, b);
+    m >= total.saturating_sub(3) && m * 10 >= total * 9
+}
+
+/// Estimate the scroll displacement from print `a` to print `b`
+/// by correlating their gradient row profiles over the grid span
+/// (the intake's coarse linkability check — the bundle's
+/// `plan_session` re-measures every displacement exactly, so an
+/// alias error here only shifts a flush boundary by a row or
+/// two). Among near-ties the smallest |dy| wins (scroll steps
+/// between accepted frames are usually well under a viewport;
+/// underestimating progress delays a flush slightly, never
+/// corrupts one). Returns 0 when the profiles do not correlate.
+pub fn estimate_scroll_dy(a: &ViewportPrint, b: &ViewportPrint, pitch: f32) -> f32 {
+    if a.profile.len() != b.profile.len() || pitch <= 0.0 {
+        return 0.0;
+    }
+    let (y0, y1) = (a.grid_y0, a.grid_y1.min(b.grid_y1).min(a.profile.len()));
+    if y1 <= y0 + 24 {
+        return 0.0;
+    }
+    let max_dy = ((3.0 * pitch) as i32).min((y1 - y0) as i32 - 24);
+    let mut best = (f32::MIN, 0i32);
+    let mut scored: Vec<(i32, f32)> = Vec::new();
+    for dy in -max_dy..=max_dy {
+        // Pairs (a[y], b[y - dy]) — the grid_ncc convention.
+        let (y0i, y1i) = (y0 as i32, y1 as i32);
+        let lo = y0i.max(y0i + dy) as usize;
+        let hi = y1i.min(y1i + dy) as usize;
+        let (mut sa, mut sb, mut saa, mut sbb, mut sab, mut n) =
+            (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
+        for y in lo..hi {
+            let va = a.profile[y] as f64;
+            let vb = b.profile[(y as i32 - dy) as usize] as f64;
+            sa += va;
+            sb += vb;
+            saa += va * va;
+            sbb += vb * vb;
+            sab += va * vb;
+            n += 1.0;
+        }
+        if n < 24.0 {
+            continue;
+        }
+        let cov = sab - sa * sb / n;
+        let va = (saa - sa * sa / n).max(0.0);
+        let vb = (sbb - sb * sb / n).max(0.0);
+        let ncc = if va > 0.0 && vb > 0.0 {
+            (cov / (va.sqrt() * vb.sqrt())) as f32
+        } else {
+            0.0
+        };
+        scored.push((dy, ncc));
+        if ncc > best.0 {
+            best = (ncc, dy);
+        }
+    }
+    if best.0 < 0.25 {
+        return 0.0;
+    }
+    let mut pick = best.1;
+    for (dy, ncc) in &scored {
+        if best.0 - ncc <= 0.02 && dy.abs() < pick.abs() {
+            pick = *dy;
+        }
+    }
+    pick as f32
+}
+
+/// Rank a slot's usable instances by the canonical criteria —
+/// viewport-edge margin, gain agreement with the pool's median
+/// mean, link residual (the ordering [`canonical_crop`] degrades
+/// to) — gain-inliers first, and return the indices (into
+/// `slot.instances`) of the best `cap`. The readers consume the
+/// canonical crop plus at most this many instance crops per slot
+/// (pass 36): at live density (~16 sightings/slot) the uncapped
+/// instance list was the finalize cost driver.
+pub fn rank_instances(
+    slot: &Slot,
+    frames: &[&GrayImage],
+    w: u32,
+    h: u32,
+    cap: usize,
+) -> Vec<usize> {
+    let usable: Vec<usize> = (0..slot.instances.len())
+        .filter(|&i| slot.instances[i].usable())
+        .collect();
+    if usable.len() <= cap {
+        return usable;
+    }
+    let crops: Vec<GrayImage> = usable
+        .iter()
+        .map(|&i| {
+            let inst = &slot.instances[i];
+            crop_integer(frames[inst.frame], inst.fx, inst.fy, w, h)
+        })
+        .collect();
+    let means: Vec<f32> = crops.iter().map(image_mean).collect();
+    let mut sorted_means = means.clone();
+    sorted_means.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let med_mean = sorted_means[sorted_means.len() / 2].max(1.0);
+    // Rank positions within `usable` by the canonical criteria.
+    let rank_key = |pos: usize| -> (f32, f32, f32) {
+        let inst = &slot.instances[usable[pos]];
+        (
+            -inst.margin,
+            (means[pos] - med_mean).abs(),
+            inst.link_residual,
+        )
+    };
+    let mut inliers: Vec<usize> = (0..usable.len())
+        .filter(|&i| means[i] >= GAIN_LO * med_mean && means[i] <= GAIN_HI * med_mean)
+        .collect();
+    if inliers.is_empty() {
+        inliers = (0..usable.len()).collect();
+    }
+    let mut rest: Vec<usize> = (0..usable.len())
+        .filter(|i| !inliers.contains(i))
+        .collect();
+    let by_key = |x: &usize, y: &usize| {
+        let (a, b) = (rank_key(*x), rank_key(*y));
+        a.0.partial_cmp(&b.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+    };
+    inliers.sort_by(by_key);
+    rest.sort_by(by_key);
+    inliers
+        .into_iter()
+        .chain(rest)
+        .take(cap)
+        .map(|pos| usable[pos])
+        .collect()
 }
