@@ -1909,3 +1909,47 @@ it refines the brief where they disagree. For the next worker pass.
     No production code changed and v0.5.31's binary is
     unaffected; see docs/thirty-seventh-pass.md
     §Correction.
+
+103. **The relic browse screen imported the whole catalogue,
+    and the radshare verdict was computed but never rendered
+    (pass 38, shipped as v0.5.32).** Two loop-stage fixes.
+    (A) Relic owned-gate: the inventory BROWSE screen renders
+    unowned relics faded with an eye badge top-left; their
+    names read cleanly, so under the count contract (no
+    label = x1) every unowned tile a browse scroll passed
+    entered stock as x1 Intact, and a browse finalize
+    replaced the relic bucket wholesale. RESOLVED:
+    ocr::relic_owned_gate runs in read_cells on relic frames
+    (and per page in ingest_folder), after validation. A
+    frame is catalogue-type when any tile carries a clear
+    eye badge (template NCC >= 0.60 against the badge
+    measured from Seth's 2026-10-26 browse screenshot;
+    unowned 0.81-0.97, owned -0.10..+0.07). Inside a
+    catalogue frame a held tile is excluded only under the
+    full conjunction: no parsed count label, a clear eye on
+    the tile itself, and an icon highlight (icon region
+    p90; strip: owned 122-124, unowned 49-55) in the dim
+    cluster of a per-frame Otsu split that must separate
+    >= 1.35x — or, with no clean split, below 70% of the
+    session's running owned-brightness reference
+    (CaptureSession carries it; cold start fails safe).
+    Exclusions set CellResult::gate_excluded and are listed
+    by name in the finalize log. Outside catalogue frames
+    the read path is bit-identical. Browse-strip verdicts
+    through the production read path: 10 owned kept, 12
+    unowned excluded, exact. (B) Radshare rendering:
+    radshare_verdict() fed only GoalAction.text, which no
+    surface renders — build_chunks bound it as _action_text
+    and dropped it. RESOLVED: one helper (radshare_for)
+    serves derive_action and build_chunks; CrackInfo
+    carries the verdict; the crack-queue row and the Hunt
+    card's crack line render the same compact `radshare`
+    marker (gold .rad tag) exactly when a verdict is
+    present. Gates: full suite 330 passed / 0 failed green including
+    9 new tests (gate evidence legs, session-reference
+    fallback, read-path wiring, strip verdicts, verdict
+    reaches CrackInfo, marker on both surfaces);
+    cargo build --release --locked --offline green
+    pre-tag. Live verification of the gate is post-ship
+    (Seth's next browse sync). Details:
+    docs/thirty-eighth-pass.md.
