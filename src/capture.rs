@@ -3752,8 +3752,46 @@ mod tests {
                 let y0 = (rect.y0 + r as f32 * ch) as u32;
                 let x1 = (rect.x0 + (c + 1) as f32 * cw) as u32;
                 let y1 = (rect.y0 + (r + 1) as f32 * ch) as u32;
-                for by in 0..3u32 {
-                    for bx in 0..5u32 {
+                // Block-band boundaries are seeded per cell:
+                // real item art puts its edges at varied
+                // heights per cell, and the fixture must too —
+                // borders at fixed fractions of every cell are
+                // pitch-periodic, so they fold coherently and
+                // fight the name band for the lattice fit, and
+                // they comb the row profile the scroll
+                // estimator reads (pass 37 correction).
+                let mut bst = seed
+                    ^ ((r as u64) << 24)
+                    ^ ((c as u64) << 16)
+                    ^ 0x2545_F491;
+                let row_jit = [
+                    (xorshift(&mut bst) % 11) as i32 - 5,
+                    (xorshift(&mut bst) % 11) as i32 - 5,
+                ];
+                let col_jit = [
+                    (xorshift(&mut bst) % 9) as i32 - 4,
+                    (xorshift(&mut bst) % 9) as i32 - 4,
+                    (xorshift(&mut bst) % 9) as i32 - 4,
+                    (xorshift(&mut bst) % 9) as i32 - 4,
+                ];
+                let mut xb = vec![x0];
+                for bx in 1..5u32 {
+                    xb.push(
+                        (x0 + bx * (x1 - x0) / 5)
+                            .saturating_add_signed(col_jit[(bx - 1) as usize]),
+                    );
+                }
+                xb.push(x1);
+                let mut yb = vec![y0];
+                for by in 1..3u32 {
+                    yb.push(
+                        (y0 + by * (y1 - y0) / 3)
+                            .saturating_add_signed(row_jit[(by - 1) as usize]),
+                    );
+                }
+                yb.push(y1);
+                for by in 0..3usize {
+                    for bx in 0..5usize {
                         let mut st = seed
                             ^ ((r as u64) << 24)
                             ^ ((c as u64) << 16)
@@ -3761,10 +3799,7 @@ mod tests {
                             ^ bx as u64
                             ^ 0x9E37_79B9;
                         let level = 40.0 + (xorshift(&mut st) % 180) as f32;
-                        let sx0 = x0 + bx * (x1 - x0) / 5;
-                        let sx1 = x0 + (bx + 1) * (x1 - x0) / 5;
-                        let sy0 = y0 + by * (y1 - y0) / 3;
-                        let sy1 = y0 + (by + 1) * (y1 - y0) / 3;
+                        let (sx0, sx1, sy0, sy1) = (xb[bx], xb[bx + 1], yb[by], yb[by + 1]);
                         for y in sy0..sy1.min(h) {
                             for x in sx0..sx1.min(w) {
                                 let v = (level * gain).clamp(0.0, 255.0) as u8;
@@ -3786,9 +3821,14 @@ mod tests {
                     ^ ((r as u64) << 24)
                     ^ ((c as u64) << 16)
                     ^ 0x51AB_C793;
-                let line_level = 170.0 + (xorshift(&mut lst) % 86) as f32;
-                let span0 = (xorshift(&mut lst) % 20) as u32;
-                let span1 = 60 + (xorshift(&mut lst) % 40) as u32;
+                // Sized like a real name, not a banner: with
+                // the texture aperiodic (above), a mid-strength
+                // line dominates the fold while leaving the
+                // raw row profile's texture decisive for the
+                // scroll-dy estimator.
+                let line_level = 150.0 + (xorshift(&mut lst) % 80) as f32;
+                let span0 = (xorshift(&mut lst) % 25) as u32;
+                let span1 = 45 + (xorshift(&mut lst) % 40) as u32;
                 let line_y = y0 + (ch * 0.8054) as u32;
                 if line_y >= 1 && line_y + 2 < y1 {
                     for x in (x0 + span0)..(x0 + span1).min(x1) {

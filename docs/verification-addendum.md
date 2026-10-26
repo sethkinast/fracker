@@ -1896,3 +1896,16 @@ it refines the brief where they disagree. For the next worker pass.
     were made honest for the gate (mosaic name-band edge;
     panorama header alignment). Details:
     docs/thirty-seventh-pass.md.
+    **Correction (same day):** the suite figure above was
+    wrong as tagged — the lib suite stood at 292/293 with
+    `intake_flushes_after_a_viewport_of_progress` failing
+    deterministically (the fixture's pitch-periodic comb
+    profile defeated the scroll-dy estimator's
+    smallest-|dy| tie-break; measured dy = 0 on one-row
+    scrolls, so bundle progress never accumulated). The
+    fix is test-fixture only (seeded per-cell block-band
+    boundaries; mid-strength name line); the full suite
+    after it is 321 passed / 0 failed across all targets.
+    No production code changed and v0.5.31's binary is
+    unaffected; see docs/thirty-seventh-pass.md
+    §Correction.

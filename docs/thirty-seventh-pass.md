@@ -160,7 +160,7 @@ LIVE_DIAG2 §4).
 | settled base | baseline reproduced exactly: 191 distinct / 0 FA / Neuroptics 23/23 / counts 367/367 cells, 191/191 slots | **191 / 0 / 23/23 / 367/367, 191/191 — exact** |
 | settled dense sim | distinct ≥ 191, 0 FA (SETTLED_CENSUS §5) | **193 / 0 FA / 23/23**; counts 365/395 cells, 190/193 slots (note 3) |
 | live replay | ≤ 21 accepts, no settled page lost, phase classification = INTAKE_REPLAY §3 | **13 accepts; pages hold 3/4/4/2 accepts; 5 transients off-lattice, 55 frames on-lattice** |
-| suite | green, new tests for gate/interval/latch/counters | **298 green (293 lib + 5 bin), incl. 6 new pass-37 tests** |
+| suite | green, new tests for gate/interval/latch/counters | **321 green across all targets after the §Correction fix (293 lib incl. 6 new pass-37 tests; golden 15; packaging 7; resident 5; tray_quit 1)** |
 | locked release build | `cargo build --release --locked --offline` | at ship time, below |
 
 Intake lines, as printed by the harnesses:
@@ -230,6 +230,49 @@ Intake lines, as printed by the harnesses:
    not be adapted) was not needed: the sim adapted
    mechanically via the feed clock, and the live-replay
    gate runs as well.
+
+## Correction (same day, post-tag)
+
+The gate table's suite row as tagged (cd5c3e1) claimed
+298 green. That was wrong: the figure rested on a misread
+background result, and the lib suite in fact stood at 292
+passed / 1 failed — `intake_flushes_after_a_viewport_of_
+progress` failed deterministically, and the run that
+reported it had completed before the tag was pushed. The
+shipped binary is unaffected (the failure is confined to
+test-fixture code), but the claim should not have shipped.
+
+Root cause, measured by instrumenting the test: with the
+name-band edge added for the settle gate, the fixture's
+row profile became a near-perfect pitch-periodic comb — a
+strong line at a fixed fraction of every cell, over block
+borders also at fixed fractions. The intake's scroll-dy
+estimator correlates profiles and, among shifts within
+0.02 NCC of the best, picks the smallest |dy|; on the
+comb, dy = 0 scored inside the tie-break of dy = 50, so
+one-row scrolls of the fixture measured zero displacement
+and bundle progress never accumulated (dy read 0.0, 0.0,
+0.0, 50.0 across the four steps). Real frames are not
+comb-dominated — their bundles closed in both census
+gates above and in the v0.5.30 live run — so the defect
+is the fixture's. It is still worth recording that the
+estimator's tie-break makes dy under-reporting the
+failure mode whenever a profile IS comb-dominated; the
+production mitigation today is the bundle capacity
+failsafe, and no production change is made here (out of
+this pass's scope).
+
+Fix, test data only: the mosaic's block-band boundaries
+are seeded per cell (aperiodic texture, as real item art
+has) and the name line is mid-strength. The estimator
+then reads dy = 50.0 at every step, progress accumulates
+0 → 50 → 100 → 150, and the flush fires at step 4 as
+designed. Full suite after the fix, verified from the
+test log: 321 passed / 0 failed (lib 293 including the
+repaired test; golden 15; packaging 7; resident 5;
+tray_quit 1). No production code changed, so v0.5.31 as
+tagged builds the same binary and no new version is cut
+for this correction.
 
 ## Open items (unchanged by this pass)
 
