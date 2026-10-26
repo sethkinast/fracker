@@ -322,3 +322,96 @@ reported for completeness only.
    the base census's sparse profile is the unrealistic one,
    which is why this report does not recommend (4) without
    (1) or (2).
+
+## Integration (v0.5.30) — merged with pass 35; HC gate retired
+
+Merged onto master `69d3a51` (v0.5.29) as merge commit
+`01fa41d`. Textual conflicts only in
+`docs/verification-addendum.md` (#100/#101 juxtaposition) and
+`examples/census_replay.rs` (pass 35's single-report gate
+loop vs this pass's multi-report loop; resolved to the
+multi-report shape, with master's synthesis accounting
+ported to `(report, slot)` keys and the session calibration
+printed once). The semantic conflict was in
+`src/capture.rs`: the synthesis hook lived inside
+`stitch_parts_session` under the borrowed `CaptureContext`,
+which this pass re-signed to `&StitchOptions` for the stitch
+thread.
+
+**Adjudication shape as built (owner-decided: preserve
+v0.5.29 semantics).** Synthesis runs ONCE per session at
+finalize, never per bundle: `CaptureSession::finish_parts`,
+after the dispatcher shuts down, calls
+`crate::synth::adjudicate_session(&mut reports, layout,
+engine, &ctx.read_options(), universe)` over the merged
+bundle reports. Calibration and the candidate exclusion set
+are pooled across reports; panorama neighbours come from the
+owning report. Because bundle frames are dropped after
+stitching, `SlotReport` now retains the canonical crop for
+exactly the two slot classes the post-pass touches (held via
+Both — the calibration pool; seen-not-held — the eligible
+pool). Holds are voted through the same `vote_held_slot`
+path as reader holds and stock is re-resolved; the session
+calibration record is written to every bundle report;
+`coverage_summary` counts synthesis holds so the resident
+finalize line stays coherent across N reports; the session
+summary is kept on the session (`synth_summary()`).
+
+**HC gate retired (owner, 2026-10-26).** Seth does not use
+the high-contrast theme in game. The HC columns above and
+the HC-sim failure stand as measured history; they do not
+block this ship. All gating from here is the standard
+census only. §Open items stand as analysis; item 4's
+re-baselining question is moot for the standard census,
+whose integrated sim bar (below) is met.
+
+### Integrated gate — standard census, production harness, session mode
+
+| Metric | Bar | Base | Sim (×8 jitter) |
+|---|---|---|---|
+| distinct correct | ≥242 | **242** | **242** |
+| false accepts | 0 | **0** | **0** |
+| Neuroptics distinct | 28 | **28** | **28** |
+| counts (cell) | no worse than 459/459 | 458/458 | 368/368* |
+| counts (slot) | — | 281/281 | 263/263* |
+
+*Sim counts pass through the harness's representative join
+and are reported for completeness (see §Harness note).
+
+Base: 2 bundle reports (8+7 frames), intake 15 accepted /
+0 dropped, no failsafe tripped. Pooled calibration: 219
+slots (v0.5.29 single-report: 202 — the pool additionally
+carries boundary-duplicated slots from the split), fit
+px=16.50, floor 0.715. Synthesis: 3 held / 26 below-floor,
+gains exactly the v0.5.29 three (Ember, Caliban, Garuda
+Prime Chassis Blueprints). One deviation in kind, not in
+value: the cell-count denominator is 458, not 459 — one
+census cell's slot attribution moved under split-bundle
+segmentation, the same effect recorded for the branch base
+(452 vs 453); every mapped count is correct.
+
+Sim: synthesis held 1 of its 3 base gains (Garuda Prime
+Chassis Blueprint; 22 below-floor). Join-free stock delta
+vs the integrated base: −3 (Caliban Prime Chassis Blueprint,
+Ember Prime Chassis Blueprint, Gara Prime Chassis
+Blueprint), +3 (Corvas Prime Blueprint, Redeemer Prime
+Handle, Wisp Prime Blueprint) — net zero at 242. The two
+lost synthesis gains churned out at slot level under the
+denser pooled stream while reader pools gained three the
+sparse base missed; the gains were not lost wholesale and
+no false accept appeared in either direction.
+
+Full suite green: 309 tests, including the failsafe trip
+tests (frame cap, queue coalesce/drop, duration cap).
+
+### Stale Cargo.lock (defect found at ship time)
+
+Master's committed `Cargo.lock` recorded the fracker
+package as 0.5.28 while `Cargo.toml` said 0.5.29 — the
+pass-35 version bump never refreshed the lock. CI did not
+build with `--locked`, so it slipped through; a
+flatpak-builder build with `--locked` fails outright.
+Fixed in this release: the lock regenerated with the
+0.5.30 bump (records fracker 0.5.30, dependencies
+unchanged) and verified before tagging with
+`cargo build --release --locked --offline` — passes.

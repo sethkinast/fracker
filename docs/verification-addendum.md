@@ -1768,7 +1768,10 @@ it refines the brief where they disagree. For the next worker pass.
     Residue census: docs/thirty-fifth-pass.md.
 101. **Live capture re-architected around the stream
     (pass 36, branch `pass36-hotfix` — base gate met,
-    duplicate-inflation gate FAILED on HC, not shipped).**
+    duplicate-inflation gate FAILED on HC; shipped
+    integrated with pass 35 as v0.5.30 after the owner
+    retired the HC census as a gate, 2026-10-26 — see the
+    integration note closing this entry).**
     The v0.5.28 live defect (finalize-time stitch blocking
     the portal while near-duplicate frames of two viewports
     filled the bundle) is answered structurally
@@ -1818,3 +1821,29 @@ it refines the brief where they disagree. For the next worker pass.
     position-counted floor, dense-pool form arbitration)
     are scoped in docs/thirty-sixth-pass.md §Open items.
     Details: docs/thirty-sixth-pass.md.
+    **Integration (v0.5.30):** merged onto master (69d3a51,
+    v0.5.29) as merge commit 01fa41d. The owner retired the
+    HC census as a gate (he does not use the HC theme), so
+    the HC-sim failure above stands as measured history, not
+    a blocker; all gating is standard-census-only from here.
+    Synthesis adjudication keeps its v0.5.29 whole-session
+    shape: `synth::adjudicate_session` runs once at finalize
+    over the merged bundle reports (pooled calibration —
+    219 slots across the census's 2 bundle reports; pooled
+    hold exclusion set; panorama neighbours taken from the
+    owning report), consuming canonical crops retained on
+    the slots it touches; its holds vote through the same
+    path as reader holds. Integrated gate (standard census,
+    production harness, session mode): base 242 distinct /
+    0 FA / Neuroptics 28, counts 458/458 cells (denominator
+    one below v0.5.29's 459 — the split-segmentation slot-
+    attribution shift this entry records for the branch at
+    452 vs 453; no count wrong), synthesis gains exactly
+    the v0.5.29 three; duplicate-inflation sim 242 / 0 FA /
+    28 (stock delta vs base −3/+3, one of three synthesis
+    gains retained under jitter); suite 309 green including
+    the failsafe trip tests. The merge also fixes a stale
+    Cargo.lock (it recorded fracker 0.5.28 against a 0.5.29
+    Cargo.toml — the pass-35 bump never refreshed it; the
+    committed lock now records 0.5.30 and
+    `cargo build --release --locked --offline` verifies).
