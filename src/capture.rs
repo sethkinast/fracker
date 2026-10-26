@@ -556,6 +556,22 @@ pub const PARTS_SESSION_FRAME_CAP: u64 = 512;
 /// static inventory screen — it classifies Parts forever).
 pub const SESSION_MAX_DURATION: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
+/// Pass 37 settle gate: widest |lattice phase| (page px) at
+/// which a parts frame still counts as settled. Measured gap
+/// (snap study + intake replay, two estimators agreeing within
+/// ~0.5 px on real frames): settled frames and their landing
+/// frames sit at |phase| ≤ ~3 px; the nearest scroll transient
+/// sits at 14 px. 8.0 px rests inside the empty band with
+/// ≥2.6× headroom over the worst settled measurement and
+/// 1.75× under the nearest transient.
+pub const SETTLED_PHASE_MAX_PX: f32 = 8.0;
+/// Pass 37 time gate: minimum wall-clock interval between
+/// accepted viewports — the owner's acceptance criterion
+/// (~1 capture per couple of seconds; a rested page captured
+/// exactly once). Offers inside the interval are dropped and
+/// counted.
+pub const MIN_ACCEPT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// What the parts intake decided about one frame (pass 36).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntakeVerdict {
@@ -571,6 +587,18 @@ pub enum IntakeVerdict {
     /// The session frame cap tripped: dropped at intake,
     /// counted; the session still finalizes normally.
     DropSessionCap,
+    /// Pass 37: the frame's lattice phase is measurably off
+    /// the settled band (a scroll transient): dropped at
+    /// intake, counted.
+    DropOffLattice,
+    /// Pass 37: the frame arrived inside
+    /// [`MIN_ACCEPT_INTERVAL`] of the last accepted viewport:
+    /// dropped at intake, counted.
+    DropInterval,
+    /// Pass 37: the frame is the position the previous
+    /// acceptance just displaced (an immediate scroll-back
+    /// within the current bundle): dropped at intake, counted.
+    DropLatched,
 }
 
 /// Content-aware parts intake (pass 36, brief scope 1+2). Each
@@ -587,6 +615,19 @@ pub enum IntakeVerdict {
 /// viewport of panorama has accumulated since the last one.
 /// Pure frame-in/decision-out (no engine, no session state), so
 /// the whole policy is unit-testable.
+///
+/// Pass 37 gates, evaluated in [`Self::offer_at`] before the
+/// pass-36 content policy: the SETTLE gate (a frame whose
+/// lattice phase is measurably outside [`SETTLED_PHASE_MAX_PX`]
+/// is a scroll transient and never becomes a candidate) and
+/// the TIME gate (at most one accepted viewport per
+/// [`MIN_ACCEPT_INTERVAL`] of wall clock — arrival times are
+/// the caller's input, so the policy stays a pure function of
+/// (frame, time)). Inside the content policy, the pass-37
+/// LATCH keeps the position the previous acceptance displaced
+/// from being re-accepted within the same bundle (an immediate
+/// scroll-back); it is replaced by each new displacement and
+/// cleared at bundle flush and on screen change.
 pub struct PartsIntake {
     anchor: Option<crate::stitch::ViewportPrint>,
     /// Accepted frames at the anchor's position (incl. the
@@ -597,6 +638,17 @@ pub struct PartsIntake {
     accepted_total: u64,
     session_cap: u64,
     cap_tripped: bool,
+    /// Pass 37 latch: the print of the position the most
+    /// recent acceptance displaced, within the current bundle.
+    latched: Option<crate::stitch::ViewportPrint>,
+    /// Pass 37 time gate: when the last viewport was accepted
+    /// (the caller's clock). Session-scoped: a screen change
+    /// does not rewind it.
+    last_accept_at: Option<std::time::Instant>,
+    /// Pass 37 gate counters (the finalize log's intake line).
+    off_lattice_dropped: u64,
+    interval_dropped: u64,
+    latched_dropped: u64,
 }
 
 impl Default for PartsIntake {
@@ -618,6 +670,11 @@ impl PartsIntake {
             accepted_total: 0,
             session_cap,
             cap_tripped: false,
+            latched: None,
+            last_accept_at: None,
+            off_lattice_dropped: 0,
+            interval_dropped: 0,
+            latched_dropped: 0,
         }
     }
 
@@ -629,6 +686,21 @@ impl PartsIntake {
         self.cap_tripped
     }
 
+    /// Pass 37: frames dropped by the settle gate.
+    pub fn off_lattice_dropped(&self) -> u64 {
+        self.off_lattice_dropped
+    }
+
+    /// Pass 37: frames dropped by the time gate.
+    pub fn interval_dropped(&self) -> u64 {
+        self.interval_dropped
+    }
+
+    /// Pass 37: frames dropped by the per-position latch.
+    pub fn latched_dropped(&self) -> u64 {
+        self.latched_dropped
+    }
+
     /// The screen changed away from Parts: the next parts frame
     /// is a new position wherever it lands. (The session total
     /// and the cap are session-scoped and persist.)
@@ -636,19 +708,66 @@ impl PartsIntake {
         self.anchor = None;
         self.run = 0;
         self.progress = 0.0;
+        self.latched = None;
     }
 
-    /// A bundle drained: progress restarts.
+    /// A bundle drained: progress restarts and the latch clears
+    /// (the latch is bundle-scoped — a position in a NEW bundle
+    /// may be captured afresh).
     pub fn note_flush(&mut self) {
         self.progress = 0.0;
+        self.latched = None;
     }
 
-    /// Offer one parts-classified frame.
-    pub fn offer(&mut self, frame: &GrayImage, layout: &Layout) -> IntakeVerdict {
+    /// Offer one parts-classified frame, delivered at `now`
+    /// (the driver's clock; production passes real arrival
+    /// times, drivers and tests model them). Gate order: the
+    /// session cap, the settle gate, the time gate, then the
+    /// content policy. An off-lattice verdict is charged to the
+    /// settle gate even inside the interval — phase is a
+    /// property of the frame, the interval of its timing, and
+    /// the settle count is the one the evidence reviews read.
+    pub fn offer_at(
+        &mut self,
+        frame: &GrayImage,
+        layout: &Layout,
+        now: std::time::Instant,
+    ) -> IntakeVerdict {
         if self.accepted_total >= self.session_cap {
             self.cap_tripped = true;
             return IntakeVerdict::DropSessionCap;
         }
+        // Pass 37 settle gate: a measurably off-lattice frame
+        // is mid-scroll; its content straddles cell boundaries
+        // and the pipeline is only ever measured on settled
+        // rows. An UNMEASURABLE frame (no lattice fit — blank
+        // or synthetic content) is not charged: the content
+        // policy below is the judge of those.
+        if let Some(phase) = crate::stitch::lattice_phase(frame, layout) {
+            if phase.abs() > SETTLED_PHASE_MAX_PX {
+                self.off_lattice_dropped += 1;
+                return IntakeVerdict::DropOffLattice;
+            }
+        }
+        // Pass 37 time gate: at most one accepted viewport per
+        // MIN_ACCEPT_INTERVAL. A dropped offer does not move
+        // the clock — the interval runs from the last ACCEPT.
+        if let Some(last) = self.last_accept_at {
+            if now.duration_since(last) < MIN_ACCEPT_INTERVAL {
+                self.interval_dropped += 1;
+                return IntakeVerdict::DropInterval;
+            }
+        }
+        let verdict = self.offer_content(frame, layout);
+        if matches!(verdict, IntakeVerdict::Accept { .. }) {
+            self.last_accept_at = Some(now);
+        }
+        verdict
+    }
+
+    /// The pass-36 content policy (anchor/run dedupe + progress
+    /// flush + the pass-37 latch), behind the gates.
+    fn offer_content(&mut self, frame: &GrayImage, layout: &Layout) -> IntakeVerdict {
         let print = crate::stitch::viewport_print(frame, layout);
         let rect = crate::stitch::GridRect::of(layout, frame);
         let pitch = rect.layout_row_pitch(layout).max(1.0);
@@ -676,6 +795,21 @@ impl PartsIntake {
             }
             return IntakeVerdict::DropDuplicate;
         }
+        // Pass 37 latch: a frame of the position the previous
+        // acceptance displaced is an immediate scroll-back
+        // within this bundle — that position already
+        // contributed its instances here, and re-accepting it
+        // would pool it twice under two anchors. It contributes
+        // no progress either: its displacement measures the
+        // trip back, not new panorama. The latch is replaced by
+        // the next displacement, so A→B→C→A re-admits A; only
+        // the immediate return is refused.
+        if let Some(latched) = &self.latched {
+            if crate::stitch::same_viewport(latched, &print) {
+                self.latched_dropped += 1;
+                return IntakeVerdict::DropLatched;
+            }
+        }
         // A new position. If the positions already pooled cover
         // a viewport of progress, the bundle closes before this
         // frame: boundaries fall between positions, never inside
@@ -687,7 +821,7 @@ impl PartsIntake {
         // segments likewise break at frames, never within one.
         let boundary = self.progress >= viewport_px;
         self.progress += dy.abs();
-        self.anchor = Some(print);
+        self.latched = self.anchor.replace(print);
         self.run = 1;
         self.accepted_total += 1;
         IntakeVerdict::Accept { flush: boundary }
@@ -902,6 +1036,21 @@ pub struct CaptureSession {
     /// Evidence frames written to the debug dir, by file name.
     pub debug_files: Vec<String>,
     debug_dumped: std::collections::HashMap<&'static str, u32>,
+    /// Pass 37: per-name debug-dump caps that stopped dumping
+    /// this session (first-hit order). The finalize log names
+    /// them — a capped dump can no longer masquerade as a
+    /// capture that ended early (LIVE_DIAG2 §1: the v0.5.30
+    /// run's folder "ending" at page 4 was this cap, silent).
+    debug_capped: Vec<&'static str>,
+    /// Pass 37: the intake's arrival-time source. Production
+    /// leaves this unset and gets the real wall clock; the
+    /// replay harness installs a modelled feed clock, because
+    /// frame-arrival times are an INPUT to a capture (the live
+    /// stream delivers at its own rate), not a policy knob —
+    /// modelling them is how the time gate is exercised
+    /// honestly in a gate that feeds files as fast as it can
+    /// read them.
+    feed_clock: Option<Box<dyn Fn() -> std::time::Instant + Send>>,
     /// Detached evidence-writer threads; joined at finalize so the
     /// logged file list is true by the time it is logged.
     debug_writers: Vec<std::thread::JoinHandle<()>>,
@@ -943,6 +1092,21 @@ impl CaptureSession {
         self.stitch_engine = Some(engine);
     }
 
+    /// Pass 37: install a modelled arrival-time source for the
+    /// intake's time gate (see the `feed_clock` field). The
+    /// production driver never calls this.
+    pub fn set_feed_clock(&mut self, clock: Box<dyn Fn() -> std::time::Instant + Send>) {
+        self.feed_clock = Some(clock);
+    }
+
+    /// The arrival time stamped on the next offered frame.
+    fn feed_now(&self) -> std::time::Instant {
+        match &self.feed_clock {
+            Some(clock) => clock(),
+            None => std::time::Instant::now(),
+        }
+    }
+
     /// Parts frames the intake accepted this session.
     pub fn parts_frames_accepted(&self) -> u64 {
         self.parts_intake.accepted_total()
@@ -951,6 +1115,49 @@ impl CaptureSession {
     /// Intake duplicates dropped past the per-position cap.
     pub fn parts_dupes_dropped(&self) -> u64 {
         self.parts_dupes_dropped
+    }
+
+    /// Pass 37: parts frames dropped by the settle gate.
+    pub fn parts_off_lattice_dropped(&self) -> u64 {
+        self.parts_intake.off_lattice_dropped()
+    }
+
+    /// Pass 37: parts frames dropped by the time gate.
+    pub fn parts_interval_dropped(&self) -> u64 {
+        self.parts_intake.interval_dropped()
+    }
+
+    /// Pass 37: parts frames dropped by the per-position latch.
+    pub fn parts_latched_dropped(&self) -> u64 {
+        self.parts_intake.latched_dropped()
+    }
+
+    /// Frames the bundle queue has dropped at its cap so far
+    /// (pass 37: the resident logs increments as they happen,
+    /// not only in the finalize failsafe summary).
+    pub fn bundle_queue_dropped_frames(&self) -> u64 {
+        self.bundle_queue.dropped_frames
+    }
+
+    /// Which stitch path this session's bundles take (pass 37:
+    /// named in the finalize log — LIVE_DIAG2 §3 could not
+    /// exclude the synchronous fallback from the v0.5.30
+    /// evidence because no record named the path). A provided
+    /// second engine starts the dispatcher at the first drain;
+    /// a session that never drains a bundle reports the armed
+    /// path, which is the path any bundle would have taken.
+    pub fn stitch_path_label(&self) -> &'static str {
+        if self.stitch.is_some() || self.stitch_engine.is_some() {
+            "background stitch thread (dedicated second engine)"
+        } else {
+            "synchronous fallback (frame engine, capture thread)"
+        }
+    }
+
+    /// Debug-dump names whose per-name cap stopped dumping
+    /// this session (pass 37; see the `debug_capped` field).
+    pub fn debug_capped_names(&self) -> &[&'static str] {
+        &self.debug_capped
     }
 
     /// Parts frames refused by the session frame cap.
@@ -1126,12 +1333,12 @@ impl CaptureSession {
         // frame drains the pending parts first, so a screen
         // change closes the stitch where the scroll ended.
         if class == ScreenClass::Parts {
-            match self.parts_intake.offer(frame, layout) {
+            match self.parts_intake.offer_at(frame, layout, self.feed_now()) {
                 IntakeVerdict::Accept { flush } => {
                     // A boundary verdict closes the pending
                     // bundle before this frame is pushed — the
                     // frame opens the next bundle (positions are
-                    // atomic; see PartsIntake::offer).
+                    // atomic; see PartsIntake::offer_at).
                     if flush && self.parts_pending.len() >= BUNDLE_MIN_FRAMES {
                         self.drain_bundle(ctx, engine);
                     }
@@ -1142,6 +1349,12 @@ impl CaptureSession {
                 }
                 IntakeVerdict::DropDuplicate => self.parts_dupes_dropped += 1,
                 IntakeVerdict::DropSessionCap => self.parts_frames_capped += 1,
+                // Pass 37: the gate drops are counted on the
+                // intake itself and read back at finalize
+                // (parts_off_lattice_dropped &c.).
+                IntakeVerdict::DropOffLattice
+                | IntakeVerdict::DropInterval
+                | IntakeVerdict::DropLatched => {}
             }
             return;
         }
@@ -1510,6 +1723,13 @@ impl CaptureSession {
         let idx = {
             let n = self.debug_dumped.entry(name).or_insert(0);
             if *n >= Self::MAX_DEBUG_PER_NAME {
+                // Pass 37: the cap stopping is recorded (once
+                // per name) for the finalize log — silently
+                // stopping is what made a capped dump read as a
+                // truncated capture (LIVE_DIAG2 §1).
+                if !self.debug_capped.contains(&name) {
+                    self.debug_capped.push(name);
+                }
                 return;
             }
             let idx = *n;
@@ -3214,6 +3434,19 @@ mod tests {
             ),
         };
         let mut session = CaptureSession::new();
+        // Pass 37: the three frames model three separate scroll
+        // observations, seconds apart in a real capture; the
+        // session's feed clock spaces their arrivals past the
+        // intake's time gate.
+        let tick = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let tick2 = tick.clone();
+        let clock_base = std::time::Instant::now();
+        session.set_feed_clock(Box::new(move || {
+            clock_base
+                + std::time::Duration::from_secs(
+                    3 * tick2.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                )
+        }));
         // Distinct bodies (signatures), identical header strip.
         let frame = |body_v: u8| {
             let mut img = GrayImage::blank(100, 100, body_v);
@@ -3498,6 +3731,15 @@ mod tests {
     /// block-mean thumbnails and make every cell look alike) —
     /// and the whole frame is scaled by `gain`, the
     /// animated-background proxy.
+    ///
+    /// Pass 37 fixture fidelity: real cells carry their
+    /// dominant horizontal edge at the name band (frac ≈0.81
+    /// of the cell — the fold calibration's FOLD_PEAK_FRAC),
+    /// and the settle gate reads exactly that edge. The
+    /// fixture paints it as a bright double row on a dark
+    /// surround at the calibrated fraction of every cell;
+    /// without it the fixture's fold phase is arbitrary and no
+    /// synthetic frame could pass for settled.
     fn mosaic_frame(layout: &Layout, seed: u64, gain: f32) -> GrayImage {
         let (w, h) = (460u32, 300u32);
         let mut img = GrayImage::blank(w, h, 8);
@@ -3531,9 +3773,48 @@ mod tests {
                         }
                     }
                 }
+                // The name-band edge (see the doc comment): a
+                // bright double row at the calibrated fraction
+                // of the cell, dark rows flanking it. Like a
+                // real name, its LEVEL and LENGTH are seeded
+                // per cell — the fold needs the edge's POSITION
+                // coherent across cells, and the thumbnails
+                // need its content distinct per cell; a uniform
+                // line would be neither (it would pull every
+                // cell's thumbnail toward identity).
+                let mut lst = seed
+                    ^ ((r as u64) << 24)
+                    ^ ((c as u64) << 16)
+                    ^ 0x51AB_C793;
+                let line_level = 170.0 + (xorshift(&mut lst) % 86) as f32;
+                let span0 = (xorshift(&mut lst) % 20) as u32;
+                let span1 = 60 + (xorshift(&mut lst) % 40) as u32;
+                let line_y = y0 + (ch * 0.8054) as u32;
+                if line_y >= 1 && line_y + 2 < y1 {
+                    for x in (x0 + span0)..(x0 + span1).min(x1) {
+                        let v = (line_level * gain).clamp(0.0, 255.0) as u8;
+                        img.set(x, line_y - 1, 8);
+                        img.set(x, line_y, v);
+                        img.set(x, line_y + 1, v);
+                        img.set(x, line_y + 2, 8);
+                    }
+                }
             }
         }
         img
+    }
+
+    /// Pass 37: offers carry arrival times. Tests that mean to
+    /// exercise the content policy space their offers 3 s
+    /// apart — past the 2 s time gate — through this helper.
+    fn offer_spaced(
+        intake: &mut PartsIntake,
+        frame: &GrayImage,
+        layout: &Layout,
+        t0: std::time::Instant,
+        step: u64,
+    ) -> IntakeVerdict {
+        intake.offer_at(frame, layout, t0 + std::time::Duration::from_secs(3 * step))
     }
 
     #[test]
@@ -3546,8 +3827,9 @@ mod tests {
         let layout = intake_layout();
         let base = mosaic_frame(&layout, 7, 1.0);
         let mut intake = PartsIntake::new();
+        let t0 = std::time::Instant::now();
         let (mut accepted, mut dropped) = (0usize, 0usize);
-        for i in 0..16 {
+        for i in 0..16u64 {
             let gain = 1.0 + ((i % 5) as f32 - 2.0) * 0.015;
             let frame = if i == 0 {
                 base.clone()
@@ -3560,10 +3842,10 @@ mod tests {
                 }
                 f
             };
-            match intake.offer(&frame, &layout) {
+            match offer_spaced(&mut intake, &frame, &layout, t0, i) {
                 IntakeVerdict::Accept { .. } => accepted += 1,
                 IntakeVerdict::DropDuplicate => dropped += 1,
-                IntakeVerdict::DropSessionCap => panic!("session cap must not trip here"),
+                other => panic!("unexpected verdict: {other:?}"),
             }
         }
         assert_eq!(accepted, VIEWPORT_ACCEPT_CAP, "static viewport collapses to the cap");
@@ -3572,7 +3854,7 @@ mod tests {
         // A different page is a new position, accepted at once.
         let other = mosaic_frame(&layout, 99, 1.0);
         assert!(matches!(
-            intake.offer(&other, &layout),
+            offer_spaced(&mut intake, &other, &layout, t0, 16),
             IntakeVerdict::Accept { .. }
         ));
     }
@@ -3584,13 +3866,18 @@ mod tests {
         // must be requested once a viewport (3 pitches) of
         // progress has accumulated.
         let layout = intake_layout();
-        // 10 rows: the last window (step 4) crops y 200..500.
-        // (Boundary semantics fire the flush on the first frame
-        // of the position AFTER the crossing, one offer later
-        // than the pre-36 verdict timing this fixture was sized
-        // for — the crop at step 4 must exist.)
+        // 10 rows under a 60px header, so a window cropped at a
+        // whole-pitch step has its grid rows exactly on pano
+        // rows (pass 37: the settle gate reads that alignment;
+        // the pre-37 fixture painted rows from y 0 and every
+        // window sat ~11 px off the layout lattice). The last
+        // window (step 4) crops y 200..500. (Boundary semantics
+        // fire the flush on the first frame of the position
+        // AFTER the crossing, one offer later than the pre-36
+        // verdict timing this fixture was sized for — the crop
+        // at step 4 must exist.)
         let pano_rows = 10u32;
-        let pano_h = pano_rows * 50;
+        let pano_h = 60 + pano_rows * 50;
         let mut pano = GrayImage::blank(460, pano_h, 8);
         for r in 0..pano_rows {
             // Paint row r of the panorama with the mosaic frame
@@ -3599,15 +3886,16 @@ mod tests {
             for y in 0..50u32 {
                 for x in 0..460u32 {
                     let v = f.get(x, 60 + y);
-                    pano.set(x, r * 50 + y, v);
+                    pano.set(x, 60 + r * 50 + y, v);
                 }
             }
         }
         let mut intake = PartsIntake::new();
+        let t0 = std::time::Instant::now();
         let mut flush_at = None;
         for k in 0..5u32 {
             let frame = pano.crop(0, k * 50, 460, 300);
-            match intake.offer(&frame, &layout) {
+            match offer_spaced(&mut intake, &frame, &layout, t0, k as u64) {
                 IntakeVerdict::Accept { flush: true } => {
                     flush_at = Some(k);
                     break;
@@ -3624,19 +3912,256 @@ mod tests {
     fn intake_session_cap_trips_and_is_reported() {
         let layout = intake_layout();
         let mut intake = PartsIntake::with_session_cap(5);
+        let t0 = std::time::Instant::now();
         let (mut accepted, mut capped) = (0usize, 0usize);
         for i in 0..9u64 {
             // Distinct position per offer (distinct mosaic seed).
             let frame = mosaic_frame(&layout, 500 + i * 17, 1.0);
-            match intake.offer(&frame, &layout) {
+            match offer_spaced(&mut intake, &frame, &layout, t0, i) {
                 IntakeVerdict::Accept { .. } => accepted += 1,
                 IntakeVerdict::DropSessionCap => capped += 1,
-                IntakeVerdict::DropDuplicate => panic!("distinct positions never duplicate-drop"),
+                other => panic!("distinct positions never cap/drop otherwise: {other:?}"),
             }
         }
         assert_eq!(accepted, 5);
         assert_eq!(capped, 4);
         assert!(intake.cap_tripped(), "the trip is recorded, not silent");
+    }
+
+    /// Shift a frame's content down by `dy` px (vacated rows
+    /// take the background level) — a synthetic scroll
+    /// transient for the settle gate.
+    fn shift_down(frame: &GrayImage, dy: u32) -> GrayImage {
+        let mut out = GrayImage::blank(frame.width, frame.height, 8);
+        for y in dy..frame.height {
+            for x in 0..frame.width {
+                out.set(x, y, frame.get(x, y - dy));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn settle_gate_accepts_on_lattice_and_drops_displaced() {
+        // Pass 37: the gate reads the fixture's own fold phase
+        // — asserted in-band before the policy's verdict is.
+        let layout = intake_layout();
+        let settled = mosaic_frame(&layout, 7, 1.0);
+        let phase = crate::stitch::lattice_phase(&settled, &layout)
+            .expect("the fixture carries a measurable lattice");
+        assert!(phase.abs() <= SETTLED_PHASE_MAX_PX, "fixture phase {phase}");
+        let mut intake = PartsIntake::new();
+        let t0 = std::time::Instant::now();
+        assert!(matches!(
+            offer_spaced(&mut intake, &settled, &layout, t0, 0),
+            IntakeVerdict::Accept { .. }
+        ));
+        // The same content displaced 20 px (0.4 of the test
+        // pitch — a mid-scroll transient at this scale) is
+        // measurably off-lattice and never becomes a candidate.
+        let displaced = shift_down(&settled, 20);
+        let phase = crate::stitch::lattice_phase(&displaced, &layout)
+            .expect("displaced content still carries a lattice");
+        assert!(phase.abs() > SETTLED_PHASE_MAX_PX, "displaced phase {phase}");
+        assert_eq!(
+            offer_spaced(&mut intake, &displaced, &layout, t0, 1),
+            IntakeVerdict::DropOffLattice
+        );
+        assert_eq!(intake.off_lattice_dropped(), 1);
+        assert_eq!(intake.accepted_total(), 1, "the transient was not pooled");
+        // An unmeasurable frame (blank — no lattice fit) is
+        // NOT charged to the settle gate: the content policy
+        // judges it, and on a fresh intake it anchors.
+        let blank = GrayImage::blank(460, 300, 8);
+        assert!(crate::stitch::lattice_phase(&blank, &layout).is_none());
+        let mut fresh = PartsIntake::new();
+        assert!(matches!(
+            fresh.offer_at(&blank, &layout, t0),
+            IntakeVerdict::Accept { .. }
+        ));
+        assert_eq!(fresh.off_lattice_dropped(), 0);
+    }
+
+    #[test]
+    fn time_gate_drops_offers_inside_the_interval() {
+        // Pass 37: at most one accepted viewport per
+        // MIN_ACCEPT_INTERVAL, measured from the last ACCEPT —
+        // drops do not move the clock.
+        let layout = intake_layout();
+        let a = mosaic_frame(&layout, 7, 1.0);
+        let b = mosaic_frame(&layout, 99, 1.0);
+        let mut intake = PartsIntake::new();
+        let t0 = std::time::Instant::now();
+        let at = |ms: u64| t0 + std::time::Duration::from_millis(ms);
+        assert!(matches!(
+            intake.offer_at(&a, &layout, at(0)),
+            IntakeVerdict::Accept { .. }
+        ));
+        // Inside the interval the gate fires before the
+        // content policy — for the same frame (which the
+        // policy would call a duplicate) and for a new
+        // position alike.
+        assert_eq!(intake.offer_at(&a, &layout, at(500)), IntakeVerdict::DropInterval);
+        assert_eq!(intake.offer_at(&b, &layout, at(1_500)), IntakeVerdict::DropInterval);
+        assert_eq!(intake.interval_dropped(), 2);
+        assert_eq!(intake.accepted_total(), 1);
+        // 2.5 s after the accept at t0 (not after the drops),
+        // offers flow again.
+        assert!(matches!(
+            intake.offer_at(&b, &layout, at(2_500)),
+            IntakeVerdict::Accept { .. }
+        ));
+        assert_eq!(intake.accepted_total(), 2);
+    }
+
+    #[test]
+    fn latch_drops_the_immediate_return_within_a_bundle() {
+        // Pass 37: A→B→A inside one bundle refuses the return;
+        // a further displacement re-admits A; a flush clears
+        // the latch for the next bundle.
+        let layout = intake_layout();
+        let a = mosaic_frame(&layout, 7, 1.0);
+        let b = mosaic_frame(&layout, 99, 1.0);
+        let c = mosaic_frame(&layout, 517, 1.0);
+        let mut intake = PartsIntake::new();
+        let t0 = std::time::Instant::now();
+        assert!(matches!(
+            offer_spaced(&mut intake, &a, &layout, t0, 0),
+            IntakeVerdict::Accept { .. }
+        ));
+        assert!(matches!(
+            offer_spaced(&mut intake, &b, &layout, t0, 1),
+            IntakeVerdict::Accept { .. }
+        ));
+        assert_eq!(
+            offer_spaced(&mut intake, &a, &layout, t0, 2),
+            IntakeVerdict::DropLatched
+        );
+        assert_eq!(
+            offer_spaced(&mut intake, &a, &layout, t0, 3),
+            IntakeVerdict::DropLatched
+        );
+        assert_eq!(intake.latched_dropped(), 2);
+        // C's acceptance moves the latch to B; A is fresh again.
+        assert!(matches!(
+            offer_spaced(&mut intake, &c, &layout, t0, 4),
+            IntakeVerdict::Accept { .. }
+        ));
+        assert!(matches!(
+            offer_spaced(&mut intake, &a, &layout, t0, 5),
+            IntakeVerdict::Accept { .. }
+        ));
+        // A's acceptance latched C; the flush clears it, so C
+        // may open the next bundle.
+        intake.note_flush();
+        assert!(matches!(
+            offer_spaced(&mut intake, &c, &layout, t0, 6),
+            IntakeVerdict::Accept { .. }
+        ));
+    }
+
+    #[test]
+    fn gate_counters_account_every_drop_kind() {
+        // Pass 37: one scripted sequence hitting each gate;
+        // the counters the finalize log prints must account
+        // for every drop.
+        let layout = intake_layout();
+        let a = mosaic_frame(&layout, 7, 1.0);
+        let b = mosaic_frame(&layout, 99, 1.0);
+        let displaced = shift_down(&a, 20);
+        let mut intake = PartsIntake::new();
+        let t0 = std::time::Instant::now();
+        let at = |ms: u64| t0 + std::time::Duration::from_millis(ms);
+        assert!(matches!(
+            intake.offer_at(&a, &layout, at(0)),
+            IntakeVerdict::Accept { .. }
+        ));
+        assert_eq!(
+            intake.offer_at(&displaced, &layout, at(3_000)),
+            IntakeVerdict::DropOffLattice
+        );
+        assert_eq!(
+            intake.offer_at(&b, &layout, at(500)),
+            IntakeVerdict::DropInterval
+        );
+        assert!(matches!(
+            intake.offer_at(&b, &layout, at(3_500)),
+            IntakeVerdict::Accept { .. }
+        ));
+        assert_eq!(
+            intake.offer_at(&a, &layout, at(7_000)),
+            IntakeVerdict::DropLatched
+        );
+        assert_eq!(intake.accepted_total(), 2);
+        assert_eq!(intake.off_lattice_dropped(), 1);
+        assert_eq!(intake.interval_dropped(), 1);
+        assert_eq!(intake.latched_dropped(), 1);
+    }
+
+    #[test]
+    fn session_reports_intake_counters_and_stitch_path() {
+        // Pass 37: the finalize log's sources — gate counters
+        // delegate to the intake; the stitch-path label names
+        // the configured path.
+        let mut session = CaptureSession::new();
+        assert_eq!(session.parts_off_lattice_dropped(), 0);
+        assert_eq!(session.parts_interval_dropped(), 0);
+        assert_eq!(session.parts_latched_dropped(), 0);
+        assert_eq!(session.bundle_queue_dropped_frames(), 0);
+        assert_eq!(
+            session.stitch_path_label(),
+            "synchronous fallback (frame engine, capture thread)"
+        );
+        session.set_stitch_engine(Box::new(crate::ocr::StubEngine));
+        assert_eq!(
+            session.stitch_path_label(),
+            "background stitch thread (dedicated second engine)"
+        );
+    }
+
+    #[test]
+    fn debug_dump_cap_is_recorded_by_name() {
+        // Pass 37 (LIVE_DIAG2 §1): when the per-name dump cap
+        // stops dumping, the session records the name for the
+        // finalize log — the v0.5.30 run's dump folder ended
+        // at the cap in silence and read as a truncated
+        // capture.
+        let universes = UniverseSet::default();
+        let layouts = HashMap::new();
+        let relic_names = HashSet::new();
+        let arcane_names = HashSet::new();
+        let classifier = classifier();
+        let dir = std::env::temp_dir().join(format!("fracker-dbgcap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ctx = CaptureContext {
+            layouts: &layouts,
+            universes: &universes,
+            relic_names: &relic_names,
+            arcane_names: &arcane_names,
+            classifier: &classifier,
+            min_confidence: 0.5,
+            radius_decoder: true,
+            radius_strip: true,
+            radius_tail_budget: crate::ocr::RADIUS_TAIL_BUDGET,
+            line_reader: false,
+            strip_offsets: false,
+            snap_cells: false,
+            synthesis: false,
+            debug_dir: Some(dir.clone()),
+        };
+        let mut session = CaptureSession::new();
+        let frame = GrayImage::blank(8, 8, 42);
+        for _ in 0..(CaptureSession::MAX_DEBUG_PER_NAME + 5) {
+            session.dump_debug_frame(&ctx, &frame, "parts");
+        }
+        assert_eq!(
+            session.debug_files.len(),
+            CaptureSession::MAX_DEBUG_PER_NAME as usize,
+            "dumping stops at the cap"
+        );
+        assert_eq!(session.debug_capped_names(), ["parts"]);
+        session.flush_debug_dumps();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

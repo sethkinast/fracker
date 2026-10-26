@@ -640,6 +640,7 @@ fn capture_worker(
     let progress_tx = tx.clone();
     let frame_log = log.clone();
     let mut announced = false;
+    let mut queue_drops_seen = 0u64;
     let result = capture::run_capture(
         &ctx,
         &engine,
@@ -651,6 +652,22 @@ fn capture_worker(
                 announced = true;
                 let _ = progress_tx.send(CaptureEvent::Stage(CaptureStage::Capturing));
                 frame_log.record("capturing", "draining frames (scroll your inventory)");
+            }
+            // Pass 37: bundle-queue drops are logged when they
+            // happen (this callback runs after every frame), not
+            // only in the finalize failsafe summary — a drop is
+            // newest-pages content loss and the moment matters.
+            let drops = s.bundle_queue_dropped_frames();
+            if drops > queue_drops_seen {
+                frame_log.record(
+                    "capturing",
+                    &format!(
+                        "bundle queue dropped {} frame(s) at its cap ({} total this session)",
+                        drops - queue_drops_seen,
+                        drops
+                    ),
+                );
+                queue_drops_seen = drops;
             }
             let _ = progress_tx.send(CaptureEvent::Progress(s.counts()));
         },
@@ -784,6 +801,27 @@ async fn finalize_capture(
             session.frames_skipped()
         ),
     );
+    // Pass 37: the intake's own accounting and the stitch path
+    // ride the finalize log (LIVE_DIAG2 §3/§4: the counters
+    // existed but had no caller, and no record named which
+    // stitch path a session took — the two gaps that made the
+    // v0.5.30 run's evidence undecidable from the log alone).
+    log.record(
+        "finalizing",
+        &format!(
+            "intake: {} accepted, {} duplicates dropped, {} off-lattice dropped, {} interval dropped, {} latched dropped, {} session-cap refused",
+            session.parts_frames_accepted(),
+            session.parts_dupes_dropped(),
+            session.parts_off_lattice_dropped(),
+            session.parts_interval_dropped(),
+            session.parts_latched_dropped(),
+            session.parts_frames_capped()
+        ),
+    );
+    log.record(
+        "finalizing",
+        &format!("stitch path: {}", session.stitch_path_label()),
+    );
     // Header samples and the debug-frame list are evidence on
     // EVERY finalize (addendum #83): a partial capture is exactly
     // when the classification record matters, and gating them on
@@ -795,6 +833,15 @@ async fn finalize_capture(
         log.record(
             "finalizing",
             &format!("debug frames written: {}", session.debug_files.join(", ")),
+        );
+    }
+    // Pass 37: a debug dump that stopped at its per-name cap
+    // says so — the capped folder is evidence about the DUMP,
+    // not about where the capture ended (LIVE_DIAG2 §1).
+    for name in session.debug_capped_names() {
+        log.record(
+            "finalizing",
+            &format!("debug dump cap reached for {name}; further frames not dumped"),
         );
     }
     if !session.has_any() {

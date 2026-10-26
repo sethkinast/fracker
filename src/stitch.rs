@@ -1661,6 +1661,48 @@ pub fn canonical_crop(
 // content (icons, text, borders) carries the signal.
 // ---------------------------------------------------------------------------
 
+/// The frame's phase against the layout lattice (pass 37): the
+/// folded row profile's peak offset at the LAYOUT pitch, in page
+/// px, wrapped to (−P/2, P/2] — the same estimator
+/// [`plan_session`] fits per frame ([`fit_phase`], calibrated by
+/// [`FOLD_PEAK_FRAC`] so a frame whose rows sit exactly on the
+/// grid measures ≈ 0). A frame caught mid-scroll measures its
+/// displacement off the lattice (the snap study / intake replay:
+/// settled frames and their landing frames sit within ~3 px,
+/// scroll transients at 14 px and beyond). Returns `None` when
+/// the frame carries no measurable lattice at the layout pitch —
+/// the [`plan_session`] "real fit" test (profile mass, a
+/// dominant fold peak, gradient spread over enough rows) fails,
+/// as on a blank or synthetic frame — so callers can tell
+/// "measurably off-lattice" apart from "unmeasurable".
+pub fn lattice_phase(frame: &GrayImage, layout: &Layout) -> Option<f32> {
+    let rect = GridRect::of(layout, frame);
+    let pitch = rect.layout_row_pitch(layout);
+    if pitch <= 0.0 {
+        return None;
+    }
+    let profile = row_profile(frame, &rect);
+    let start = rect.y0.max(0.0) as usize;
+    if start >= profile.len() {
+        return None;
+    }
+    let periods = layout.rows as f32 - 0.07;
+    let bins = fold(&profile, start, pitch, periods);
+    let total: f32 = bins.iter().sum();
+    let peak = bins.iter().copied().fold(0.0f32, f32::max);
+    let mass: f32 = profile[start..].iter().sum();
+    let pmax = profile[start..].iter().copied().fold(0.0f32, f32::max);
+    let active_rows = profile[start..].iter().filter(|&&v| v > 0.1 * pmax).count();
+    let real = mass > 1.0
+        && total > 0.0
+        && peak > 4.0 * (total / FOLD_BINS as f32)
+        && active_rows >= 8;
+    if !real {
+        return None;
+    }
+    Some(fit_phase(&profile, start, pitch, periods))
+}
+
 /// Thumbnail blocks per cell in a [`ViewportPrint`]: 10 across,
 /// 5 down. A block is ~18x37 page px at 1440p — coarse enough
 /// that a few px of phase difference between two sightings of

@@ -269,6 +269,21 @@ fn session_main(
     session.set_stitch_engine(Box::new(
         TesseractCliEngine::probe(layout.clone()).expect("tesseract stitch engine"),
     ));
+    // Pass 37: the intake's time gate consumes the frames'
+    // arrival times, which a replay has to MODEL — the base
+    // gate walks viewports at Seth's page-at-a-time pace (one
+    // per few seconds), the dense sim feeds at the measured
+    // worker delivery rate (~500 ms; LIVE_DIAG2 §4). Arrival
+    // spacing is an input to the gate, never a policy knob.
+    let step_ms: u64 = if simulate_live { 500 } else { 3000 };
+    let feed_tick = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let feed_base = std::time::Instant::now();
+    session.set_feed_clock(Box::new(move || {
+        feed_base
+            + std::time::Duration::from_millis(
+                step_ms * feed_tick.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            )
+    }));
 
     // Feed the frames, tracking each census frame's ACCEPTED
     // ordinal (its index among the frames the intake let into
@@ -363,9 +378,12 @@ fn session_main(
         frame_order.len()
     );
     println!(
-        "intake: {} parts frames accepted, {} duplicates dropped, {} cap-refused",
+        "intake: {} parts frames accepted, {} duplicates dropped, {} off-lattice dropped, {} interval dropped, {} latched dropped, {} cap-refused",
         session.parts_frames_accepted(),
         session.parts_dupes_dropped(),
+        session.parts_off_lattice_dropped(),
+        session.parts_interval_dropped(),
+        session.parts_latched_dropped(),
         session.parts_frames_capped()
     );
     if let Some(fs) = session.failsafe_summary() {

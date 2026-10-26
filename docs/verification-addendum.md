@@ -1847,3 +1847,52 @@ it refines the brief where they disagree. For the next worker pass.
     Cargo.toml — the pass-35 bump never refreshed it; the
     committed lock now records 0.5.30 and
     `cargo build --release --locked --offline` verifies).
+102. **Settle+time-gated intake, observability wiring,
+    settled-census gate swap (pass 37, shipped as
+    v0.5.31).** Seth's verdict on v0.5.30's live run (264
+    parts, his page-at-a-time pacing) was "good enough" —
+    the ~29-item delta goes to manual reconciliation and
+    self-heals via EE.log — so this pass is cleanup, no
+    recognition changes. Intake (src/capture.rs,
+    src/stitch.rs): a phase gate before the content policy
+    reuses the stitch's own fold (`stitch::lattice_phase`,
+    fit accepted only under the session planner's real-fit
+    test; unmeasurable frames pass to the content policy);
+    the band is |phase| ≤ 8.0 px, set from the measured gap
+    (settled/landing ≤ 2.78 px across the census and the
+    live dump; transients ≥ 13.53 px). A 2 s minimum
+    interval runs from the last accept (drops never move
+    the clock; session-scoped), and a single-deep latch
+    refuses the immediate A→B→A return inside a bundle,
+    cleared at bundle flush and screen reset. Arrival time
+    is a caller input (`offer_at`); the session's optional
+    feed clock lets the harnesses model arrivals (base
+    3000 ms, sim/live 500 ms) without touching policy.
+    New verdicts and counters: DropOffLattice /
+    DropInterval / DropLatched. Pass-36 failsafes unchanged
+    (K = 4, 512 cap, 96 queue, 900 s). Observability
+    (src/resident.rs): the finalize log gains an intake
+    counter line and a stitch-path line (dispatcher vs
+    synchronous fallback — the v0.5.30 run's undecidable
+    question); the debug-dump per-name cap records itself
+    in the finalize log when it engages; bundle-queue drops
+    are logged by the capture worker's progress callback
+    when they happen, with the session total. Gate swap:
+    the canonical gate is now the settled census (12
+    frames, 209 distinct; HC stays retired). Gate:
+    settled base reproduces the v0.5.29 baseline exactly —
+    191 distinct / 0 FA / Neuroptics 23/23 / counts 367/367
+    cells and 191/191 slots, intake inert (12 accepted, no
+    drops of any new kind); settled dense sim 193 / 0 FA /
+    23/23 (counts 365/395 cells under the dense-feed join
+    effect; the §5 sim bar is distinct + FA); live replay
+    of the v0.5.30 dump (examples/live_replay.rs) 13
+    accepts against the shipped intake's 21, all four
+    settled pages represented (3/4/4/2), all five
+    transients refused by phase, 60 offers fully accounted
+    (13 accepted / 5 duplicates / 5 off-lattice / 37
+    interval); suite 298 green including 6 new gate /
+    interval / latch / counter tests; two test fixtures
+    were made honest for the gate (mosaic name-band edge;
+    panorama header alignment). Details:
+    docs/thirty-seventh-pass.md.
