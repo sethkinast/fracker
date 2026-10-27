@@ -1143,6 +1143,12 @@ async fn finalize_capture(
     if let Some(gs) = session.relic_gate_summary() {
         log.record("finalizing", &gs);
     }
+    // Pass 43: refinement-rule exclusions ride the finalize log
+    // on the same principle — a refinement sync states which
+    // label-less tiles it refused.
+    if let Some(vs) = session.relic_variant_summary() {
+        log.record("finalizing", &vs);
+    }
     set_capture_stage(status, log, CaptureStage::Idle);
     true
 }

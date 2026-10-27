@@ -2656,6 +2656,12 @@ pub struct CellResult {
     /// tile as an unowned catalogue entry. `held` is already false;
     /// this flag is the observable record the capture report lists.
     pub gate_excluded: bool,
+    /// Pass 43 (addendum #108): the refinement-variant rule
+    /// excluded this tile — a held, label-less tile on the
+    /// refinement screen, where no count label means no owned
+    /// evidence. `held` is already false; same observability
+    /// contract as `gate_excluded`.
+    pub refine_excluded: bool,
 }
 
 /// Ambiguity guard: the runner-up name must trail the winner by at least
@@ -2681,6 +2687,7 @@ pub fn validate_read(
         tier: RefinementTier::Unknown,
         rank: read.rank,
         gate_excluded: false,
+        refine_excluded: false,
     };
     if read.confidence < min_confidence {
         return out;
@@ -2864,6 +2871,121 @@ pub fn relic_owned_gate(
         }
         result.held = false;
         result.gate_excluded = true;
+        if let Some(name) = &result.matched {
+            outcome.excluded.push(name.clone());
+        }
+    }
+    outcome
+}
+
+// ---------------------------------------------------------------------------
+// Relic refinement-variant rule (pass 43, addendum #108)
+// ---------------------------------------------------------------------------
+//
+// Two screens share ScreenClass::Relics and they certify
+// ownership differently. The SELECTION variant (fissure-flow
+// picker) badges its unowned catalogue tiles — pass 38's gate
+// works there. The REFINEMENT variant (orbiter segment; the
+// header names it, "VOID RELICS / REFINEMENT") shows the
+// same catalogue with NO badge and NO count label on x1
+// stacks, and an owned x1 tile is pixel-indistinguishable
+// from an unowned one: measured on Seth's 25 native frames
+// (2026-10-26), the production badge scorer peaks at 0.328
+// over 1,925 cells and the name text is identical across
+// classes. Nor is a refinement second line owned evidence —
+// Meso L1, which Seth does not own at all, imported as
+// Radiant x1 from this screen. The only positive owned
+// evidence on this variant is a parsed count label, so a
+// held tile WITHOUT one is refused: 43 phantom names entered
+// stock from one ALL-filter refinement scrape before this
+// rule existed.
+//
+// The brief's OWNED-filter branch (label-less tiles sound
+// when every tile is owned) has no calibratable signal in
+// the corpus: the header's owned-related control is a sort
+// dropdown, the catalogue renders under it in all 25 frames,
+// and the header's "ALL" is the era filter, not an owned
+// filter. Until an owned-only refinement state is captured
+// and a signal calibrated against it, refinement frames
+// take the safe rule unconditionally — a lost x1 sync is
+// recoverable, a poisoned bucket is the bug being fixed.
+
+/// Which relic screen variant a frame came from (pass 43).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelicScreenVariant {
+    /// Not determined (folder ingest, replay seams). The rule
+    /// infers from the reads: see [`relic_variant_from_reads`].
+    Unknown,
+    /// The fissure-flow picker. Pass 38's gate applies; this
+    /// rule is inert.
+    Selection,
+    /// The orbiter refinement screen. Label-only import.
+    Refinement,
+}
+
+/// The variant a frame's own reads prove, for callers with
+/// no header signal: a held read carrying a refinement tier
+/// (a `[Radiant]`-style second line) comes from the
+/// refinement screen's tier-split stacks; the selection
+/// strip's tiles carry no second lines (pass 38's fixture,
+/// re-measured pass 43: every strip read parses Intact).
+/// Anything else proves nothing and stays `Unknown` — the
+/// failure mode is a refinement page whose visible stacks
+/// are all Intact, which infers Unknown and keeps the old
+/// behaviour; the live session path never relies on this
+/// (it reads the variant off the header).
+pub fn relic_variant_from_reads(results: &[CellResult]) -> RelicScreenVariant {
+    if results.iter().any(|r| {
+        r.held
+            && matches!(
+                r.tier,
+                RefinementTier::Exceptional
+                    | RefinementTier::Flawless
+                    | RefinementTier::Radiant
+            )
+    }) {
+        RelicScreenVariant::Refinement
+    } else {
+        RelicScreenVariant::Unknown
+    }
+}
+
+/// One frame's refinement-rule outcome (pass 43).
+#[derive(Debug, Clone, Default)]
+pub struct RelicRefineOutcome {
+    /// Names of the held tiles the rule excluded, in cell order.
+    pub excluded: Vec<String>,
+}
+
+/// Apply the refinement-variant import rule to one relic
+/// frame's validated results: on a refinement frame, every
+/// held tile without a parsed count label is excluded
+/// (`held = false`, `refine_excluded = true`); labelled
+/// tiles and all other variants are untouched. Like the
+/// owned-gate it only ever REMOVES holds, and it runs after
+/// it, so a tile the gate already refused is not recounted.
+pub fn relic_refinement_rule(
+    layout: &Layout,
+    results: &mut [CellResult],
+    variant: RelicScreenVariant,
+) -> RelicRefineOutcome {
+    let mut outcome = RelicRefineOutcome::default();
+    if layout.key != "relic" {
+        return outcome;
+    }
+    let variant = match variant {
+        RelicScreenVariant::Unknown => relic_variant_from_reads(results),
+        v => v,
+    };
+    if variant != RelicScreenVariant::Refinement {
+        return outcome;
+    }
+    for result in results.iter_mut() {
+        if !result.held || result.count.is_some() {
+            continue; // not held anyway, or a label proves ownership
+        }
+        result.held = false;
+        result.refine_excluded = true;
         if let Some(name) = &result.matched {
             outcome.excluded.push(name.clone());
         }
@@ -3776,6 +3898,12 @@ pub fn ingest_folder(
         // page's own split.
         if layout.key == "relic" {
             relic_owned_gate(&cells, layout, &mut page_results, None);
+            // Pass 43: the refinement rule applies here too. No
+            // header exists on this path, so the variant is
+            // inferred from the page's reads (a refinement
+            // second line proves it) — see
+            // relic_variant_from_reads for the failure mode.
+            relic_refinement_rule(layout, &mut page_results, RelicScreenVariant::Unknown);
         }
         results.extend(page_results);
     }
@@ -4471,6 +4599,7 @@ mod tests {
             tier: RefinementTier::Intact,
             rank: None,
             gate_excluded: false,
+            refine_excluded: false,
         }
     }
 
@@ -4596,6 +4725,72 @@ mod tests {
         let out = relic_owned_gate(&cells, &layout, &mut results, None);
         assert!(out.excluded.is_empty(), "no reference, no split, no exclusion");
         assert!(results.iter().all(|r| r.held));
+    }
+
+    #[test]
+    fn refinement_rule_excludes_labelless_and_keeps_labelled() {
+        // A refinement frame: two labelled stacks (positive
+        // owned evidence) and two label-less tiles — an owned
+        // x1 and an unowned catalogue entry, indistinguishable
+        // on this variant. Both label-less tiles are refused.
+        let layout = relic_layout();
+        let mut results = vec![
+            held_cell_result(0, "Meso S7", Some(14)),
+            held_cell_result(1, "Neo N1", Some(8)),
+            held_cell_result(2, "Meso V15", None),
+            held_cell_result(3, "Meso L1", None),
+        ];
+        results[3].tier = RefinementTier::Radiant;
+        let out = relic_refinement_rule(
+            &layout,
+            &mut results,
+            RelicScreenVariant::Refinement,
+        );
+        assert_eq!(out.excluded, vec!["Meso V15", "Meso L1"]);
+        assert!(results[0].held && results[1].held, "labels prove ownership");
+        assert!(!results[2].held && results[2].refine_excluded);
+        assert!(!results[3].held && results[3].refine_excluded);
+    }
+
+    #[test]
+    fn refinement_rule_inert_off_the_refinement_variant() {
+        // Selection frames (pass 38's gate owns them) and
+        // undetermined frames with no second line anywhere
+        // keep the old behaviour bit-identically.
+        let layout = relic_layout();
+        for variant in [RelicScreenVariant::Selection, RelicScreenVariant::Unknown] {
+            let mut results = vec![
+                held_cell_result(0, "Lith A1", None),
+                held_cell_result(1, "Meso B2", Some(3)),
+            ];
+            let out = relic_refinement_rule(&layout, &mut results, variant);
+            assert!(out.excluded.is_empty(), "variant {variant:?} must be inert");
+            assert!(results.iter().all(|r| r.held && !r.refine_excluded));
+        }
+    }
+
+    #[test]
+    fn refinement_rule_infers_the_variant_from_a_second_line() {
+        // Unknown variant (the ingest seam): one held read
+        // carrying a refinement tier proves the frame is a
+        // refinement frame, and the label-only rule then
+        // applies to the whole frame — the Intact label-less
+        // tile beside it is refused too.
+        let layout = relic_layout();
+        let mut results = vec![
+            held_cell_result(0, "Lith G6", None),
+            held_cell_result(1, "Meso L1", None),
+            held_cell_result(2, "Axi A1", Some(8)),
+        ];
+        results[0].tier = RefinementTier::Radiant;
+        results[1].tier = RefinementTier::Radiant;
+        let out = relic_refinement_rule(
+            &layout,
+            &mut results,
+            RelicScreenVariant::Unknown,
+        );
+        assert_eq!(out.excluded, vec!["Lith G6", "Meso L1"]);
+        assert!(results[2].held, "the labelled stack still imports");
     }
 
     #[test]

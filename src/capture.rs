@@ -34,7 +34,9 @@ use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
 
-use crate::ocr::{self, GrayImage, Layout, OcrEngine, RefinementTier, StockState, Universe};
+use crate::ocr::{
+    self, GrayImage, Layout, OcrEngine, RefinementTier, RelicScreenVariant, StockState, Universe,
+};
 
 /// Which inventory screen a frame shows. `Other` is any frame with no
 /// matching class (menus, gameplay, loading) — collection pauses silently.
@@ -179,6 +181,29 @@ impl ScreenClassifier {
             }
         }
         best.0
+    }
+
+    /// Pass 43: which relic screen variant a header belongs
+    /// to. The refinement screen's title names itself —
+    /// "VOID RELICS / REFINEMENT" — while the selection
+    /// picker's does not, so the variant is the presence of
+    /// the REFINEMENT keyword under the same squash + fuzzy
+    /// discipline as [`classify_text`](Self::classify_text)
+    /// (a long keyword: 2 edits of allowance). Measured on
+    /// Seth's 25 native refinement headers (2026-10-26): the
+    /// word read verbatim in 25/25, inside a header that also
+    /// carries the COLLECTED counters the picker lacks.
+    pub fn relic_variant(&self, header_text: &str) -> RelicScreenVariant {
+        let squashed: String = header_text
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .map(|c| c.to_ascii_uppercase())
+            .collect();
+        if squashed.contains("REFINEMENT") || fuzzy_keyword_present(&squashed, "REFINEMENT") {
+            RelicScreenVariant::Refinement
+        } else {
+            RelicScreenVariant::Selection
+        }
     }
 
     /// OCR the header strip of `frame` and classify it.
@@ -465,6 +490,11 @@ pub struct ReadOptions {
     /// session (folder ingest, replay seams): the gate then works
     /// from the frame's own split alone.
     pub relic_bright_ref: Option<f64>,
+    /// Pass 43: which relic screen variant the frame came from,
+    /// when the caller knows (the session reads it off the
+    /// header). `Unknown` lets the refinement rule infer from
+    /// the reads.
+    pub relic_variant: RelicScreenVariant,
 }
 
 /// Everything one stitch bundle needs beyond its frames, layout,
@@ -487,6 +517,7 @@ impl CaptureContext<'_> {
             radius_tail_budget: self.radius_tail_budget,
             strip_offsets: self.strip_offsets,
             relic_bright_ref: None,
+            relic_variant: RelicScreenVariant::Unknown,
         }
     }
 
@@ -1090,6 +1121,10 @@ pub struct CaptureSession {
     /// first-exclusion order, deduplicated — the finalize log's
     /// record of what a browse sync refused to import.
     relic_gate_excluded: Vec<String>,
+    /// Pass 43: names the refinement rule excluded this session,
+    /// same order/dedup discipline — the finalize log's record
+    /// of which label-less refinement tiles were refused.
+    relic_variant_excluded: Vec<String>,
 }
 
 impl CaptureSession {
@@ -1235,6 +1270,23 @@ impl CaptureSession {
             "relic owned-gate: excluded {} unowned catalogue tile(s): {}",
             self.relic_gate_excluded.len(),
             self.relic_gate_excluded.join(", ")
+        ))
+    }
+
+    /// Pass 43: the refinement rule's finalize line — how many
+    /// label-less tiles were refused on refinement screens this
+    /// session, and which. `None` when the rule excluded
+    /// nothing (any session that never read a refinement
+    /// frame, and any refinement page whose tiles all carried
+    /// labels).
+    pub fn relic_variant_summary(&self) -> Option<String> {
+        if self.relic_variant_excluded.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "relic refinement rule: excluded {} label-less tile(s) (no count label = no owned evidence on the refinement screen): {}",
+            self.relic_variant_excluded.len(),
+            self.relic_variant_excluded.join(", ")
         ))
     }
 
@@ -1411,6 +1463,14 @@ impl CaptureSession {
         } else {
             None
         };
+        // Pass 43: the relic variant rides the header this
+        // session already classified — the refinement screen
+        // names itself in its title.
+        let variant = if class == ScreenClass::Relics {
+            ctx.classifier.relic_variant(&header_text)
+        } else {
+            RelicScreenVariant::Unknown
+        };
         let results = read_frame(
             layout,
             frame,
@@ -1418,14 +1478,24 @@ impl CaptureSession {
             ctx,
             ctx.universes.for_class(class),
             bright_ref,
+            variant,
         );
         // Pass 38: record what the owned-gate refused, for the
         // finalize log (first-exclusion order, deduplicated).
+        // Pass 43: the refinement rule's refusals ride along in
+        // their own list, same discipline.
         for r in &results {
             if r.gate_excluded {
                 if let Some(name) = &r.matched {
                     if !self.relic_gate_excluded.contains(name) {
                         self.relic_gate_excluded.push(name.clone());
+                    }
+                }
+            }
+            if r.refine_excluded {
+                if let Some(name) = &r.matched {
+                    if !self.relic_variant_excluded.contains(name) {
+                        self.relic_variant_excluded.push(name.clone());
                     }
                 }
             }
@@ -1921,6 +1991,7 @@ pub fn read_frame(
     ctx: &CaptureContext<'_>,
     universe: &Universe,
     bright_ref: Option<f64>,
+    variant: RelicScreenVariant,
 ) -> Vec<ocr::CellResult> {
     // One batched call for the whole page (addendum #81): the
     // tesseract engine caches by crop hash and batches cache misses
@@ -1928,6 +1999,7 @@ pub fn read_frame(
     let cells = layout.split(frame);
     let mut opts = ctx.read_options();
     opts.relic_bright_ref = bright_ref;
+    opts.relic_variant = variant;
     read_cells(&cells, layout, engine, &opts, universe)
 }
 
@@ -2092,8 +2164,15 @@ pub fn read_cells(
     // (on catalogue frames, under the full evidence conjunction;
     // see ocr::relic_owned_gate). Parts and arcane frames never
     // reach it, and on owned-only relic frames it is inert.
+    //
+    // Pass 43 (addendum #108): the refinement-variant rule runs
+    // after the gate, on the same terms — on refinement frames a
+    // held tile with no parsed count label carries no owned
+    // evidence (no badge, no x1 label on that variant), so it is
+    // refused. See ocr::relic_refinement_rule.
     if layout.key == "relic" {
         ocr::relic_owned_gate(cells, layout, &mut results, opts.relic_bright_ref);
+        ocr::relic_refinement_rule(layout, &mut results, opts.relic_variant);
     }
     results
 }
@@ -3044,6 +3123,31 @@ mod tests {
         assert!(!shipped.relic_keywords.is_empty());
     }
 
+    #[test]
+    fn relic_variant_reads_the_header_title() {
+        // Pass 43: the refinement screen names itself; the
+        // selection picker's header does not. Garbled reads of
+        // the kind Seth's headers produce stay on their side of
+        // the line (the fuzzy window forgives a dropped glyph).
+        let c = classifier();
+        assert_eq!(
+            c.relic_variant("VOID RELICS/REFINEMENT ALL COLLECTED 528/800 RADIANT 46/800"),
+            RelicScreenVariant::Refinement
+        );
+        assert_eq!(
+            c.relic_variant("4 VOID RELICS/REFINEMENT oo (Cine SV ALL COLLECTED 528/800"),
+            RelicScreenVariant::Refinement
+        );
+        assert_eq!(
+            c.relic_variant("VOID RELICS ALL"),
+            RelicScreenVariant::Selection
+        );
+        assert_eq!(
+            c.relic_variant("+VOID RELICS [SEARCH"),
+            RelicScreenVariant::Selection
+        );
+    }
+
     /// Engine that counts header reads and always reports a relic
     /// header — the seam for the addendum #81 header-cache test.
     struct CountingEngine {
@@ -3355,6 +3459,7 @@ mod tests {
             radius_tail_budget: crate::ocr::RADIUS_TAIL_BUDGET,
             strip_offsets: false,
             relic_bright_ref: None,
+            relic_variant: RelicScreenVariant::Unknown,
         }
     }
 
@@ -3443,6 +3548,131 @@ mod tests {
                 assert!(!r.held, "unowned {} must not enter stock", flat[i]);
             }
         }
+    }
+
+    #[test]
+    fn refinement_corpus_replay_refuses_the_phantoms() {
+        // Pass 43 (addendum #108) corpus gate: replay Seth's 25
+        // native refinement frames (the 2026-10-26 ALL-filter
+        // scrape whose stock imported 43 new names, 38 of them
+        // phantoms) through the production read path, with the
+        // variant taken from each frame's header exactly as the
+        // session takes it. Every phantom must be REFUSED, the
+        // label-less collateral must stay out, and labelled
+        // stacks must still import with their counts. Skips
+        // when the corpus is absent (the strip-test pattern).
+        //
+        // The phantom set: names stock-3 gained over the
+        // verified stock-2 whose every tier read singleton —
+        // the label-less reads. The four labelled newcomers
+        // (Meso S7 x14, Neo N1 x8, Meso X1 x2, Neo C10 x2) are
+        // genuinely owned and MUST import. Meso V15 is owned
+        // in both tiers (Seth, 2026-10-26) but reads
+        // label-less singleton in both, so the rule refuses it
+        // too — the safe default's known cost, asserted here
+        // so it is a decision on record, not a surprise.
+        const PHANTOMS: &[&str] = &[
+            "Axi A12", "Axi A13", "Axi A15", "Axi A19", "Axi A2", "Axi A23", "Axi A3",
+            "Axi A6", "Axi A7", "Axi A8", "Axi B7", "Meso G7", "Meso H1", "Meso L1",
+            "Meso L3", "Meso L5", "Meso M1", "Meso N12", "Meso O3", "Meso P9", "Meso R2",
+            "Meso T2", "Meso V11", "Meso V5", "Meso Z2", "Neo A12", "Neo B6", "Neo E2",
+            "Neo F3", "Neo K9", "Neo O2", "Neo P4", "Neo P7", "Neo P9", "Neo T11",
+            "Neo V12", "Neo V7", "Neo Y1",
+        ];
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let corpus = root.join("../fracker-frames/live-relic-sync");
+        if !corpus.join("frame-relics-00.png").exists() {
+            eprintln!("skip refinement corpus: absent");
+            return;
+        }
+        let data = CaptureData::load(&root.join("data")).expect("capture data loads");
+        let ctx = data.context();
+        let layout = ctx.layouts.get("relic").expect("relic layout").clone();
+        let Some(engine) = crate::ocr::TesseractCliEngine::probe(layout.clone()) else {
+            eprintln!("skip refinement corpus: no tesseract");
+            return;
+        };
+        let universe = ctx.universes.for_class(ScreenClass::Relics);
+        let mut excluded: HashSet<String> = HashSet::new();
+        let mut held_pairs: HashSet<(String, RefinementTier)> = HashSet::new();
+        let mut labelled: HashMap<(String, RefinementTier), u32> = HashMap::new();
+        for i in 0..25 {
+            let path = corpus.join(format!("frame-relics-{i:02}.png"));
+            let img = GrayImage::from_bytes(&std::fs::read(&path).unwrap()).unwrap();
+            let (class, header) = data.classifier.classify_detailed(&engine, &img);
+            assert_eq!(class, ScreenClass::Relics, "frame {i} class");
+            let variant = data.classifier.relic_variant(&header);
+            assert_eq!(
+                variant,
+                RelicScreenVariant::Refinement,
+                "frame {i} variant (header: {header:?})"
+            );
+            let results = read_frame(&layout, &img, &engine, &ctx, universe, None, variant);
+            for r in &results {
+                let Some(name) = &r.matched else { continue };
+                if r.refine_excluded {
+                    excluded.insert(name.clone());
+                }
+                if r.held {
+                    assert!(
+                        !PHANTOMS.contains(&name.as_str()),
+                        "phantom {name} imported from frame {i}"
+                    );
+                    assert_ne!(
+                        name, "Meso V15",
+                        "label-less collateral Meso V15 imported from frame {i}"
+                    );
+                    held_pairs.insert((name.clone(), r.tier));
+                    if let Some(c) = r.count {
+                        let e = labelled.entry((name.clone(), r.tier)).or_insert(0);
+                        *e = (*e).max(c);
+                    }
+                }
+            }
+        }
+        // Every phantom was read on the tail pages and refused.
+        for p in PHANTOMS {
+            assert!(excluded.contains(*p), "phantom {p} was never refused");
+        }
+        assert!(
+            excluded.contains("Meso V15"),
+            "the owned label-less collateral is refused too (the safe default's cost)"
+        );
+        // The poisoned stock's three in-both singleton Radiant
+        // tiers are label-less reads: refused as well.
+        for pair in [
+            ("Axi V1", RefinementTier::Radiant),
+            ("Lith A2", RefinementTier::Radiant),
+            ("Meso A8", RefinementTier::Radiant),
+        ] {
+            assert!(
+                !held_pairs.contains(&(pair.0.to_owned(), pair.1)),
+                "{pair:?} imported"
+            );
+        }
+        // The labelled newcomers of the live scrape import with
+        // their counts.
+        for (name, count) in [
+            ("Meso S7", 14),
+            ("Neo N1", 8),
+            ("Meso X1", 2),
+            ("Neo C10", 2),
+        ] {
+            assert_eq!(
+                labelled.get(&(name.to_owned(), RefinementTier::Intact)),
+                Some(&count),
+                "{name} must import labelled at x{count}"
+            );
+        }
+        // And the labelled population survives broadly: the
+        // baseline replay held 517 stacks, 305 of them with a
+        // parsed label somewhere; the rule may only cost the
+        // label-less remainder.
+        assert!(
+            labelled.len() >= 290,
+            "only {} labelled stacks imported",
+            labelled.len()
+        );
     }
 
     #[test]
