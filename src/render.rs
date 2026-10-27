@@ -75,6 +75,11 @@ pub struct SearchData<'a> {
     pub part_stock: &'a HashMap<String, u32>,
     /// Seth's unverified (⍻) part assertions, by roster part name.
     pub unverified_parts: &'a HashMap<String, u32>,
+    /// Relic display name -> Public Export icon URL (pass 48),
+    /// keyed case-folded by [`crate::model::relic_icon_urls`] and
+    /// resolved through [`crate::model::relic_icon_url`]. A relic
+    /// absent from the map keeps its monogram chip.
+    pub relic_icons: &'a HashMap<String, String>,
 }
 
 /// How item icons are delivered on the page.
@@ -1240,10 +1245,12 @@ fn search_part_row_html(g: &crate::plan::GoalCard, p: &crate::plan::PartRow) -> 
 /// Seth's ruling), and the reward list, common first in the
 /// app's rarity colouring, each reward marked by his state.
 ///
-/// Icon note: the app's icon dataset (data/icons.json) is
-/// gear-only — no relic image source exists — so the header chip
-/// takes the same monogram treatment an unresolved gear icon
-/// gets, never an invented image.
+/// Icon (pass 48): the relic's own Public Export texture,
+/// resolved at report time by [`crate::model::relic_icon_url`]
+/// from the baked ExportManifest subset — the same chip markup
+/// as a gear icon (image over the monogram initial, removed on
+/// load error). A relic the manifest does not resolve keeps
+/// the monogram alone, never an invented image.
 fn search_relic_html(
     r: &crate::model::RelicEntry,
     data: &SearchData<'_>,
@@ -1253,9 +1260,15 @@ fn search_relic_html(
     let mut h = sr_open("relic", &r.name);
     h.push_str("<div class=\"srh\">\n");
     let initial = r.name.chars().next().unwrap_or('?');
-    h.push_str(&format!(
-        "<span class=\"mi lg\" aria-hidden=\"true\">{initial}</span>"
-    ));
+    match crate::model::relic_icon_url(&r.name, data.relic_icons) {
+        Some(url) => h.push_str(&format!(
+            "<span class=\"mi lg\"><img src=\"{}\" alt=\"\" loading=\"lazy\" onerror=\"this.remove()\">{initial}</span>",
+            esc(&url)
+        )),
+        None => h.push_str(&format!(
+            "<span class=\"mi lg\" aria-hidden=\"true\">{initial}</span>"
+        )),
+    }
     h.push_str(&format!("<b class=\"srt\">{}</b>\n", esc(&r.name)));
     if r.vaulted {
         h.push_str("<em class=\"bd v\">VAULTED</em>\n");
@@ -3093,6 +3106,7 @@ mod tests {
         stock: &'a crate::model::RelicStock,
         part_stock: &'a HashMap<String, u32>,
         unverified: &'a HashMap<String, u32>,
+        relic_icons: &'a HashMap<String, String>,
     ) -> RenderContext<'a> {
         let mut ctx = empty_ctx(world, t, weekly, proven, icons, cats, None);
         ctx.search = Some(SearchData {
@@ -3100,6 +3114,7 @@ mod tests {
             stock,
             part_stock,
             unverified_parts: unverified,
+            relic_icons,
         });
         ctx
     }
@@ -3141,9 +3156,10 @@ mod tests {
         let part_stock: HashMap<String, u32> =
             HashMap::from([("Bo Prime Blade".to_owned(), 1)]);
         let unverified: HashMap<String, u32> = HashMap::new();
+        let no_relic_icons: HashMap<String, String> = HashMap::new();
         let ctx = search_ctx(
             &world, &t, &weekly, &proven, &icons, &cats, &relics, &stock, &part_stock,
-            &unverified,
+            &unverified, &no_relic_icons,
         );
         let mut card = goal("Bo Prime", "Bo Prime Handle", false, false);
         card.parts = vec![srow("Bo Prime Handle", PartState::Need, 0)];
@@ -3194,6 +3210,74 @@ mod tests {
         );
     }
 
+    /// Gate (pass 48): a relic the ExportManifest join resolves
+    /// renders its actual icon <img> at the content-server URL —
+    /// NOT the monogram span; a relic it does not resolve keeps
+    /// the monogram and no <img>.
+    #[test]
+    fn search_index_relic_block_shows_the_real_icon() {
+        let t = Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        // The fixture join: item-names' first hop plus a fixture
+        // ExportManifest texture subset (Meso C11 Intact only).
+        let item_names: HashMap<String, String> = HashMap::from([(
+            "/Lotus/Types/Game/Projections/T2VoidProjectionCitrinePrimeABronze"
+                .to_owned(),
+            "Meso C11 Intact".to_owned(),
+        )]);
+        let textures: HashMap<String, String> = HashMap::from([(
+            "/Lotus/Types/Game/Projections/T2VoidProjectionCitrinePrimeABronze"
+                .to_owned(),
+            "/Lotus/Interface/Icons/Relics/RelicMesoD.png!00_fixturehash".to_owned(),
+        )]);
+        let relic_icons = crate::model::relic_icon_urls(&item_names, &textures);
+        let entry = |name: &str| crate::model::RelicEntry {
+            name: name.to_owned(),
+            rewards: vec![srelic_reward("Forma Blueprint", 25.33)],
+            vaulted: false,
+            sources: HashMap::new(),
+        };
+        let relics = crate::model::RelicTables {
+            relics: HashMap::from([
+                ("Meso C11".to_owned(), entry("Meso C11")),
+                ("Lith Z9".to_owned(), entry("Lith Z9")),
+            ]),
+            sources: HashMap::new(),
+        };
+        let stock = crate::model::RelicStock::Unknown;
+        let part_stock: HashMap<String, u32> = HashMap::new();
+        let unverified: HashMap<String, u32> = HashMap::new();
+        let ctx = search_ctx(
+            &world, &t, &weekly, &proven, &icons, &cats, &relics, &stock, &part_stock,
+            &unverified, &relic_icons,
+        );
+        let index = search_index_html(&Plan::default(), &ctx);
+        let resolved = sr_block(&index, "Meso C11");
+        assert!(
+            resolved.contains(
+                "<img src=\"http://content.warframe.com/PublicExport/Lotus/Interface/Icons/Relics/RelicMesoD.png!00_fixturehash\""
+            ),
+            "the resolved relic shows its real icon: {resolved}"
+        );
+        assert!(
+            !resolved.contains("aria-hidden=\"true\""),
+            "no monogram-only chip on a resolved relic: {resolved}"
+        );
+        let unresolved = sr_block(&index, "Lith Z9");
+        assert!(
+            unresolved.contains("<span class=\"mi lg\" aria-hidden=\"true\">L</span>"),
+            "the unresolved relic keeps the monogram: {unresolved}"
+        );
+        assert!(
+            !unresolved.contains("<img"),
+            "never an invented image: {unresolved}"
+        );
+    }
+
     /// Gate (brief §gates): the item result shows its parts with
     /// held/state and permits ⍻ toggling — and carries NO crack
     /// line (Seth excluded it explicitly).
@@ -3209,9 +3293,10 @@ mod tests {
         let stock = crate::model::RelicStock::Unknown;
         let part_stock: HashMap<String, u32> = HashMap::new();
         let unverified: HashMap<String, u32> = HashMap::new();
+        let no_relic_icons: HashMap<String, String> = HashMap::new();
         let ctx = search_ctx(
             &world, &t, &weekly, &proven, &icons, &cats, &relics, &stock, &part_stock,
-            &unverified,
+            &unverified, &no_relic_icons,
         );
         let mut card = goal("Bo Prime", "Bo Prime Handle", true, false);
         card.parts_have = 2;

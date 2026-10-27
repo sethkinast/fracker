@@ -1782,6 +1782,111 @@ pub fn load_icons(text: &str) -> Result<HashMap<String, String>, String> {
     serde_json::from_str(text).map_err(|e| format!("icons: {e}"))
 }
 
+/// DE Public Export content-server base (pass 48, Seth's source
+/// spec 2026-10-27): an ExportManifest `textureLocation` appended
+/// to this prefix is the item's image asset. The locations carry
+/// their own `!<hash>` suffix and are hash-addressed — DE rotates
+/// them only by shipping a new manifest (see the refresh
+/// procedure in data/cache/README.md).
+pub const PUBLIC_EXPORT_BASE: &str = "http://content.warframe.com/PublicExport";
+
+/// Refinement tiers in relic-icon preference order (pass 48): the
+/// overlay shows ONE icon per relic — the Intact projection's
+/// texture; the coarser tiers substitute only when a finer one
+/// carries no texture.
+const RELIC_ICON_TIERS: [&str; 4] = ["Intact", "Exceptional", "Flawless", "Radiant"];
+
+/// Parse the baked projection-texture map
+/// (`data/cache/relic-textures.json`): projection uniqueName ->
+/// Public Export `textureLocation`, the ExportManifest subset for
+/// the projections `item-names.json` knows. Baked, never fetched
+/// at runtime (addendum #51 discipline); refresh per
+/// data/cache/README.md.
+pub fn load_relic_textures(text: &str) -> Result<HashMap<String, String>, String> {
+    serde_json::from_str(text).map_err(|e| format!("relic textures: {e}"))
+}
+
+/// Build the relic icon map: relic display name -> absolute
+/// Public Export texture URL (pass 48). Keys are CASE-FOLDED base
+/// names; resolve through [`relic_icon_url`], never by raw key.
+///
+/// The join: `item_names` maps each projection uniqueName
+/// (`/Lotus/Types/Game/Projections/...`) to a tier-suffixed
+/// display name ("Meso C11 Intact"); stripping the tier word
+/// gives the base relic name, and `textures` gives that
+/// projection's textureLocation. Two naming quirks in the
+/// sources are normalized here, never guessed around:
+/// relic-tables roman numerals are title-case ("Requiem Ii")
+/// where item-names uses upper ("Requiem II") — the case-folded
+/// key absorbs that; and the Vanguard relics are "Axi Vanguard
+/// C1" in the tables but plain "Vanguard C1" as projections —
+/// Vanguard bases are ALSO keyed with the "Axi " prefix.
+/// A display name with no tier suffix ("Requiem Eterna Relic",
+/// a single-variant projection) keys its base minus " Relic"
+/// at the Intact slot. A relic no tier resolves a texture for
+/// is simply absent — the caller keeps its monogram.
+pub fn relic_icon_urls(
+    item_names: &HashMap<String, String>,
+    textures: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    // Case-folded base name -> per-tier projection uniqueName.
+    let mut candidates: HashMap<String, [Option<&str>; 4]> = HashMap::new();
+    for (unique, display) in item_names {
+        if !unique.contains("/Projections/") {
+            continue;
+        }
+        let mut parsed: Option<(&str, usize)> = None;
+        for (rank, tier) in RELIC_ICON_TIERS.iter().enumerate() {
+            if let Some(base) = display
+                .strip_suffix(tier)
+                .and_then(|s| s.strip_suffix(' '))
+            {
+                parsed = Some((base, rank));
+                break;
+            }
+        }
+        if parsed.is_none() {
+            if let Some(base) = display.strip_suffix(" Relic") {
+                parsed = Some((base, 0));
+            }
+        }
+        let Some((base, rank)) = parsed else {
+            continue;
+        };
+        let slot = &mut candidates.entry(base.to_lowercase()).or_default()[rank];
+        if slot.is_none() {
+            *slot = Some(unique.as_str());
+        }
+        if base.starts_with("Vanguard") {
+            let alias = format!("axi {}", base.to_lowercase());
+            let slot = &mut candidates.entry(alias).or_default()[rank];
+            if slot.is_none() {
+                *slot = Some(unique.as_str());
+            }
+        }
+    }
+    let mut out = HashMap::new();
+    for (key, tiers) in &candidates {
+        for unique in tiers.iter().flatten() {
+            if let Some(loc) = textures.get(*unique) {
+                out.insert(
+                    key.clone(),
+                    format!("{PUBLIC_EXPORT_BASE}/{}", loc.trim_start_matches('/')),
+                );
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// One relic's icon URL from the map [`relic_icon_urls`] built
+/// (pass 48), mirroring [`icon_url`]: unresolved relics keep
+/// the monogram (None) — never an invented URL.
+pub fn relic_icon_url(relic: &str, icons: &HashMap<String, String>) -> Option<String> {
+    icons.get(&relic.to_lowercase()).cloned()
+}
+
 // ---------------------------------------------------------------------------
 // Profile + stock
 // ---------------------------------------------------------------------------
@@ -1852,6 +1957,127 @@ impl RelicStock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pass 48 gate: a known projection uniqueName resolves
+    /// through a fixture ExportManifest texture map to the
+    /// expected content-server URL — Intact preferred, coarser
+    /// tiers only as substitutes, the source naming quirks
+    /// normalized, and an unresolvable relic absent (monogram),
+    /// never a guessed URL.
+    #[test]
+    fn relic_icon_urls_resolve_through_the_manifest_join() {
+        let item_names: HashMap<String, String> = HashMap::from([
+            // Meso C11, all four tiers (real uniqueNames).
+            (
+                "/Lotus/Types/Game/Projections/T2VoidProjectionCitrinePrimeABronze".to_owned(),
+                "Meso C11 Intact".to_owned(),
+            ),
+            (
+                "/Lotus/Types/Game/Projections/T2VoidProjectionCitrinePrimeASilver".to_owned(),
+                "Meso C11 Exceptional".to_owned(),
+            ),
+            (
+                "/Lotus/Types/Game/Projections/T2VoidProjectionCitrinePrimeAGold".to_owned(),
+                "Meso C11 Flawless".to_owned(),
+            ),
+            (
+                "/Lotus/Types/Game/Projections/T2VoidProjectionCitrinePrimeAPlatinum".to_owned(),
+                "Meso C11 Radiant".to_owned(),
+            ),
+            // Tier-fallback relic: only its Radiant tier carries
+            // a texture in the fixture manifest.
+            (
+                "/Lotus/Types/Game/Projections/T4VoidProjectionABronze".to_owned(),
+                "Axi A99 Intact".to_owned(),
+            ),
+            (
+                "/Lotus/Types/Game/Projections/T4VoidProjectionAPlatinum".to_owned(),
+                "Axi A99 Radiant".to_owned(),
+            ),
+            // The Vanguard alias and the roman-numeral casing.
+            (
+                "/Lotus/Types/Game/Projections/T4VoidProjectionVanguardCBronze".to_owned(),
+                "Vanguard C1 Intact".to_owned(),
+            ),
+            (
+                "/Lotus/Types/Game/Projections/T5VoidProjectionImmortalBBronze".to_owned(),
+                "Requiem II Intact".to_owned(),
+            ),
+            // The single-variant projection: no tier suffix.
+            (
+                "/Lotus/Types/Game/Projections/T5VoidProjectionImmortalOmniA".to_owned(),
+                "Requiem Eterna Relic".to_owned(),
+            ),
+            // A non-projection entry: never part of the join.
+            (
+                "/Lotus/Powersuits/Bard/OctaviaPrime".to_owned(),
+                "Octavia Prime".to_owned(),
+            ),
+        ]);
+        let textures: HashMap<String, String> = HashMap::from([
+            (
+                "/Lotus/Types/Game/Projections/T2VoidProjectionCitrinePrimeABronze".to_owned(),
+                "/Lotus/Interface/Icons/Relics/RelicMesoD.png!00_fixturehash".to_owned(),
+            ),
+            (
+                "/Lotus/Types/Game/Projections/T4VoidProjectionAPlatinum".to_owned(),
+                "/Lotus/Interface/Icons/Relics/RelicAxiR.png!00_fixturehash".to_owned(),
+            ),
+            (
+                "/Lotus/Types/Game/Projections/T4VoidProjectionVanguardCBronze".to_owned(),
+                "/Lotus/Interface/Icons/Relics/RelicAxiD.png!00_fixturehash".to_owned(),
+            ),
+            (
+                "/Lotus/Types/Game/Projections/T5VoidProjectionImmortalBBronze".to_owned(),
+                "/Lotus/Interface/Icons/Relics/RelicImmortalB.png!00_fixturehash".to_owned(),
+            ),
+            (
+                "/Lotus/Types/Game/Projections/T5VoidProjectionImmortalOmniA".to_owned(),
+                "/Lotus/Interface/Icons/Relics/RelicImmortalC.png!00_fixturehash".to_owned(),
+            ),
+        ]);
+        let icons = relic_icon_urls(&item_names, &textures);
+        assert_eq!(
+            relic_icon_url("Meso C11", &icons).as_deref(),
+            Some(
+                "http://content.warframe.com/PublicExport/Lotus/Interface/Icons/Relics/RelicMesoD.png!00_fixturehash"
+            ),
+            "the Intact projection's texture, on the content server"
+        );
+        assert_eq!(
+            relic_icon_url("Axi A99", &icons).as_deref(),
+            Some(
+                "http://content.warframe.com/PublicExport/Lotus/Interface/Icons/Relics/RelicAxiR.png!00_fixturehash"
+            ),
+            "Intact carries no texture: the Radiant substitute"
+        );
+        assert_eq!(
+            relic_icon_url("Axi Vanguard C1", &icons).as_deref(),
+            Some(
+                "http://content.warframe.com/PublicExport/Lotus/Interface/Icons/Relics/RelicAxiD.png!00_fixturehash"
+            ),
+            "the tables' Axi-prefixed Vanguard name resolves"
+        );
+        assert_eq!(
+            relic_icon_url("Requiem Ii", &icons).as_deref(),
+            Some(
+                "http://content.warframe.com/PublicExport/Lotus/Interface/Icons/Relics/RelicImmortalB.png!00_fixturehash"
+            ),
+            "title-case roman numerals in the tables still resolve"
+        );
+        assert_eq!(
+            relic_icon_url("Requiem Eterna", &icons).as_deref(),
+            Some(
+                "http://content.warframe.com/PublicExport/Lotus/Interface/Icons/Relics/RelicImmortalC.png!00_fixturehash"
+            ),
+            "the tier-less single-variant projection resolves"
+        );
+        assert_eq!(
+            relic_icon_url("Lith Z9", &icons),
+            None,
+            "an unresolvable relic stays absent — monogram, never a guess"
+        );
+    }
 
     #[test]
     fn universe_scrub_excludes_and_canonicalizes() {

@@ -332,6 +332,14 @@ pub async fn generate(
         .unwrap_or((config::Config::default(), config::ConfigSource::Defaults));
 
     let item_names = fetch::load_item_names(&cfg.data_dir);
+    // Pass 48: the overlay's relic icons, resolved at generation
+    // time from the baked ExportManifest texture subset joined
+    // through item-names (Intact projection preferred). No
+    // network — the textures bake with the other DE data
+    // (data/cache/README.md); an absent map degrades every
+    // relic header to its monogram.
+    let relic_textures = fetch::load_relic_textures(&cfg.data_dir);
+    let relic_icons = model::relic_icon_urls(&item_names, &relic_textures);
     let input = plan::PlanInput {
         now,
         world: &world,
@@ -404,6 +412,7 @@ pub async fn generate(
             stock: &stock,
             part_stock: &part_stock,
             unverified_parts: &unverified_parts,
+            relic_icons: &relic_icons,
         }),
     };
     let html = render::render_plan(&plan, &ctx);
