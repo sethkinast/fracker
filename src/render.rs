@@ -52,6 +52,29 @@ pub struct RenderContext<'a> {
     pub pack: Option<PackRender>,
     /// Runtime tuning (weekly board, caps labels, sortie ledger).
     pub tuning: &'a Tuning,
+    /// The search overlay's data (forty-seventh pass): the relic
+    /// tables and Seth's stock shapes, borrowed from the same
+    /// locals the planner consumed, so the overlay index renders
+    /// the plan's own truth. `None` in tests that do not exercise
+    /// the overlay (the index renders empty).
+    pub search: Option<SearchData<'a>>,
+}
+
+/// Everything [`search_index_html`] needs beyond the plan itself
+/// (forty-seventh pass). All four shapes are the report pipeline's
+/// own locals — the same values [`crate::plan::PlanInput`] took —
+/// so a relic's stock count and a reward's Need/Have mark can
+/// never drift from what the planner computed.
+pub struct SearchData<'a> {
+    /// The full relic dataset (names, vault flags, rewards).
+    pub relics: &'a crate::model::RelicTables,
+    /// Captured relic holdings (per-relic totals).
+    pub stock: &'a crate::model::RelicStock,
+    /// Canonical verified part counts (addendum #84/#89): the
+    /// fallback evidence for a reward no goal card tracks.
+    pub part_stock: &'a HashMap<String, u32>,
+    /// Seth's unverified (⍻) part assertions, by roster part name.
+    pub unverified_parts: &'a HashMap<String, u32>,
 }
 
 /// How item icons are delivered on the page.
@@ -395,6 +418,14 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
 
     h.push_str("</main>\n");
 
+    // The search overlay's static shell (forty-seventh pass):
+    // outside every fragment, so fragment swaps never disturb it.
+    // The result blocks themselves are NOT in the page — the
+    // client prefetches the per-generation sidecar fragment from
+    // /search-index and clones the winning block in (see
+    // search_index_html and search::client_script).
+    h.push_str(SEARCH_OVERLAY_SHELL);
+
     // checkbox persistence: the resident's loopback server is the store
     // of record; localStorage remains a progressive cache for file://.
     h.push_str("<script>\n");
@@ -404,9 +435,27 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     // reload failsafe) lives in one testable module so the page script
     // cannot drift from it (nineteenth pass §1/§2; forty-first pass).
     h.push_str(&crate::push::client_script());
+    h.push('\n');
+    // The search overlay script (forty-seventh pass): chains onto
+    // __frackerResync (defined by the page script above) so a new
+    // generation invalidates its prefetched index.
+    h.push_str(&crate::search::client_script());
     h.push_str("</script>\n</div>\n</body>\n</html>\n");
     h
 }
+
+/// The search overlay shell: a query line, the single-result
+/// mount point, and a hint line. ~90% dark, much bigger type —
+/// it exists to be read in one glance during the 15-second
+/// reward window (forty-seventh pass, Seth's spec).
+const SEARCH_OVERLAY_SHELL: &str = r#"<div id="search-overlay" hidden>
+<div class="so-box">
+<div class="so-top"><span class="so-prompt">&#8981;</span><span id="search-query"></span></div>
+<div id="search-result"></div>
+<div class="so-hint" id="search-hint">relics &amp; prime items &middot; esc to close</div>
+</div>
+</div>
+"#;
 
 // ---------------------------------------------------------------------------
 // Fragments (forty-first pass): the served page's swap units
@@ -511,6 +560,10 @@ fn header_html(plan: &Plan, ctx: &RenderContext<'_>) -> String {
         parts,
     ));
     h.push_str("</div>\n");
+    // The search overlay's trigger (forty-seventh pass): an icon
+    // button on the header's brand line — the overlay itself also
+    // opens on any printable keypress (see search::client_script).
+    h.push_str("<button type=\"button\" class=\"sbtn\" id=\"search-open\" title=\"Search relics &amp; items — or just start typing\" aria-label=\"Search relics and items\">&#8981;</button>\n");
     h.push_str(&format!(
         "<div class=\"stamp\">MR{mr} &middot; generated {} &middot; {} &middot; {}</div>\n",
         esc(&ctx.generated_label),
@@ -1035,6 +1088,256 @@ fn hunt_card_html(
 }
 
 // ---------------------------------------------------------------------------
+// Search overlay index (forty-seventh pass)
+// ---------------------------------------------------------------------------
+
+/// The search overlay's per-generation index: every prime item
+/// (the plan's goal cards) and every relic as a fully rendered
+/// result block, in deterministic (alphabetical) order. The
+/// report pipeline writes this beside the page (see
+/// [`crate::search::search_index_path`]) and the loopback server
+/// serves it at `GET /search-index`; the client prefetches it and
+/// filters LOCALLY, showing exactly one winning block — it never
+/// templates plan data, it only clones the pre-rendered block and
+/// toggles its visibility. Matching metadata rides in data
+/// attributes (`data-name`, `data-tokens`); the ranking itself is
+/// [`crate::search::best_match`], mirrored by the client script.
+///
+/// Every status shown derives from the plan and the stock the
+/// planner consumed — the overlay is a view over existing truth,
+/// never a second computation of it.
+pub fn search_index_html(plan: &Plan, ctx: &RenderContext<'_>) -> String {
+    let mut h = String::new();
+    let Some(data) = &ctx.search else {
+        return h;
+    };
+    // Part states across the goal cards, for the relic reward
+    // marks. A part name lives on exactly one card (names are
+    // gear-scoped), so the map is unambiguous.
+    let mut states: HashMap<&str, &crate::plan::PartRow> = HashMap::new();
+    for g in &plan.goals {
+        for p in &g.parts {
+            states.insert(p.name.as_str(), p);
+        }
+    }
+    let mut goals: Vec<&crate::plan::GoalCard> = plan.goals.iter().collect();
+    goals.sort_by(|a, b| a.gear.cmp(&b.gear));
+    for g in goals {
+        h.push_str(&search_item_html(g, ctx));
+    }
+    let mut relics: Vec<&crate::model::RelicEntry> =
+        data.relics.relics.values().collect();
+    relics.sort_by(|a, b| a.name.cmp(&b.name));
+    for r in relics {
+        h.push_str(&search_relic_html(r, data, &states, ctx));
+    }
+    h
+}
+
+/// The block's shared opening tag: kind, display name, and the
+/// token set the client filters on (see [`crate::search`]).
+fn sr_open(kind: &str, name: &str) -> String {
+    format!(
+        "<section class=\"sr\" data-kind=\"{kind}\" data-name=\"{}\" data-tokens=\"{}\">\n",
+        esc(name),
+        esc(&crate::search::name_tokens(name).join(" ")),
+    )
+}
+
+/// One prime item's result block: icon, name, vault state, the
+/// card progress, and one row per part with its acquisition
+/// status. NO crack line (Seth, explicitly): the `.gf` footer
+/// the Hunt card carries is deliberately absent. Part rows keep
+/// the Hunt rows' shape and their ⍻ toggle attributes verbatim
+/// (same classes, same `data-uv`, same titles), so the toggle
+/// behaves identically here — it is the one mutation the overlay
+/// permits, through the same POST /unverified path.
+fn search_item_html(g: &crate::plan::GoalCard, ctx: &RenderContext<'_>) -> String {
+    let mut h = sr_open("item", &g.gear);
+    h.push_str("<div class=\"srh\">\n");
+    h.push_str(&mi_span(&g.gear, ctx, "mi lg"));
+    h.push_str(&format!("<b class=\"srt\">{}</b>\n", esc(&g.gear)));
+    // The Hunt card's badges, same rule (#88): Varzia-live shows
+    // VARZIA instead of the vault badge, never both.
+    if g.vaulted && !g.resurgence_live {
+        h.push_str("<em class=\"bd v\">VAULTED</em>\n");
+    } else if g.resurgence_live {
+        h.push_str("<em class=\"bd z\">VARZIA</em>\n");
+    } else {
+        h.push_str("<em class=\"bd\">UNVAULTED</em>\n");
+    }
+    h.push_str(&format!("<span class=\"gc\">{}</span>\n</div>\n", seg_html(g)));
+    for p in &g.parts {
+        h.push_str(&search_part_row_html(g, p));
+    }
+    h.push_str("</section>\n");
+    h
+}
+
+/// One part row of an item result: the Hunt row's label and state
+/// treatment (✓ verified / ⍻ unverified, held/required for
+/// multi-unit parts) and its ⍻ toggle affordance, minus the
+/// relic/refinement columns — the overlay answers "do I have
+/// it?", the reward screen itself shows the relic.
+fn search_part_row_html(g: &crate::plan::GoalCard, p: &crate::plan::PartRow) -> String {
+    let part = short_part(&p.name, &g.gear);
+    let have = p.state == crate::plan::PartState::Have;
+    let uvhave = p.state == crate::plan::PartState::HaveUnverified;
+    let have_class = if have {
+        " have"
+    } else if uvhave {
+        " uvhave"
+    } else {
+        ""
+    };
+    let part_label = if have {
+        format!("✓ {part}")
+    } else if uvhave {
+        format!("⍻ {part}")
+    } else {
+        part.clone()
+    };
+    let part_label = if p.required > 1 {
+        format!("{part_label} {}/{}", p.held.min(p.required), p.required)
+    } else {
+        part_label
+    };
+    // The Hunt toggle contract, verbatim: every row that is not
+    // verified-Have toggles the part's unverified membership.
+    let uv_class = if have { "" } else { " uv" };
+    let uv_attrs = if have {
+        String::new()
+    } else {
+        format!(
+            " data-uv=\"{}\" title=\"{}\" role=\"button\"",
+            esc(&p.name),
+            if uvhave {
+                "Unverified stock (⍻) — click to withdraw the assertion"
+            } else {
+                "Click to assert unverified stock (⍻): I hold this — capture has not verified it"
+            },
+        )
+    };
+    let state_text = match p.state {
+        crate::plan::PartState::Have => "Have",
+        crate::plan::PartState::HaveUnverified => "⍻ unverified",
+        crate::plan::PartState::Need => "Need",
+        crate::plan::PartState::Unknown => "unknown",
+    };
+    format!(
+        "<div class=\"r{have_class}{uv_class}\"{uv_attrs}>\n<span class=\"pn\">{}</span>\n<span class=\"srstate {}\">{}</span>\n</div>\n",
+        esc(&part_label),
+        part_state_class(&p.state),
+        state_text,
+        have_class = have_class,
+        uv_class = uv_class,
+        uv_attrs = uv_attrs,
+    )
+}
+
+/// One relic's result block: icon chip, name, vault status, his
+/// stock count (TOTAL only — no refinement-tier breakdown,
+/// Seth's ruling), and the reward list, common first in the
+/// app's rarity colouring, each reward marked by his state.
+///
+/// Icon note: the app's icon dataset (data/icons.json) is
+/// gear-only — no relic image source exists — so the header chip
+/// takes the same monogram treatment an unresolved gear icon
+/// gets, never an invented image.
+fn search_relic_html(
+    r: &crate::model::RelicEntry,
+    data: &SearchData<'_>,
+    states: &HashMap<&str, &crate::plan::PartRow>,
+    ctx: &RenderContext<'_>,
+) -> String {
+    let mut h = sr_open("relic", &r.name);
+    h.push_str("<div class=\"srh\">\n");
+    let initial = r.name.chars().next().unwrap_or('?');
+    h.push_str(&format!(
+        "<span class=\"mi lg\" aria-hidden=\"true\">{initial}</span>"
+    ));
+    h.push_str(&format!("<b class=\"srt\">{}</b>\n", esc(&r.name)));
+    if r.vaulted {
+        h.push_str("<em class=\"bd v\">VAULTED</em>\n");
+    } else {
+        h.push_str("<em class=\"bd\">UNVAULTED</em>\n");
+    }
+    let stock_label = match data.stock.count(&r.name) {
+        Some(n) => format!("&times;{} in stock", fmt_int(n)),
+        None => "stock unknown".to_owned(),
+    };
+    h.push_str(&format!("<span class=\"srstock\">{stock_label}</span>\n</div>\n"));
+    // Common first: rarity is banded off the Intact chance by the
+    // same tuning the planner uses; the sort is stable, so the
+    // table's own order survives inside a band.
+    let mut rewards: Vec<&crate::model::RelicReward> = r.rewards.iter().collect();
+    rewards.sort_by_key(|rw| {
+        rarity_rank(ctx.tuning.refinement.rarity_of(rw.chance_at(crate::model::Refinement::Intact)))
+    });
+    for rw in rewards {
+        let rarity = ctx
+            .tuning
+            .refinement
+            .rarity_of(rw.chance_at(crate::model::Refinement::Intact));
+        h.push_str(&format!(
+            "<div class=\"srr\">\n<span class=\"{}\">{}</span>\n{}\n</div>\n",
+            rarity_css(rarity),
+            esc(&rw.name),
+            search_reward_state_html(&rw.name, data, states),
+        ));
+    }
+    h.push_str("</section>\n");
+    h
+}
+
+/// Rarity band order for the relic reward list: common, then
+/// uncommon, then rare.
+fn rarity_rank(r: crate::plan::Rarity) -> u8 {
+    match r {
+        crate::plan::Rarity::Common => 0,
+        crate::plan::Rarity::Uncommon => 1,
+        crate::plan::Rarity::Rare => 2,
+    }
+}
+
+/// The state mark on one relic reward row: the goal card's own
+/// row state when the plan tracks the part; otherwise the raw
+/// stock shapes (verified count, then ⍻ assertion). A reward the
+/// plan does not track at all (a Forma blueprint, a part of gear
+/// he already owns) carries no mark — it is not a Need, and the
+/// overlay never invents a Have.
+fn search_reward_state_html(
+    part: &str,
+    data: &SearchData<'_>,
+    states: &HashMap<&str, &crate::plan::PartRow>,
+) -> String {
+    let state = match states.get(part) {
+        Some(row) => Some(row.state.clone()),
+        None => {
+            if data.part_stock.get(part).copied().unwrap_or(0) > 0 {
+                Some(crate::plan::PartState::Have)
+            } else if data.unverified_parts.get(part).copied().unwrap_or(0) > 0 {
+                Some(crate::plan::PartState::HaveUnverified)
+            } else {
+                None
+            }
+        }
+    };
+    match state {
+        Some(crate::plan::PartState::Need) => {
+            "<em class=\"srneed\">Need</em>".to_owned()
+        }
+        Some(crate::plan::PartState::Have) => {
+            "<em class=\"srhave\">&#10003; Have</em>".to_owned()
+        }
+        Some(crate::plan::PartState::HaveUnverified) => {
+            "<em class=\"srhave\">&#9735; Have</em>".to_owned()
+        }
+        _ => String::new(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Backlog (p3)
 // ---------------------------------------------------------------------------
 
@@ -1432,6 +1735,33 @@ label.row{cursor:pointer}
 .row.ch.tick input[type=checkbox]{align-self:center}
 .g.done{opacity:.45}.g.done .gh>b{text-decoration:line-through}
 .cap .bar{margin:0}
+/* Search overlay (forty-seventh pass): ~90% dark, big type, one
+   glance during the reward window. Styles live only here in the
+   extension block; the reference block above is untouched. */
+.sbtn{font:600 16px Rajdhani,sans-serif;color:var(--cy);background:var(--cell);border:1px solid var(--line);padding:3px 13px;cursor:pointer}
+.sbtn:hover{border-color:var(--cy)}
+#search-overlay{position:fixed;inset:0;z-index:60;background:rgba(4,6,9,.9);display:flex;align-items:flex-start;justify-content:center;padding:10vh 16px 16px;overflow:auto}
+#search-overlay[hidden]{display:none}
+.so-box{width:min(900px,94vw)}
+.so-top{display:flex;align-items:baseline;gap:14px;border-bottom:2px solid var(--cy);padding-bottom:10px;margin-bottom:18px}
+.so-prompt{color:var(--cy);font-size:30px}
+#search-query{font:700 38px Rajdhani,sans-serif;letter-spacing:.04em;color:var(--tx);min-height:46px}
+.so-hint{margin-top:16px;color:var(--mut);font-size:14px;letter-spacing:.08em;min-height:20px}
+.sr{display:none}
+.sr.on{display:block;background:var(--panel);border:1px solid var(--line);padding:20px 24px;clip-path:polygon(10px 0,100% 0,100% calc(100% - 10px),calc(100% - 10px) 100%,0 100%,0 10px)}
+.srh{display:flex;align-items:center;gap:12px;margin-bottom:10px;flex-wrap:wrap}
+.srh .srt{font:700 30px Rajdhani,sans-serif}
+.srh .gc{font-size:14px}
+.srstock{margin-left:auto;color:var(--mut);font-size:18px}
+.sr .r{grid-template-columns:1fr auto;font-size:20px;padding:7px 0}
+.srstate{font-size:16px;color:var(--mut)}
+.srstate.have{color:var(--gold)}
+.srstate.uvhave{color:var(--gold);opacity:.75}
+.srstate.need{color:var(--amb)}
+.srr{display:flex;justify-content:space-between;gap:12px;font-size:20px;padding:6px 0;border-top:1px solid #1c2330}
+.srr em{font-style:normal;font-size:15px;letter-spacing:.06em}
+.srr .srneed{color:var(--amb)}
+.srr .srhave{color:var(--gold)}
 "#;
 
 const JS: &str = r#"
@@ -1627,6 +1957,7 @@ mod tests {
             daily,
             pack: None,
             tuning: t,
+            search: None,
         }
     }
 
@@ -2711,5 +3042,254 @@ mod tests {
         assert!(html.contains("<div class=\"r dead"));
         assert!(html.contains("Axi Vanguard M1"));
         assert!(!html.contains("25.33%"), "chance text stays out of the row");
+    }
+
+    // -- Forty-seventh pass: the search overlay index ---------------
+
+    fn srow(name: &str, state: PartState, held: u32) -> PartRow {
+        PartRow {
+            name: name.to_owned(),
+            state,
+            held,
+            required: 1,
+            relics: vec![],
+            best_odds: String::new(),
+            rarity: Rarity::Rare,
+            deal: None,
+        }
+    }
+
+    fn srelic_reward(name: &str, intact: f64) -> crate::model::RelicReward {
+        crate::model::RelicReward {
+            name: name.to_owned(),
+            chance: HashMap::from([("Intact".to_owned(), intact)]),
+        }
+    }
+
+    /// The slice of the index belonging to one result block.
+    fn sr_block<'a>(index: &'a str, name: &str) -> &'a str {
+        let needle = format!("data-name=\"{name}\"");
+        let name_at = index
+            .find(&needle)
+            .unwrap_or_else(|| panic!("missing block for {name}"));
+        let start = index[..name_at]
+            .rfind("<section")
+            .unwrap_or(name_at);
+        let end = index[name_at..]
+            .find("</section>")
+            .map(|i| name_at + i)
+            .unwrap_or(index.len());
+        &index[start..end]
+    }
+
+    fn search_ctx<'a>(
+        world: &'a WorldState,
+        t: &'a Tuning,
+        weekly: &'a HashMap<String, String>,
+        proven: &'a HashSet<String>,
+        icons: &'a HashMap<String, String>,
+        cats: &'a HashMap<String, Vec<String>>,
+        relics: &'a crate::model::RelicTables,
+        stock: &'a crate::model::RelicStock,
+        part_stock: &'a HashMap<String, u32>,
+        unverified: &'a HashMap<String, u32>,
+    ) -> RenderContext<'a> {
+        let mut ctx = empty_ctx(world, t, weekly, proven, icons, cats, None);
+        ctx.search = Some(SearchData {
+            relics,
+            stock,
+            part_stock,
+            unverified_parts: unverified,
+        });
+        ctx
+    }
+
+    /// Gate (brief §gates): the relic result carries vault status,
+    /// the TOTAL stock count with no tier breakdown, and the
+    /// rewards common-first in rarity colouring, each marked by
+    /// Seth's state (Need vs Have) — an untracked reward (Forma)
+    /// carries no mark.
+    #[test]
+    fn search_index_relic_block_is_seths_spec() {
+        let t = Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        // Rewards deliberately scrambled: rare, common, uncommon.
+        let entry = crate::model::RelicEntry {
+            name: "Meso C11".to_owned(),
+            rewards: vec![
+                srelic_reward("Bo Prime Blade", 2.0),
+                srelic_reward("Forma Blueprint", 25.33),
+                srelic_reward("Bo Prime Handle", 11.0),
+            ],
+            vaulted: true,
+            sources: HashMap::new(),
+        };
+        let relics = crate::model::RelicTables {
+            relics: HashMap::from([("Meso C11".to_owned(), entry)]),
+            sources: HashMap::new(),
+        };
+        // Five total, three of them Radiant: the overlay shows
+        // the total only (Seth's ruling — no tier breakdown).
+        let stock = crate::model::RelicStock::Known(crate::model::KnownStock {
+            totals: HashMap::from([("Meso C11".to_owned(), 5)]),
+            radiant: HashMap::from([("Meso C11".to_owned(), 3)]),
+        });
+        let part_stock: HashMap<String, u32> =
+            HashMap::from([("Bo Prime Blade".to_owned(), 1)]);
+        let unverified: HashMap<String, u32> = HashMap::new();
+        let ctx = search_ctx(
+            &world, &t, &weekly, &proven, &icons, &cats, &relics, &stock, &part_stock,
+            &unverified,
+        );
+        let mut card = goal("Bo Prime", "Bo Prime Handle", false, false);
+        card.parts = vec![srow("Bo Prime Handle", PartState::Need, 0)];
+        let plan = Plan {
+            goals: vec![card],
+            ..Default::default()
+        };
+        let index = search_index_html(&plan, &ctx);
+        let block = sr_block(&index, "Meso C11");
+        assert!(block.contains("data-kind=\"relic\""), "{block}");
+        assert!(block.contains("data-tokens=\"meso c11\""), "{block}");
+        assert!(block.contains("VAULTED"), "vault status: {block}");
+        assert!(
+            block.contains("&times;5 in stock"),
+            "the total count: {block}"
+        );
+        assert!(
+            !block.contains("Radiant") && !block.contains("Intact"),
+            "no refinement-tier breakdown: {block}"
+        );
+        let forma = block.find("Forma Blueprint").unwrap();
+        let handle = block.find("Bo Prime Handle").unwrap();
+        let blade = block.find("Bo Prime Blade").unwrap();
+        assert!(
+            forma < handle && handle < blade,
+            "rewards common first: {block}"
+        );
+        assert!(block.contains("class=\"common\""), "{block}");
+        assert!(block.contains("class=\"uncommon\""), "{block}");
+        assert!(block.contains("class=\"rare\""), "{block}");
+        // Scope the mark counts to the reward list (after the
+        // header): the stock line legitimately has no marks.
+        let rewards_at = block.find("Forma Blueprint").unwrap();
+        let rewards = &block[rewards_at..];
+        assert_eq!(
+            rewards.matches("srneed").count(),
+            1,
+            "exactly the Need reward is marked: {block}"
+        );
+        assert!(
+            rewards.contains("srhave"),
+            "the held reward is marked Have: {block}"
+        );
+        assert_eq!(
+            rewards.matches("srhave").count(),
+            1,
+            "the untracked Forma reward carries no mark: {block}"
+        );
+    }
+
+    /// Gate (brief §gates): the item result shows its parts with
+    /// held/state and permits ⍻ toggling — and carries NO crack
+    /// line (Seth excluded it explicitly).
+    #[test]
+    fn search_index_item_block_has_parts_and_no_crack_line() {
+        let t = Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let relics = crate::model::RelicTables::default();
+        let stock = crate::model::RelicStock::Unknown;
+        let part_stock: HashMap<String, u32> = HashMap::new();
+        let unverified: HashMap<String, u32> = HashMap::new();
+        let ctx = search_ctx(
+            &world, &t, &weekly, &proven, &icons, &cats, &relics, &stock, &part_stock,
+            &unverified,
+        );
+        let mut card = goal("Bo Prime", "Bo Prime Handle", true, false);
+        card.parts_have = 2;
+        card.parts_total = 4;
+        card.parts = vec![
+            srow("Bo Prime Blade", PartState::Have, 1),
+            srow("Bo Prime Ornament", PartState::HaveUnverified, 1),
+            srow("Bo Prime Handle", PartState::Need, 0),
+        ];
+        card.action.text = "Crack Meso C11 · +3 also".to_owned();
+        let plan = Plan {
+            goals: vec![card],
+            ..Default::default()
+        };
+        let index = search_index_html(&plan, &ctx);
+        let block = sr_block(&index, "Bo Prime");
+        assert!(block.contains("data-kind=\"item\""), "{block}");
+        assert!(block.contains("data-tokens=\"bo\""), "{block}");
+        assert!(block.contains("VAULTED"), "{block}");
+        assert!(block.contains("2/4"), "card progress: {block}");
+        assert!(block.contains("✓ Blade"), "verified part: {block}");
+        assert!(block.contains("⍻ Ornament"), "unverified part: {block}");
+        assert!(
+            block.contains("data-uv=\"Bo Prime Ornament\""),
+            "⍻ toggling is offered from the overlay: {block}"
+        );
+        assert!(
+            block.contains("data-uv=\"Bo Prime Handle\""),
+            "a Need row toggles too, as on the Hunt card: {block}"
+        );
+        assert!(
+            !block.contains("data-uv=\"Bo Prime Blade\""),
+            "a verified Have never toggles: {block}"
+        );
+        assert!(
+            !block.contains("Crack") && !block.contains("class=\"gf\""),
+            "NO crack line on the item result (Seth): {block}"
+        );
+    }
+
+    /// Gate (brief §gates): the main page still extracts its five
+    /// fragments in order, the overlay shell ships with the page,
+    /// and the trigger icon rides inside the header fragment.
+    #[test]
+    fn search_overlay_shell_and_trigger_ship_with_the_page() {
+        let t = Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let ctx = empty_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
+        let html = render_plan(&Plan::default(), &ctx);
+        assert!(html.contains("id=\"search-overlay\""), "overlay shell");
+        assert!(
+            html.contains("'/search-index'"),
+            "the overlay script prefetches its index"
+        );
+        let frags = extract_fragments(&html);
+        let ids: Vec<&str> = frags.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, FRAGMENT_IDS, "five fragments, in order");
+        assert!(
+            frags[0].1.contains("id=\"search-open\""),
+            "the trigger icon is in the header fragment"
+        );
+    }
+
+    /// Without search data (tests, degraded runs) the index is
+    /// empty — never a panic, never stale content.
+    #[test]
+    fn search_index_is_empty_without_search_data() {
+        let t = Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let ctx = empty_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
+        assert_eq!(search_index_html(&Plan::default(), &ctx), "");
     }
 }

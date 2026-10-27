@@ -451,6 +451,16 @@ fn handle(
             let (status, body) = fragments_page(report_path, ticks, frag_cache, &known);
             respond(&mut stream, status, "application/json", body.as_bytes())
         }
+        ("GET", "/search-index") => {
+            // The search overlay's index (forty-seventh pass): the
+            // per-generation sidecar the report pipeline published
+            // beside the page. The client prefetches it once per
+            // generation and filters locally — a missing sidecar
+            // (report not yet generated, older install) degrades
+            // the overlay to an empty index, never an error page.
+            let (status, body) = search_index_page(report_path);
+            respond(&mut stream, status, "text/html; charset=utf-8", body.as_bytes())
+        }
         ("POST", "/tick") => respond(
             &mut stream,
             apply_tick(ticks, ticks_path, &body),
@@ -605,6 +615,20 @@ impl FragmentCache {
         while self.recent.len() > FRAGMENT_CACHE_DEPTH {
             self.recent.pop_front();
         }
+    }
+}
+
+/// `GET /search-index` (forty-seventh pass): the search overlay's
+/// per-generation index, read straight from the sidecar the report
+/// pipeline published beside the report (see
+/// [`crate::search::search_index_path`]). A missing sidecar is a
+/// 200 with an empty body: the client's overlay simply has no
+/// blocks to show until the next generation lands one.
+fn search_index_page(report_path: &std::path::Path) -> (&'static str, String) {
+    let path = crate::search::search_index_path(report_path);
+    match std::fs::read_to_string(&path) {
+        Ok(body) => ("200 OK", body),
+        Err(_) => ("200 OK", String::new()),
     }
 }
 
@@ -1260,6 +1284,51 @@ mod tests {
         // Unparseable body: a visible 400, like /tick.
         let resp = post("not a toggle");
         assert!(resp.contains("400"), "{resp}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Gate (forty-seventh pass): the overlay index route serves
+    /// the sidecar the report pipeline published beside the
+    /// report, and a missing sidecar is an empty 200 (the overlay
+    /// degrades silently), never a 404.
+    #[test]
+    fn serve_search_index_reads_the_sidecar() {
+        let dir =
+            std::env::temp_dir().join(format!("fracker-server-search-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let report = dir.join("plan.html");
+        std::fs::write(&report, "<!DOCTYPE html><html><body></body></html>").unwrap();
+        let ticks = Arc::new(Mutex::new(TickStore::default()));
+        let server = serve(
+            0,
+            report.clone(),
+            TickStore::file(&dir),
+            TabStore::file(&dir),
+            ticks,
+            None,
+        )
+        .expect("server binds");
+        let get = |path: &str| -> String {
+            let mut s = TcpStream::connect(("127.0.0.1", server.port())).unwrap();
+            write!(s, "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").unwrap();
+            let mut out = String::new();
+            s.read_to_string(&mut out).unwrap();
+            out
+        };
+        // No sidecar yet: empty 200, not an error.
+        let resp = get("/search-index");
+        assert!(resp.contains("200 OK"), "{resp}");
+        // The pipeline's sidecar lands: the route serves it.
+        std::fs::write(
+            crate::search::search_index_path(&report),
+            "<section class=\"sr\" data-name=\"Meso C11\"></section>",
+        )
+        .unwrap();
+        let resp = get("/search-index");
+        assert!(resp.contains("200 OK"), "{resp}");
+        assert!(resp.contains("Meso C11"), "sidecar served: {resp}");
+        assert!(resp.contains("text/html"), "{resp}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

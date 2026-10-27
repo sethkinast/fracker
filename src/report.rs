@@ -395,6 +395,16 @@ pub async fn generate(
         daily,
         pack: Some(pack_render),
         tuning: &tuning,
+        // The search overlay's data (forty-seventh pass): the
+        // same locals the planner just consumed — relic tables,
+        // relic totals, canonical part stock, ⍻ assertions — so
+        // the overlay index renders this plan's own truth.
+        search: Some(render::SearchData {
+            relics: &relics,
+            stock: &stock,
+            part_stock: &part_stock,
+            unverified_parts: &unverified_parts,
+        }),
     };
     let html = render::render_plan(&plan, &ctx);
 
@@ -403,6 +413,20 @@ pub async fn generate(
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("report out dir {}: {e}", parent.display()))?;
         }
+    }
+    // The search overlay's index (forty-seventh pass): rendered
+    // from the same plan + context and published as a sidecar
+    // beside the report, BEFORE the page itself — a client that
+    // sees the new generation and refetches the index always
+    // finds the matching one on disk. Same tmp+rename discipline;
+    // a sidecar failure degrades the overlay only, never the
+    // report, so it is swallowed here (best-effort sidecar,
+    // load-bearing page — the reward-detection precedent).
+    let search_html = render::search_index_html(&plan, &ctx);
+    let search_path = crate::search::search_index_path(&cfg.out);
+    let search_tmp = search_path.with_extension("html.tmp");
+    if std::fs::write(&search_tmp, &search_html).is_ok() {
+        let _ = std::fs::rename(&search_tmp, &search_path);
     }
     let tmp = cfg.out.with_extension("html.tmp");
     std::fs::write(&tmp, html).map_err(|e| format!("write report: {e}"))?;
