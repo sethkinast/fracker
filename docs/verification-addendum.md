@@ -2077,3 +2077,50 @@ it refines the brief where they disagree. For the next worker pass.
     green pre-tag. Details: docs/forty-first-pass.md.
     Live visual verification (no blink on regen) is
     Seth's, post-ship.
+107. **Required quantities + ready cards (pass 42, shipped
+    as v0.5.36).** #94 closed: satisfaction is measured in
+    UNITS against the recipe's required count, not part
+    types at count >= 1. (1) Data: the wishlist feed
+    carries names only; the counts ship as
+    data/required.toml, mechanically extracted from the
+    WFCD warframe-items dataset (the pipeline's recipe
+    source) at f48e04d — 49 parts across 28 gears, every
+    count x2 (dual-wield components and kin), coverage
+    total over all 163 part-bearing roster items with
+    WFCD's codename tails resolved; all warframes, prime
+    sentinels, Odonata and Kavasa verified x1; the
+    two-built-singles duals (Akbronco/Aklex/Akmagnus/
+    Akvasto) take whole gear as ingredients, not parts.
+    DISAGREEMENT FLAGGED: Zhuge Prime ships all-x1 (5
+    units) per WFCD and the wiki manufacturing table,
+    against Seth's recorded six — Akarius totals exactly
+    six; one-line correction in the table if in-game
+    evidence overrules. (2) Planner: RosterPart.required
+    (default 1) applied at report build (a missing table
+    degrades to all-x1 with an endpoint-failure note,
+    never a guess); PartRow carries held/required —
+    verified >= required is Have, an unverified entry is
+    HaveUnverified with held = required (one ⍻ click
+    asserts the FULL requirement, Seth's 2026-10-26
+    ruling), a wanted part below requirement is Need with
+    its verified units (a partial: still a target —
+    focus, card actions and the crack slate all key on
+    Need, so no call-site changes), an unwanted partial
+    is Unknown. Card progress is unit-based
+    (parts_have = sum of min(held, required)); GoalCard
+    .ready = every part satisfied (owned gear is pruned
+    before cards exist, so ready = buildable now).
+    (3) Rendering: seg_html (Hunt + Backlog) keeps one
+    pip slot per part type, segmented into .seg.sub
+    half-pips per required unit, filled per held unit
+    (⍻ segments keep the dimmed treatment); multi-unit
+    rows state "held/required"; ready cards
+    stable-partition to the top of Hunt with a
+    gold-border .ready class — Backlog order untouched.
+    Gates: 5 net-new tests (table pin against the real
+    seed roster; Quassus partial-in-focus-and-slate then
+    satisfied; ⍻-covers-x2; six-unit 5/6 -> ready flip;
+    segmented pips + row labels; ready ordering +
+    border, Backlog unperturbed); suite 357 passed /
+    0 failed (lib 329 = 324 + 5; golden 15); census
+    gates untouched. Details: docs/forty-second-pass.md.
