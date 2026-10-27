@@ -2192,11 +2192,50 @@ it refines the brief where they disagree. For the next worker pass.
     SIDE_LINE_MIN 0.60 (true sides bottom at 0.77,
     scene sides peak at 0.42). Fixture winner still
     0.962; live frame resolves slot 2 at 0.994, others
-    0.00. Floor 0.55 / margin 0.30 untouched. Gates:
-    corpus regression test + 2 reward frame tests +
-    4 rule/variant unit tests (net-new 7); suite
-    364 passed / 0 failed (lib 336 = 329 + 7; golden
-    15); census gates untouched.
+    0.00. Floor 0.55 / margin 0.30 untouched.
+    AMENDMENT (Seth, same evening): the single T+14
+    grab's timing assumption fails in ENDLESS fissure
+    rotations — the screen closes when picks + the
+    continue/extract vote complete, often before T+14.
+    Of four further misses that night, three T+14
+    grabs landed on non-reward screens entirely (next
+    rotation's SELECT RELIC screen; mid-wave Defense
+    gameplay) and were correctly refused — the grabs
+    were late, not misread; extraction-style missions
+    persist the full 15 s (two frames show the
+    countdown at 2 at grab time). The grab is now a
+    BURST from the already-open stream, sampled from
+    T+0 at arming roughly every 2 s through T+14: a
+    first draft anchored at armed+8 died on a second
+    measurement the same night — the EE.log trigger
+    itself can trail the screen by ~10 s (Seth, tailing
+    capture.log live, saw the "armed" line with only
+    5 s left on the reward timer), so armed+8 can be
+    screen+18. Late-armed episodes are caught by the
+    first samples. Every classifying frame is scored
+    under the unchanged per-frame gates, and the
+    credit comes from the LATEST clearing frame — a
+    requirement, not a preference: the screen opens
+    with the player's OWN rolled reward pre-selected
+    (a border from screen-open, before any click), so
+    a first-clearing rule would credit the default
+    even when the player then picks another card;
+    only the latest clearing frame reflects the
+    actual choice (an unchanged default IS the pick,
+    and a border cannot un-happen, so early clears
+    survive an early close). Accepted residual (Seth,
+    confirming the design on these terms): a pick
+    switched in the final ~second, after the last
+    readable frame, credits the earlier selection. A
+    burst miss reports the closest attempt — best
+    continuities and their frame. Gates: corpus
+    regression test + 2 reward frame tests + 4
+    rule/variant unit tests + 9 burst tests (5
+    selector-level, 4 detect-level on synthetic
+    screens: late pick, early close, late-armed, no
+    border) (net-new 16); suite 373 passed / 0 failed
+    (lib 345 = 329 + 16; golden 15); census gates
+    untouched.
     cargo build --release --locked --offline green
     pre-tag. Details: docs/forty-third-pass.md. Live
     verification owed: Seth's next refinement sync

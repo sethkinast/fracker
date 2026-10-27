@@ -25,6 +25,10 @@ offset windows — asymmetric at fixture scale and sparse
 after x1.447 scaling + dedup ([−1,0,1,3] / [−3,−1,0,1]) —
 sampled only the top side's line.
 
+Third (amendment, Seth's evidence later the same evening):
+the single T+14 grab's timing assumption itself fails in
+ENDLESS fissure rotations — see §3. The grab is now a burst.
+
 ## 1. Variant detection (`capture.rs`, `ocr.rs`)
 
 The two variants share `ScreenClass::Relics`; the pass
@@ -154,6 +158,61 @@ winner **0.994** with the other slots at **0.00** (they
 read 0.14–0.23 under window-union alone, and the bordered
 slot read 0.31 under pass 39).
 
+### Burst timing (amendment, 2026-10-26 evening)
+
+Seth supplied the saved frames from four more misses that
+night. Three of the four T+14 grabs had landed on
+non-reward screens entirely — the next rotation's SELECT
+RELIC screen, mid-wave Defense gameplay — and the
+classifier had correctly refused them: those grabs were
+not detection failures, they were LATE. In endless
+rotations the reward screen closes when picks + the
+continue/extract vote complete, often before T+14. In
+extraction-style missions the screen persists the full
+15 s and T+14 is right (two of the night's frames show
+the countdown at 2 at grab time).
+
+A first burst draft (anchored at T+8 relative to arming)
+died on a second measurement the same night: the EE.log
+trigger itself can trail the screen's appearance by
+~10 s — tailing capture.log live, Seth saw the "armed"
+line with only **5 s remaining** on the reward timer, so
+an armed+8 sample can land at screen+18, after the
+close. The burst therefore samples **from T+0 at arming,
+roughly every 2 s through T+14** (`BURST_OFFSETS_SECS` =
+0/2/4/6/8/10/12/14; the stream is already open at T+0 —
+sample it, don't wait; the live path snapshots the frame
+tap at each offset, the standalone path snapshots its
+drained latest the same way, each with a brief grace for
+the first frame after arming). Late-armed episodes are
+caught by the first samples. Every frame that classifies
+as the reward screen is scored under the unchanged
+per-frame gates — classifier, border floor + margin,
+name discipline — and the credit comes from the
+**latest** burst frame that clears them.
+
+Latest-wins is a requirement, not a preference, because
+of how the screen opens: the player's **own rolled
+reward is pre-selected** — a border is present from
+screen-open, before any click. A first-clearing rule
+would credit that default selection even when the player
+then picks another card; only the latest clearing frame
+reflects the player's actual choice (and if the player
+never changes it, the default IS the pick, so an early
+clear is still correct — which is also why an
+early-clearing frame still credits when the screen
+closes early: a border cannot un-happen). The accepted
+residual, on which Seth confirmed the design: a pick
+switched in the final ~second, after the last readable
+frame, credits the earlier selection.
+
+If no frame clears, the miss line reports the closest
+attempt — the best continuities seen and which frame
+they came from (a name-tier near-miss outranks a
+border-tier one). Every burst frame is audit-saved
+(`reward-<stamp>-t<offset>.png`). One burst per episode;
+the arming/coalescing is unchanged.
+
 ## 4. Gates
 
 - **Corpus regression** (`refinement_corpus_replay_refuses_the_phantoms`,
@@ -172,6 +231,13 @@ slot read 0.31 under pass 39).
   refused; inert on Selection and on Unknown-without-a-
   second-line; variant inferred from a second line) and
   the header variant classifier, incl. garbled headers.
+- **Burst selection**: latest clearing frame wins (incl.
+  a mid-window pick change); early screen-close keeps
+  the early pick; a late-armed episode is caught by the
+  first samples; no border anywhere misses and reports
+  the best frame's continuities; no classifying frame is
+  a plain miss — at the selector level, and again at the
+  detect level on synthetic screens.
 - Full suite: see addendum #108 for the tally. Census
   gates untouched (no capture-path changes beyond the
   relic read seam).
@@ -182,4 +248,6 @@ Seth's next refinement sync: the finalize log should carry
 the refinement-rule line and the stock should gain no
 phantom names. His next cracks: bordered picks at native
 resolution should credit, including late picks whose
-border sits off the assumed rect.
+border sits off the assumed rect — and in endless
+rotations, where the burst should catch the pick before
+the screen closes.
