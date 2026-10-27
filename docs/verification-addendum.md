@@ -2410,3 +2410,59 @@ it refines the brief where they disagree. For the next worker pass.
     verification owed: Seth's next refinement
     sync should show the refusal line naming
     the C11 garble and import no "Meso L1".
+
+112. **Item search: one box, the plan's own status
+    (pass 47, shipped as v0.5.41).** Seth's
+    "next feature" from the crack-queue review:
+    a search bar in the page header where an
+    item's status is one query away. Design,
+    per pass 41's architecture (server is the
+    only renderer): GET /search?q=<name>
+    returns a server-rendered HTML fragment
+    (src/search.rs renders every block) from a
+    SearchSnapshot the report pipeline
+    publishes at the page's own publication
+    point — the generation's Plan, the relic
+    tables, and a per-tier distillation of the
+    parsed stock file (RelicStock carries only
+    totals + a radiant split; the tiers live in
+    StockState, which only the pipeline holds).
+    The box lives in the header fragment
+    (reachable from all tabs); the page script
+    fetches debounced at 150 ms; staleness is
+    sequence numbers — a response renders only
+    while its sequence is the newest; box
+    state (query, results, focus) survives
+    fragment swaps through the resync hook.
+    Matching: case-insensitive substring over
+    gear/part/relic names, ranked exact >
+    prefix > substring, capped at 8 with a
+    "+N more — keep typing" line; ambiguity
+    shown, never resolved; no match stated
+    plainly. Gear hits render the card's
+    progress, per-part states with
+    held/required (pass-42 units), and the
+    crack line via the Hunt card footer
+    extracted verbatim (card_footer_html), so
+    search and Hunt cannot drift. Part hits
+    show state, held/required, owning gear(s),
+    best crack, and dropping relics; the
+    unverified state renders as a badge only
+    (deliberately not data-uv — never the
+    Backlog toggle surface). Relic hits show
+    per-tier stock and rewards in genuine
+    Need state (pass-44 universe). Scope
+    decisions: relic results included (the
+    distillation was cheap); part universe is
+    the plan cards' parts only (PartState
+    exists nowhere else); no jump-to-card.
+    Read-only throughout: no ticks, no
+    toggles, no tab changes. Gates: suite 393
+    passed / 0 failed (lib 365; golden 15;
+    packaging 7; resident 5; tray_quit 1);
+    five-fragment extraction unchanged with
+    the box in the header; census gates
+    untouched; no plan computation changed.
+    Details: docs/forty-seventh-pass.md. Live
+    verification owed: Seth's first searches
+    on the resident page.

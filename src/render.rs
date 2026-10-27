@@ -138,7 +138,7 @@ pub fn weekly_board(tuning: &Tuning) -> Vec<WeeklyItem> {
 // Small formatting helpers
 // ---------------------------------------------------------------------------
 
-fn esc(s: &str) -> String {
+pub(crate) fn esc(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -178,7 +178,7 @@ fn rarity_css(r: crate::plan::Rarity) -> &'static str {
 }
 
 /// "Intact" -> "Int", "Radiant" -> "Rad" (the mock's terse refinement).
-fn refinement_abbrev(r: &str) -> String {
+pub(crate) fn refinement_abbrev(r: &str) -> String {
     r.chars().take(3).collect()
 }
 
@@ -517,6 +517,15 @@ fn header_html(plan: &Plan, ctx: &RenderContext<'_>) -> String {
         esc(&ctx.world_status),
         esc(&ctx.targets_status),
     ));
+    // Item search (forty-seventh pass): the box lives in the header
+    // fragment so every tab reaches it and a regeneration's header
+    // swap re-creates it; the page script (below) keeps the query,
+    // the results and the focus in its own state and restores them
+    // on resync, so a swap mid-typing loses nothing. The results
+    // container ships empty — the loopback server renders every
+    // result (GET /search); nothing plan-shaped is rendered here or
+    // in the script.
+    h.push_str("<div class=\"search\"><input id=\"fracker-q\" type=\"search\" placeholder=\"Search an item, part, or relic…\" autocomplete=\"off\" spellcheck=\"false\">\n<div class=\"srch\" id=\"fracker-sr\"></div></div>\n");
     h.push_str(FRAG_CLOSE);
     h.push_str("</header>\n");
     h
@@ -993,7 +1002,21 @@ fn hunt_card_html(
             refine = esc(&refine),
         ));
     }
-    // Footer: the recommendation line (mock `.gf`).
+    h.push_str(&card_footer_html(g, crack, varzia_end));
+    h.push_str("</article>\n");
+    h
+}
+
+/// A Hunt card's footer: the recommendation line (mock `.gf`).
+/// Factored out of `hunt_card_html` (forty-seventh pass) so the
+/// item-search results render the card's crack line from the very
+/// same composition — one renderer, no drift between surfaces.
+pub(crate) fn card_footer_html(
+    g: &crate::plan::GoalCard,
+    crack: Option<&crate::plan::CrackInfo>,
+    varzia_end: Option<&str>,
+) -> String {
+    let mut h = String::new();
     if g.resurgence_live {
         let ends = varzia_end
             .map(|e| esc(bare_duration(e)))
@@ -1030,7 +1053,6 @@ fn hunt_card_html(
             refine = esc(&d.refinement),
         ));
     }
-    h.push_str("</article>\n");
     h
 }
 
@@ -1244,7 +1266,7 @@ fn nightwave_html(ctx: &RenderContext<'_>) -> String {
 // ---------------------------------------------------------------------------
 
 /// "Ivara Prime Chassis Blueprint" -> "Chassis" inside its parent group.
-fn short_part(part: &str, gear: &str) -> String {
+pub(crate) fn short_part(part: &str, gear: &str) -> String {
     let s = part
         .strip_prefix(gear)
         .unwrap_or(part)
@@ -1432,6 +1454,25 @@ label.row{cursor:pointer}
 .row.ch.tick input[type=checkbox]{align-self:center}
 .g.done{opacity:.45}.g.done .gh>b{text-decoration:line-through}
 .cap .bar{margin:0}
+/* Item search (forty-seventh pass): box in the header, results a
+   dropdown panel over the page. */
+.search{position:relative;width:100%}
+.search input{width:min(520px,100%);box-sizing:border-box;background:var(--cell);border:1px solid var(--line);color:var(--tx);padding:6px 10px;font:13px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;outline:none}
+.search input:focus{border-color:var(--cy)}
+.srch{position:absolute;top:calc(100% + 4px);left:0;width:min(580px,94vw);z-index:40}
+.srch:empty{display:none}
+.sr-item{background:var(--panel);border:1px solid var(--line);padding:10px 12px;margin-bottom:6px;box-shadow:0 10px 28px rgba(0,0,0,.5)}
+.sr-head{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}.sr-head>b{font-size:15px}
+.sr-kind{font-style:normal;font-size:10px;letter-spacing:.12em;color:var(--mut);border:1px solid var(--line);padding:0 5px;text-transform:uppercase}
+.sr-count{margin-left:auto;color:var(--mut);font-size:12px;white-space:nowrap}
+.sr-row{display:flex;gap:8px;align-items:baseline;padding:3px 0;border-top:1px solid #1c2330;font-size:13px}
+.sr-pn{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sr-st{font-size:11px;letter-spacing:.06em;white-space:nowrap}.sr-st.have{color:var(--gold)}.sr-st.uvhave{color:var(--gold);opacity:.75}.sr-st.need{color:var(--cy)}.sr-st.unk{color:var(--mut)}
+.sr-cnt{color:var(--mut);font-size:12px;white-space:nowrap}
+.sr-rc{margin-left:auto;border:1px solid #2a3444;padding:0 7px;font-size:12px;white-space:nowrap}
+.sr-sub{padding:3px 0;border-top:1px solid #1c2330;font-size:13px}
+.sr-sub b{color:var(--cy)}
+.sr-none,.sr-more{background:var(--panel);border:1px solid var(--line);padding:8px 12px;font-size:13px;color:var(--mut);box-shadow:0 10px 28px rgba(0,0,0,.5)}
 "#;
 
 const JS: &str = r#"
@@ -1579,6 +1620,74 @@ const JS: &str = r#"
     });
   }
   bindUv();
+  // Item search (forty-seventh pass): the box lives in the header
+  // fragment; the loopback server renders the results (GET /search)
+  // and this script only ferries the query and swaps the returned
+  // fragment into the results container — no plan data is rendered
+  // client-side. The query, the last results and the focus live in
+  // this closure (like the tick/filter state above): a header
+  // fragment swap replaces the box wholesale, and bindSearch —
+  // re-run on every resync — restores them onto the fresh DOM.
+  // Stale answers are dropped by sequence number: only the newest
+  // query's response may paint. Off-http (a file:// demo export)
+  // there is no server to answer, so the box hides.
+  var srchQ = '';
+  var srchHtml = '';
+  var srchFocus = false;
+  var srchSeq = 0;
+  var srchTimer = null;
+  function bindSearch() {
+    var box = document.querySelector('.search');
+    if (!box) { return; }
+    if (location.protocol !== 'http:') { box.style.display = 'none'; return; }
+    var input = box.querySelector('#fracker-q');
+    var out = box.querySelector('#fracker-sr');
+    if (!input || !out) { return; }
+    if (input.value !== srchQ) { input.value = srchQ; }
+    if (srchHtml && out.innerHTML !== srchHtml) { out.innerHTML = srchHtml; }
+    if (srchFocus && document.activeElement !== input) {
+      input.focus();
+      try { input.setSelectionRange(input.value.length, input.value.length); } catch (e) {}
+    }
+    if (input.__frackerSearch) { return; }
+    input.__frackerSearch = true;
+    input.addEventListener('focus', function () { srchFocus = true; });
+    input.addEventListener('blur', function () { srchFocus = false; });
+    input.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Escape') {
+        srchSeq += 1;
+        srchQ = '';
+        srchHtml = '';
+        input.value = '';
+        out.innerHTML = '';
+        input.blur();
+      }
+    });
+    input.addEventListener('input', function () {
+      var q = input.value;
+      srchQ = q;
+      if (srchTimer) { clearTimeout(srchTimer); }
+      if (!q.trim()) {
+        srchSeq += 1;
+        srchHtml = '';
+        out.innerHTML = '';
+        return;
+      }
+      srchTimer = setTimeout(function () {
+        var seq = ++srchSeq;
+        fetch('/search?q=' + encodeURIComponent(q))
+          .then(function (r) { return r.ok ? r.text() : ''; })
+          .then(function (html) {
+            if (seq !== srchSeq) { return; }
+            srchHtml = html;
+            var o = document.querySelector('#fracker-sr');
+            if (o) { o.innerHTML = html; }
+          })
+          .catch(function () {});
+      }, 150);
+    });
+  }
+  bindSearch();
   // The fragment-sync script's re-entry point after a swap: re-read
   // the (possibly updated) tick/day payload and re-apply every
   // dynamic behaviour to the swapped-in DOM. Bindings are
@@ -1588,6 +1697,7 @@ const JS: &str = r#"
     bindFilters();
     applyFilter();
     bindUv();
+    bindSearch();
   };
 })();
 "#;
@@ -1709,6 +1819,14 @@ mod tests {
             "swapped panels re-apply ticks/filter/uv state (pass 41)"
         );
         assert!(
+            html.contains("fetch('/search?q=' + encodeURIComponent(q))"),
+            "the search box fetches its server-rendered results (pass 47)"
+        );
+        assert!(
+            html.contains("if (seq !== srchSeq) { return; }"),
+            "a stale search response never overwrites newer results (pass 47)"
+        );
+        assert!(
             html.contains("fracker:push-off") && html.contains("sessionStorage"),
             "the breaker is session-scoped (§2 hotfix 19)"
         );
@@ -1777,6 +1895,18 @@ mod tests {
                 .unwrap()
         };
         assert!(by_id("header").contains("FRACKER"), "header fragment");
+        // Forty-seventh pass: the search box + its (empty) results
+        // container live in the header fragment, so every tab
+        // reaches them and the extraction above still yields the
+        // same five fragments.
+        assert!(
+            by_id("header").contains("id=\"fracker-q\""),
+            "search box in the header fragment"
+        );
+        assert!(
+            by_id("header").contains("id=\"fracker-sr\""),
+            "search results container in the header fragment"
+        );
         assert!(by_id("p1").contains("Crack queue"), "p1 fragment");
         assert!(by_id("p2").contains("data-f=\"all\""), "p2 fragment");
         assert!(by_id("p3").contains("class=\"bg\""), "p3 fragment");
