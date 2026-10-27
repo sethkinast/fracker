@@ -236,7 +236,19 @@ pub async fn generate(
     let wish_text = std::fs::read_to_string(data_file("cache/wishlist.json"))
         .map_err(|e| format!("seed wishlist: {e}"))?;
     let relics = model::RelicTables::from_json(&rel_text)?;
-    let roster = model::Roster::from_json(&wish_text)?;
+    let mut roster = model::Roster::from_json(&wish_text)?;
+    // Pass 42: required build quantities (data/required.toml) —
+    // the wishlist feed carries part names only. A missing or
+    // unparseable table degrades to the all-x1 default (the
+    // pre-pass behaviour) with the failure surfaced, never a
+    // guessed count.
+    match std::fs::read_to_string(data_file("required.toml"))
+        .map_err(|e| e.to_string())
+        .and_then(|text| model::load_required_counts(&text))
+    {
+        Ok(counts) => roster.apply_required_counts(&counts),
+        Err(e) => endpoint_failures.push(format!("required counts: {e}")),
+    }
 
     // 4. Fresh profile pull -> owned equipment + daily REMAINING caps.
     let (owned, mastery_rank, daily, profile_status) = match &client {

@@ -299,10 +299,21 @@ impl RelicTables {
 // Prime roster (Xuerian wishlist.json)
 // ---------------------------------------------------------------------------
 
+fn default_required() -> u32 {
+    1
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct RosterPart {
     #[serde(default)]
     pub name: String,
+    /// Copies of this part the foundry recipe consumes (pass 42,
+    /// addendum #107). The roster feed carries names only, so this
+    /// defaults to 1 and is populated from `data/required.toml`
+    /// (see [`Roster::apply_required_counts`]); only doubled parts
+    /// (dual-wield components and kin) ever exceed 1.
+    #[serde(default = "default_required")]
+    pub required: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -346,6 +357,21 @@ impl Roster {
 
     pub fn by_name(&self, name: &str) -> Option<&RosterItem> {
         self.items.iter().find(|i| i.name == name)
+    }
+
+    /// Apply required build quantities (pass 42): part display
+    /// name -> copies the recipe consumes. Names absent from the
+    /// map keep the default of 1; a map value below 1 is clamped
+    /// to 1 (a listed part is consumed at least once by
+    /// definition, and 0 would make satisfaction vacuous).
+    pub fn apply_required_counts(&mut self, counts: &HashMap<String, u32>) {
+        for item in &mut self.items {
+            for part in &mut item.parts {
+                if let Some(&n) = counts.get(&part.name) {
+                    part.required = n.max(1);
+                }
+            }
+        }
     }
 
     /// Parentage: part display name -> parent equipment names.
@@ -393,6 +419,28 @@ pub fn built_component_form(gear: &str, part: &str) -> Option<String> {
         return None;
     }
     part.strip_suffix(" Blueprint").map(str::to_owned)
+}
+
+// ---------------------------------------------------------------------------
+// Required build quantities (data/required.toml)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct RequiredFile {
+    #[serde(default)]
+    required: HashMap<String, u32>,
+}
+
+/// Parse `data/required.toml` (pass 42, addendum #107): the
+/// curated table of parts whose foundry recipe consumes more
+/// than one copy, extracted from the WFCD items dataset (the
+/// roster feed itself carries no quantities). Returns part
+/// display name -> required copies; parts absent from the table
+/// require exactly 1.
+pub fn load_required_counts(text: &str) -> Result<HashMap<String, u32>, String> {
+    let file: RequiredFile =
+        toml::from_str(text).map_err(|e| format!("required.toml: {e}"))?;
+    Ok(file.required)
 }
 
 // ---------------------------------------------------------------------------
@@ -1923,6 +1971,65 @@ mod tests {
         ] {
             assert!(m.name_set().contains(n), "missing captured name {n}");
         }
+    }
+
+    #[test]
+    fn required_counts_table_pins_the_multi_unit_population() {
+        // Pass 42 (addendum #107): the shipped data/required.toml
+        // is a mechanical extraction from the WFCD items dataset
+        // (see the file's provenance header). Pin its size, its
+        // all-x2 shape, and the known examples so a bad edit to
+        // the table fails loudly here rather than misstating
+        // progress on the page.
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let counts = load_required_counts(
+            &std::fs::read_to_string(base.join("data/required.toml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(counts.len(), 49, "the enumerated multi-unit population");
+        assert!(
+            counts.values().all(|&n| n == 2),
+            "every known doubled part is x2"
+        );
+        for name in [
+            "Quassus Prime Blade",
+            "Quassus Prime Handle",
+            "Akarius Prime Barrel",
+            "Akarius Prime Receiver",
+            "Dual Kamas Prime Blade",
+            "Orthos Prime Blade",
+            "Venka Prime Blades",
+        ] {
+            assert_eq!(counts.get(name), Some(&2), "{name}");
+        }
+        // Zhuge Prime is NOT in the table: WFCD's recipe export
+        // and the wiki manufacturing table both list every Zhuge
+        // component at x1 (5 units total), against Seth's
+        // recollection of six — flagged in
+        // docs/forty-second-pass.md for his ruling.
+        assert!(!counts.keys().any(|k| k.starts_with("Zhuge Prime")));
+
+        // Applied to the real seed roster, the counts land on the
+        // right parts and everything else keeps the default of 1.
+        let wish =
+            std::fs::read_to_string(base.join("data/cache/wishlist.json")).unwrap();
+        let mut roster = Roster::from_json(&wish).unwrap();
+        roster.apply_required_counts(&counts);
+        let req = |gear: &str, part: &str| {
+            roster
+                .by_name(gear)
+                .and_then(|i| i.parts.iter().find(|p| p.name == part))
+                .map(|p| p.required)
+        };
+        assert_eq!(req("Quassus Prime", "Quassus Prime Blade"), Some(2));
+        assert_eq!(req("Quassus Prime", "Quassus Prime Handle"), Some(2));
+        assert_eq!(req("Quassus Prime", "Quassus Prime Blueprint"), Some(1));
+        assert_eq!(req("Zhuge Prime", "Zhuge Prime String"), Some(1));
+        assert_eq!(
+            req("Caliban Prime", "Caliban Prime Chassis Blueprint"),
+            Some(1),
+            "warframe components are never doubled"
+        );
     }
 
     #[test]

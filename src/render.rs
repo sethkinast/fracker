@@ -288,10 +288,27 @@ fn seg_html(g: &crate::plan::GoalCard) -> String {
     let mut h = String::new();
     h.push_str("<span class=\"segs\">");
     for p in &g.parts {
-        h.push_str(&format!(
-            "<i class=\"seg {}\"></i>",
-            part_state_class(&p.state)
-        ));
+        // Pass 42: a multi-unit part keeps ONE pip slot, segmented
+        // per required unit (two half-pips for x2), filled per
+        // held unit. Filled segments of a satisfied part take its
+        // state class (gold, or dimmed gold for ⍻); a partial's
+        // filled segments are verified units in hand, so they wear
+        // Have gold while the part stays a target on its row.
+        let required = p.required.max(1);
+        let filled = p.held.min(required);
+        let sub = if required > 1 { " sub" } else { "" };
+        for i in 0..required {
+            let class = if i < filled {
+                match p.state {
+                    crate::plan::PartState::HaveUnverified => "uvhave",
+                    crate::plan::PartState::Unknown => "unk",
+                    _ => "have",
+                }
+            } else {
+                part_state_class(&p.state)
+            };
+            h.push_str(&format!("<i class=\"seg {class}{sub}\"></i>"));
+        }
     }
     h.push_str("</span>");
     // Thirtieth pass (#93): a card holding any part only via the
@@ -835,7 +852,16 @@ fn hunt_html(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     ));
     h.push_str(&format!("<span class=\"mut sm lg-note\">{legend}</span>\n"));
     h.push_str("</div>\n<div class=\"gg\">\n");
-    for g in &plan.goals {
+    // Pass 42: ready-to-build cards surface at the top of Hunt —
+    // a stable partition of the planner's order (relative order
+    // preserved within the ready group and within the rest).
+    // Hunt only: the Backlog keeps the planner's order untouched.
+    for g in plan
+        .goals
+        .iter()
+        .filter(|g| g.ready)
+        .chain(plan.goals.iter().filter(|g| !g.ready))
+    {
         h.push_str(&hunt_card_html(
             g,
             ctx,
@@ -859,8 +885,10 @@ fn hunt_card_html(
     varzia_end: Option<&str>,
 ) -> String {
     let mut h = String::new();
+    // Pass 42: a ready-to-build card carries the gold border.
+    let ready_class = if g.ready { " ready" } else { "" };
     h.push_str(&format!(
-        "<article class=\"g\" data-f=\"{}\">\n<div class=\"gh\">\n{}\n<b>{}</b>\n",
+        "<article class=\"g{ready_class}\" data-f=\"{}\">\n<div class=\"gh\">\n{}\n<b>{}</b>\n",
         data_f(g),
         mi_span(&g.gear, ctx, "mi lg"),
         esc(&g.gear),
@@ -922,6 +950,15 @@ fn hunt_card_html(
             format!("⍻ {part}")
         } else {
             part.clone()
+        };
+        // Pass 42: a multi-unit row states its units outright
+        // ("Blade 1/2"), so a partial is legible without decoding
+        // the pips. The held figure is capped at the requirement,
+        // matching the header fraction's progress framing.
+        let part_label = if p.required > 1 {
+            format!("{part_label} {}/{}", p.held.min(p.required), p.required)
+        } else {
+            part_label
         };
         // Mutation affordance (Hunt ONLY — this renderer is the
         // Hunt card; Backlog renders pips through seg_html and
@@ -1359,7 +1396,7 @@ h3{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--mut)
 .gh{display:flex;align-items:center;gap:9px;margin-bottom:8px}.gh>b{font-size:18px;white-space:nowrap}
 .bd{font-style:normal;font-size:10px;letter-spacing:.1em;padding:0 5px;border:1px solid var(--mut);color:var(--mut)}.bd.z{color:var(--gold);border-color:var(--gold)}
 .gc{margin-left:auto;display:flex;align-items:center;gap:8px;color:var(--mut);font-size:12px}.gc i,.bc i{font-style:normal}
-.segs{display:inline-flex;gap:2px}.seg{width:13px;height:5px;background:#252e3d}.seg.have{background:var(--gold)}.seg.uvhave{background:var(--gold);opacity:.45}.seg.unk{height:3px;background:none;border:1px dashed var(--mut)}
+.segs{display:inline-flex;gap:2px}.seg{width:13px;height:5px;background:#252e3d}.seg.have{background:var(--gold)}.seg.uvhave{background:var(--gold);opacity:.45}.seg.unk{height:3px;background:none;border:1px dashed var(--mut)}.seg.sub{width:6px}.g.ready{border-color:var(--gold)}
 .r{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:center;padding:4px 0;border-top:1px solid #1c2330;font-size:13px}
 .pn{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pn em{font-style:normal;color:var(--gold)}
 .rc{border:1px solid;padding:0 7px;font-size:12px;white-space:nowrap}.rc.v{opacity:.7}.pc{font-size:12px;text-align:right;font-variant-numeric:tabular-nums}
@@ -1616,10 +1653,13 @@ mod tests {
             wants: vec![part.to_owned()],
             parts_have: 0,
             parts_total: 4,
+            ready: false,
             partially_unobtainable: false,
             parts: vec![PartRow {
                 name: part.to_owned(),
                 state: PartState::Need,
+                held: 0,
+                required: 1,
                 relics: vec![],
                 best_odds: String::new(),
                 rarity: Rarity::Rare,
@@ -1969,6 +2009,8 @@ mod tests {
         let row = |name: &str, state: PartState| PartRow {
             name: name.to_owned(),
             state,
+            held: 0,
+            required: 1,
             relics: vec![],
             best_odds: String::new(),
             rarity: Rarity::Rare,
@@ -2017,6 +2059,128 @@ mod tests {
                 "no toggle handlers off the Hunt page ({id})"
             );
         }
+    }
+
+    /// Pass 42: a multi-unit part renders ONE pip slot segmented
+    /// per required unit — a x2 part at 1 unit fills exactly one
+    /// of its two half-pips; ⍻-filled segments keep the unverified
+    /// treatment — and its Hunt row states the units ("1/2").
+    #[test]
+    fn multi_unit_pips_segment_and_rows_state_units() {
+        let t = crate::tuning::Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let ctx = empty_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
+        let mut card = goal("Quassus Prime", "Quassus Prime Blade", true, false);
+        let row = |name: &str, state: PartState, held: u32, required: u32| PartRow {
+            name: name.to_owned(),
+            state,
+            held,
+            required,
+            relics: vec![],
+            best_odds: String::new(),
+            rarity: Rarity::Rare,
+            deal: None,
+        };
+        card.parts = vec![
+            row("Quassus Prime Blade", PartState::Need, 1, 2),
+            row("Quassus Prime Handle", PartState::HaveUnverified, 2, 2),
+        ];
+        card.parts_have = 3;
+        card.parts_total = 4;
+        let segs = seg_html(&card);
+        assert_eq!(
+            segs.matches("<i class=\"seg have sub\"></i>").count(),
+            1,
+            "exactly one of the Blade's two segments is filled: {segs}"
+        );
+        assert_eq!(
+            segs.matches("<i class=\"seg need sub\"></i>").count(),
+            1,
+            "the Blade's missing unit stays an unfilled segment: {segs}"
+        );
+        assert_eq!(
+            segs.matches("<i class=\"seg uvhave sub\"></i>").count(),
+            2,
+            "both asserted Handle units fill with the ⍻ treatment: {segs}"
+        );
+        assert!(segs.contains("3/4"), "unit fraction beside the pips: {segs}");
+        let plan = Plan {
+            goals: vec![card],
+            ..Default::default()
+        };
+        let html = render_plan(&plan, &ctx);
+        let p2 = page(&html, "p2");
+        assert!(p2.contains("Blade 1/2"), "the partial row states its units");
+        assert!(
+            p2.contains("⍻ Handle 2/2"),
+            "the asserted row states its covered units"
+        );
+    }
+
+    /// Pass 42: ready-to-build cards lead the Hunt list under a
+    /// gold border, in their prior relative order; the rest keep
+    /// theirs, unbordered.
+    #[test]
+    fn ready_cards_lead_hunt_with_gold_border_stably() {
+        let t = crate::tuning::Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let ctx = empty_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
+        let mk = |gear: &str, ready: bool| {
+            let mut c = goal(gear, &format!("{gear} Blueprint"), false, false);
+            c.ready = ready;
+            c
+        };
+        let plan = Plan {
+            goals: vec![
+                mk("Bravo Prime", false),
+                mk("Alpha Prime", true),
+                mk("Charlie Prime", false),
+                mk("Delta Prime", true),
+            ],
+            ..Default::default()
+        };
+        let html = render_plan(&plan, &ctx);
+        let p2 = page(&html, "p2");
+        let pos = |gear: &str| {
+            p2.find(&format!("<b>{gear}</b>"))
+                .unwrap_or_else(|| panic!("{gear} missing from Hunt"))
+        };
+        assert!(
+            pos("Alpha Prime") < pos("Delta Prime")
+                && pos("Delta Prime") < pos("Bravo Prime")
+                && pos("Bravo Prime") < pos("Charlie Prime"),
+            "ready first (Alpha, Delta), then the rest, each group in prior order"
+        );
+        assert_eq!(
+            p2.matches("<article class=\"g ready\"").count(),
+            2,
+            "exactly the ready cards carry the gold-border class"
+        );
+        assert_eq!(
+            p2.matches("<article class=\"g\"").count(),
+            2,
+            "non-ready cards render unbordered"
+        );
+        // The Backlog does NOT reorder: planner order stands there.
+        // (Backlog names render Prime-stripped, in `.bn` spans.)
+        let p3 = page(&html, "p3");
+        let bpos = |gear: &str| {
+            let label = gear.strip_suffix(" Prime").unwrap_or(gear);
+            p3.find(&format!("<span class=\"bn\">{label}</span>"))
+                .unwrap_or_else(|| panic!("{gear} not in Backlog"))
+        };
+        assert!(
+            bpos("Bravo Prime") < bpos("Alpha Prime"),
+            "Backlog keeps the planner's order (no ready partition)"
+        );
     }
 
     /// Twelfth pass §1: backlog component-progress pips sit beside the

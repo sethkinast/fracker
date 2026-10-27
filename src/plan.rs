@@ -205,6 +205,15 @@ pub struct RelicOption {
 pub struct PartRow {
     pub name: String,
     pub state: PartState,
+    /// Units in hand (pass 42): the canonical verified count, or
+    /// the full requirement when the part is held only by Seth's
+    /// unverified assertion (one ⍻ click asserts the whole
+    /// requirement — ruled 2026-10-26). A row with
+    /// 0 < held < required is a partial: still a farming target.
+    pub held: u32,
+    /// Units the foundry recipe consumes (roster `required`,
+    /// from `data/required.toml`); 1 for almost every part.
+    pub required: u32,
     pub relics: Vec<RelicOption>,
     /// "rare — 2% Intact / 10% Radiant" for the best relic.
     pub best_odds: String,
@@ -296,9 +305,18 @@ pub struct GoalCard {
     pub resurgence_live: bool,
     /// Wanted parts of this gear.
     pub wants: Vec<String>,
+    /// Progress in UNITS (pass 42): `parts_total` sums the parts'
+    /// required counts and `parts_have` sums held units capped
+    /// per part at its requirement, so a 1-of-2 part reads as
+    /// partial progress, never as a whole part in hand.
     pub parts_have: usize,
     pub parts_total: usize,
     pub parts: Vec<PartRow>,
+    /// Every part satisfied (held >= required, either evidence
+    /// class): the gear is buildable now (pass 42). Already-owned
+    /// gear never reaches a card — `prune_wants` retires it — so
+    /// ready means ready to build, not built.
+    pub ready: bool,
     /// At least one needed part has a tier-4 relic among its viable
     /// sources (addendum #68): the card is downranked in target and
     /// backlog ordering.
@@ -987,24 +1005,51 @@ fn part_rows_for_gear(
             .cmp(&(b != &own_blueprint))
             .then_with(|| a.cmp(b))
     });
+    // Required units per part for this gear (pass 42): from the
+    // roster's `required` (data/required.toml via the loaders);
+    // parts the roster doesn't know default to 1.
+    let required_of: HashMap<&str, u32> = item
+        .map(|i| {
+            i.parts
+                .iter()
+                .map(|p| (p.name.as_str(), p.required))
+                .collect()
+        })
+        .unwrap_or_default();
     names
         .into_iter()
         .map(|part| {
-            // Addendum #84: captured part stock reaches the plan. A
-            // canonical count >= 1 (blueprint or built form, #89)
-            // means the part is in hand; the roster carries no
-            // required-quantity data, so the threshold is 1.
-            // Thirtieth pass (#93): below verified stock, Seth's
-            // unverified assertion (Hunt-tab toggle) also holds the
-            // part — precedence verified > unverified > want/unknown.
-            let state = if part_stock.get(&part).copied().unwrap_or(0) >= 1 {
-                PartState::Have
+            // Addendum #84: captured part stock reaches the plan
+            // (canonical counts, blueprint + built forms summed,
+            // #89). Pass 42 (#94/#107): satisfaction is measured
+            // in UNITS against the recipe's required count — a
+            // canonical count >= 1 no longer suffices for a
+            // doubled part. A part with some but not enough
+            // verified units is a PARTIAL: it stays a farming
+            // target (Need) with `required - held` units to go.
+            // Thirtieth pass (#93): below full verified stock,
+            // Seth's unverified assertion also holds the part —
+            // and asserts the FULL requirement of a multi-unit
+            // part (one ⍻ click covers the part; ruled
+            // 2026-10-26). Precedence verified > unverified >
+            // want/unknown, as before.
+            let required = required_of
+                .get(part.as_str())
+                .copied()
+                .unwrap_or(1)
+                .max(1);
+            let verified = part_stock.get(&part).copied().unwrap_or(0);
+            let (state, held) = if verified >= required {
+                (PartState::Have, verified)
             } else if unverified_parts.get(&part).copied().unwrap_or(0) >= 1 {
-                PartState::HaveUnverified
+                (PartState::HaveUnverified, required)
             } else if want_set.contains(&part) {
-                PartState::Need
+                (PartState::Need, verified)
             } else {
-                PartState::Unknown
+                // Not wanted: a partial holding is progress the
+                // plan can't spend — Unknown, with its units
+                // still on the row; an empty one is plain Unknown.
+                (PartState::Unknown, verified)
             };
             let opts: Vec<RelicOption> = varzia
                 .relics_for_part_ranked(relics, &part, stock)
@@ -1035,6 +1080,8 @@ fn part_rows_for_gear(
             PartRow {
                 name: part,
                 state,
+                held,
+                required,
                 relics: opts,
                 best_odds,
                 rarity,
@@ -1111,11 +1158,23 @@ fn goal_cards(
                 &want_set,
                 input.tuning,
             );
-            let parts_total = parts.len();
-            // Held = verified Have + unverified-held (thirtieth
-            // pass): progress counts both; the card stays
+            // Progress in units (pass 42): the total sums each
+            // part's required count; the have side sums held
+            // units capped per part at its requirement (surplus
+            // copies of one part never paper over a missing
+            // unit of another). Held = verified Have +
+            // unverified-held (thirtieth pass): progress counts
+            // both evidence classes; the card stays
             // distinguishable through the rows'/pips' ⍻ rendering.
-            let parts_have = parts.iter().filter(|p| p.state.is_held()).count();
+            let parts_total: usize = parts.iter().map(|p| p.required as usize).sum();
+            let parts_have: usize = parts
+                .iter()
+                .map(|p| p.held.min(p.required) as usize)
+                .sum();
+            // Ready = buildable now: every part satisfied
+            // (pass 42). Owned gear is pruned before cards are
+            // built, so a ready card is never an owned item.
+            let ready = !parts.is_empty() && parts.iter().all(|p| p.state.is_held());
             let partially_unobtainable = parts.iter().any(|p| {
                 p.state == PartState::Need
                     && p.relics
@@ -1143,6 +1202,7 @@ fn goal_cards(
                 parts_have,
                 parts_total,
                 parts,
+                ready,
                 partially_unobtainable,
                 action,
             }
@@ -3127,6 +3187,221 @@ mod tests {
             state_of(&p, "Dual Zoren Prime Blade"),
             Some(PartState::HaveUnverified)
         );
+    }
+
+    /// Pass 42 (#94/#107): a doubled part is satisfied only at
+    /// its full required count. At 1-of-2 it stays a farming
+    /// target (Need, held 1, in focus and in the crack slate);
+    /// Seth's unverified assertion covers the FULL requirement
+    /// (the 2026-10-26 ruling).
+    #[test]
+    fn multi_unit_part_partial_stays_a_target_until_requirement_met() {
+        let text = r#"{
+            "relics": {
+                "Lith Q1": {"name": "Lith Q1",
+                    "rewards": [
+                        {"name": "Quassus Prime Blueprint", "chance": {"Intact": 25.33, "Radiant": 16.67}},
+                        {"name": "Quassus Prime Blade", "chance": {"Intact": 25.33, "Radiant": 16.67}},
+                        {"name": "Quassus Prime Handle", "chance": {"Intact": 25.33, "Radiant": 16.67}}
+                    ],
+                    "vaulted": false, "sources": {}}
+            },
+            "sources": {}
+        }"#;
+        let tables = RelicTables::from_json(text).unwrap();
+        let roster = Roster::from_json(
+            r#"[{"name": "Quassus Prime", "vaulted": true, "type": "melee",
+                 "parts": [{"name": "Quassus Prime Blueprint"},
+                           {"name": "Quassus Prime Blade", "required": 2},
+                           {"name": "Quassus Prime Handle", "required": 2}]}]"#,
+        )
+        .unwrap();
+        let now: DateTime<Utc> = "2026-10-16T02:55:00Z".parse().unwrap();
+        let world = WorldState::default();
+        let owned = OwnedEquipment::empty();
+        let stock = RelicStock::Unknown;
+        let wants = vec![
+            "Quassus Prime Blueprint".to_owned(),
+            "Quassus Prime Blade".to_owned(),
+            "Quassus Prime Handle".to_owned(),
+        ];
+        let pins: Vec<String> = Vec::new();
+        let recent: HashSet<String> = HashSet::new();
+        let t = tuning();
+        let build = |part_stock: &HashMap<String, u32>,
+                     unverified_parts: &HashMap<String, u32>| {
+            plan(&PlanInput {
+                now,
+                world: &world,
+                owned: &owned,
+                wants: &wants,
+                roster: &roster,
+                relics: &tables,
+                stock: &stock,
+                part_stock,
+                unverified_parts,
+                pins: &pins,
+                recent_gear: &recent,
+                steel_path_tiebreak: true,
+                completed_missions: &[],
+                item_names: test_item_names(),
+                tuning: &t,
+            })
+        };
+        let row_of = |p: &crate::plan::Plan, name: &str| {
+            p.goals
+                .iter()
+                .find(|g| g.gear == "Quassus Prime")
+                .and_then(|c| c.parts.iter().find(|r| r.name == name))
+                .cloned()
+                .expect("part row")
+        };
+        let card_of = |p: &crate::plan::Plan| {
+            p.goals
+                .iter()
+                .find(|g| g.gear == "Quassus Prime")
+                .cloned()
+                .expect("goal card")
+        };
+        // Blueprint and Handle complete; Blade at 1 of 2.
+        let partial: HashMap<String, u32> = [
+            ("Quassus Prime Blueprint".to_owned(), 1),
+            ("Quassus Prime Blade".to_owned(), 1),
+            ("Quassus Prime Handle".to_owned(), 2),
+        ]
+        .into_iter()
+        .collect();
+        let p = build(&partial, no_unverified());
+        let blade = row_of(&p, "Quassus Prime Blade");
+        assert_eq!(blade.state, PartState::Need, "1 of 2 is not Have");
+        assert_eq!(blade.held, 1);
+        assert_eq!(blade.required, 2, "one unit remains to farm");
+        let card = card_of(&p);
+        assert_eq!(card.parts_total, 5, "units: 1 + 2 + 2");
+        assert_eq!(card.parts_have, 4, "the missing Blade unit is missing progress");
+        assert!(!card.ready, "5th unit outstanding: not buildable");
+        assert!(
+            p.focus.iter().any(|f| f.part == "Quassus Prime Blade"),
+            "the partial part is a Do-Now focus target"
+        );
+        assert!(
+            p.chunks
+                .iter()
+                .any(|c| c.crack.as_ref().map(|ci| ci.part.as_str())
+                    == Some("Quassus Prime Blade")),
+            "the partial part enters the crack slate"
+        );
+
+        // Second Blade lands: satisfied, card ready at 5/5.
+        let mut full = partial.clone();
+        full.insert("Quassus Prime Blade".to_owned(), 2);
+        let p = build(&full, no_unverified());
+        let blade = row_of(&p, "Quassus Prime Blade");
+        assert_eq!(blade.state, PartState::Have);
+        let card = card_of(&p);
+        assert_eq!(card.parts_have, 5);
+        assert!(card.ready, "every part at requirement: buildable now");
+
+        // The ruling: one ⍻ click on the x2 Blade (no verified
+        // units) asserts the FULL requirement.
+        let base: HashMap<String, u32> = [
+            ("Quassus Prime Blueprint".to_owned(), 1),
+            ("Quassus Prime Handle".to_owned(), 2),
+        ]
+        .into_iter()
+        .collect();
+        let asserted: HashMap<String, u32> =
+            [("Quassus Prime Blade".to_owned(), 1)].into_iter().collect();
+        let p = build(&base, &asserted);
+        let blade = row_of(&p, "Quassus Prime Blade");
+        assert_eq!(blade.state, PartState::HaveUnverified);
+        assert_eq!(blade.held, 2, "the assertion covers both units");
+        let card = card_of(&p);
+        assert_eq!(card.parts_have, 5, "asserted units count in full");
+        assert!(card.ready);
+    }
+
+    /// Pass 42: the six-unit stretch case (Akarius shape: two
+    /// doubled parts around two singles) — 5/6 is not ready; the
+    /// final unit flips the card.
+    #[test]
+    fn six_unit_card_readiness_flips_on_the_final_unit() {
+        let tables = mini_tables();
+        let roster = Roster::from_json(
+            r#"[{"name": "Akarius Prime", "vaulted": true, "type": "secondary",
+                 "parts": [{"name": "Akarius Prime Blueprint"},
+                           {"name": "Akarius Prime Barrel", "required": 2},
+                           {"name": "Akarius Prime Link"},
+                           {"name": "Akarius Prime Receiver", "required": 2}]}]"#,
+        )
+        .unwrap();
+        let now: DateTime<Utc> = "2026-10-16T02:55:00Z".parse().unwrap();
+        let world = WorldState::default();
+        let owned = OwnedEquipment::empty();
+        let stock = RelicStock::Unknown;
+        let wants = vec![
+            "Akarius Prime Blueprint".to_owned(),
+            "Akarius Prime Barrel".to_owned(),
+            "Akarius Prime Link".to_owned(),
+            "Akarius Prime Receiver".to_owned(),
+        ];
+        let pins: Vec<String> = Vec::new();
+        let recent: HashSet<String> = HashSet::new();
+        let t = tuning();
+        let build = |part_stock: &HashMap<String, u32>| {
+            plan(&PlanInput {
+                now,
+                world: &world,
+                owned: &owned,
+                wants: &wants,
+                roster: &roster,
+                relics: &tables,
+                stock: &stock,
+                part_stock,
+                unverified_parts: no_unverified(),
+                pins: &pins,
+                recent_gear: &recent,
+                steel_path_tiebreak: true,
+                completed_missions: &[],
+                item_names: test_item_names(),
+                tuning: &t,
+            })
+        };
+        let five: HashMap<String, u32> = [
+            ("Akarius Prime Blueprint".to_owned(), 1),
+            ("Akarius Prime Barrel".to_owned(), 2),
+            ("Akarius Prime Link".to_owned(), 1),
+            ("Akarius Prime Receiver".to_owned(), 1),
+        ]
+        .into_iter()
+        .collect();
+        let p = build(&five);
+        let card = p
+            .goals
+            .iter()
+            .find(|g| g.gear == "Akarius Prime")
+            .expect("goal card");
+        assert_eq!(card.parts_total, 6, "six units across four part types");
+        assert_eq!(card.parts_have, 5);
+        assert!(!card.ready, "5/6 is progress, not readiness");
+        let receiver = card
+            .parts
+            .iter()
+            .find(|r| r.name == "Akarius Prime Receiver")
+            .expect("receiver row");
+        assert_eq!(receiver.state, PartState::Need);
+        assert_eq!(receiver.held, 1);
+
+        let mut six = five.clone();
+        six.insert("Akarius Prime Receiver".to_owned(), 2);
+        let p = build(&six);
+        let card = p
+            .goals
+            .iter()
+            .find(|g| g.gear == "Akarius Prime")
+            .expect("goal card");
+        assert_eq!(card.parts_have, 6);
+        assert!(card.ready, "the final unit completes the build");
     }
 
     /// Ninth pass §4: a log-proven completion strikes exactly the alert
