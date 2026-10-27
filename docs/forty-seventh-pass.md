@@ -1,6 +1,12 @@
 # Forty-seventh pass — item search overlay (Seth's spec)
 
-Verification addendum: #112.
+Verification addendum: #113.
+
+Supersede note: a draft implementation of this pass (a header
+search box with substring matching, read-only) shipped as
+v0.5.41 before the halt landed — it is addendum #112 and stays
+in history unrewritten. The implementation described here
+replaces that design in full and ships as v0.5.42.
 
 ## The ask
 
