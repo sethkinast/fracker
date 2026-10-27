@@ -321,12 +321,13 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     let mut h = String::new();
     h.push_str("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n");
     h.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
-    // Backstop only since item 58: the loopback server pushes a new
-    // generation over WebSocket when a regeneration lands. The meta-refresh
-    // still converges a dropped socket (with the client reconnecting), and
-    // a file:// demo export has no push. The refresh-flash rule (§19)
-    // keeps every repaint dark (root background + color-scheme: dark).
-    h.push_str("<meta http-equiv=\"refresh\" content=\"60\">\n");
+    // No meta-refresh (forty-first pass): the loopback server pushes a
+    // new generation over WebSocket when a regeneration lands and the
+    // page swaps the changed fragments in place (see push.rs and the
+    // fragment markers below); a slow fragment poll converges a
+    // dropped socket. A file:// demo export has neither and is simply
+    // static. The refresh-flash rule (§19) keeps every repaint dark
+    // (root background + color-scheme: dark).
     h.push_str("<title>Fracker — session plan</title>\n");
     // Demo exports are self-contained (addendum #23: zero CDN
     // references): no font links, no hotlinks — system type only.
@@ -350,7 +351,7 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     // The mock's tab mechanism: radio inputs precede the header so the
     // reference CSS's `#t1:checked~main #p1` rules apply (twelfth pass §1).
     // Each tab is ALSO a real link (`?tab=<slug>`) the loopback server
-    // records and renders checked on the next serve, so the 60s refresh
+    // records and renders checked on the next serve, so a fresh load
     // lands back on the active tab (thirteenth pass §2, item 46). The
     // default radio stays checked for a `file://` demo export.
     for (i, (id, _, _)) in TABS.iter().enumerate() {
@@ -382,11 +383,76 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     h.push_str("<script>\n");
     h.push_str(JS);
     h.push('\n');
-    // Nineteenth pass §1/§2: the reload predicate + loop failsafe live in
-    // one testable module so the page script cannot drift from the policy.
+    // The generation-sync policy (push/poll, fragment swap, last-resort
+    // reload failsafe) lives in one testable module so the page script
+    // cannot drift from it (nineteenth pass §1/§2; forty-first pass).
     h.push_str(&crate::push::client_script());
     h.push_str("</script>\n</div>\n</body>\n</html>\n");
     h
+}
+
+// ---------------------------------------------------------------------------
+// Fragments (forty-first pass): the served page's swap units
+// ---------------------------------------------------------------------------
+
+/// The page's fragment ids, in document order. The loopback server
+/// diffs these between generations and the page script swaps only
+/// the changed ones in place (`innerHTML` on the fragment's
+/// container) — no navigation, so scroll, focus, the active tab,
+/// and every unchanged panel's `<img>` elements survive a
+/// regeneration. `header` is the `<header class="top">` block; the
+/// rest are the four tab pages.
+pub const FRAGMENT_IDS: [&str; 5] = ["header", "p1", "p2", "p3", "p4"];
+
+/// The opening marker a fragment's inner HTML starts after. The
+/// markers are inert HTML comments in the served page; they exist
+/// only so the server can split the rendered file back into the
+/// sections the renderer composed it from.
+fn frag_open(id: &str) -> String {
+    format!("<!--@frag:{id}-->\n")
+}
+
+/// The closing marker a fragment's inner HTML ends before.
+const FRAG_CLOSE: &str = "<!--/@frag-->\n";
+
+/// Split a rendered page into its fragments: `(id, inner HTML)` in
+/// document order. The inner HTML is exactly what the page script
+/// assigns to the fragment container's `innerHTML` — the container
+/// tags themselves are part of the static shell and are never
+/// swapped. A page without markers (the placeholder, a demo export
+/// from an older build) yields an empty vec.
+pub fn extract_fragments(html: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut rest = html;
+    while let Some(open) = rest.find("<!--@frag:") {
+        let after = &rest[open + "<!--@frag:".len()..];
+        let Some(id_end) = after.find("-->") else {
+            break;
+        };
+        let id = &after[..id_end];
+        let content_start = open + "<!--@frag:".len() + id_end + "-->".len();
+        let Some(close_rel) = rest[content_start..].find("<!--/@frag-->") else {
+            break;
+        };
+        let content = &rest[content_start..content_start + close_rel];
+        // The opening marker sits on its own line; the payload is
+        // the content after that line, byte-exact.
+        let content = content.strip_prefix('\n').unwrap_or(content);
+        out.push((id.to_owned(), content.to_owned()));
+        rest = &rest[content_start + close_rel + "<!--/@frag-->".len()..];
+    }
+    out
+}
+
+/// A fragment's content hash, for the server's per-generation
+/// change detection. Only ever compared within one server process
+/// (the generation a page shows vs the generation on disk), so
+/// the std hasher's per-process seed is fine.
+pub fn fragment_hash(html: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    html.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// The mock's slim header: brand + three status pills + one-line stamp.
@@ -410,7 +476,9 @@ fn header_html(plan: &Plan, ctx: &RenderContext<'_>) -> String {
         .map(|m| m.to_string())
         .unwrap_or_else(|| "—".to_owned());
     let mut h = String::new();
-    h.push_str("<header class=\"top\">\n<div class=\"brand\">FRACKER</div>\n");
+    h.push_str("<header class=\"top\">\n");
+    h.push_str(&frag_open("header"));
+    h.push_str("<div class=\"brand\">FRACKER</div>\n");
     h.push_str("<div class=\"pills\">\n");
     // Addendum #85: while Baro is live his pill pulses.
     let baro_class = if plan.baro.is_some() {
@@ -432,6 +500,7 @@ fn header_html(plan: &Plan, ctx: &RenderContext<'_>) -> String {
         esc(&ctx.world_status),
         esc(&ctx.targets_status),
     ));
+    h.push_str(FRAG_CLOSE);
     h.push_str("</header>\n");
     h
 }
@@ -469,6 +538,7 @@ fn relative_countdown(ctx: &RenderContext<'_>, expiry: &str) -> String {
 fn first_crack_html(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     let mut h = String::new();
     h.push_str("<div class=\"page\" id=\"p1\">\n");
+    h.push_str(&frag_open("p1"));
     h.push_str("<div class=\"g2\">\n");
     h.push_str(&event_alerts_panel(plan, ctx));
     h.push_str(&lotus_panel(plan, ctx));
@@ -491,6 +561,7 @@ fn first_crack_html(plan: &Plan, ctx: &RenderContext<'_>) -> String {
             esc(&plan.notes.join(" ")),
         ));
     }
+    h.push_str(FRAG_CLOSE);
     h.push_str("</div>\n");
     h
 }
@@ -746,7 +817,9 @@ fn hunt_html(plan: &Plan, ctx: &RenderContext<'_>) -> String {
         None => "Row: part &middot; relic &middot; refinement".to_owned(),
     };
     let mut h = String::new();
-    h.push_str("<div class=\"page\" id=\"p2\">\n<div class=\"tool\">\n");
+    h.push_str("<div class=\"page\" id=\"p2\">\n");
+    h.push_str(&frag_open("p2"));
+    h.push_str("<div class=\"tool\">\n");
     h.push_str(&format!(
         "<button class=\"f on\" data-f=\"all\">All {}</button>\n",
         plan.goals.len()
@@ -770,7 +843,9 @@ fn hunt_html(plan: &Plan, ctx: &RenderContext<'_>) -> String {
             varzia_end,
         ));
     }
-    h.push_str("</div>\n</div>\n");
+    h.push_str("</div>\n");
+    h.push_str(FRAG_CLOSE);
+    h.push_str("</div>\n");
     h
 }
 
@@ -937,6 +1012,7 @@ fn backlog_html(plan: &Plan, ctx: &RenderContext<'_>) -> String {
         plan.goals.iter().filter(|g| g.vaulted && !g.resurgence_live).collect();
     let mut h = String::new();
     h.push_str("<div class=\"page\" id=\"p3\">\n");
+    h.push_str(&frag_open("p3"));
     h.push_str(&backlog_section("Varzia live", &varzia, ctx));
     h.push_str(&backlog_section("Unvaulted", &unvaulted, ctx));
     h.push_str(&backlog_section("Vaulted", &vaulted, ctx));
@@ -963,6 +1039,7 @@ fn backlog_html(plan: &Plan, ctx: &RenderContext<'_>) -> String {
             h.push_str("</div>\n</details>\n");
         }
     }
+    h.push_str(FRAG_CLOSE);
     h.push_str("</div>\n");
     h
 }
@@ -1001,7 +1078,9 @@ fn backlog_section(
 
 fn routine_html(ctx: &RenderContext<'_>) -> String {
     let mut h = String::new();
-    h.push_str("<div class=\"page\" id=\"p4\">\n<div class=\"g3\">\n<div>\n");
+    h.push_str("<div class=\"page\" id=\"p4\">\n");
+    h.push_str(&frag_open("p4"));
+    h.push_str("<div class=\"g3\">\n<div>\n");
     h.push_str("<h2>Today <small>standing / focus left</small></h2>\n");
     h.push_str("<div class=\"caps\">\n");
     let caps = &ctx.tuning.planner.daily_caps;
@@ -1067,7 +1146,9 @@ fn routine_html(ctx: &RenderContext<'_>) -> String {
     }
     h.push_str("</div>\n</div>\n<div>\n");
     h.push_str(&nightwave_html(ctx));
-    h.push_str("</div>\n</div>\n</div>\n");
+    h.push_str("</div>\n</div>\n");
+    h.push_str(FRAG_CLOSE);
+    h.push_str("</div>\n");
     h
 }
 
@@ -1317,22 +1398,33 @@ label.row{cursor:pointer}
 "#;
 
 const JS: &str = r#"
-// Checkbox ticks: the resident's loopback HTTP server is the store of
-// record (POST /tick, keyed by item id + in-game day) and re-applies the
-// ticks it injects onto <body data-fracker-ticks> (base64 JSON) on every
-// serve. localStorage remains only a progressive cache for a file://
-// page. The 60s meta-refresh reloads the served page, so ticks survive.
+// Dynamic page state, factored into re-runnable pieces (forty-first
+// pass): checkbox ticks, the Hunt filter, and the unverified (⍻) row
+// clicks are applied by functions the fragment-sync script re-runs
+// (window.__frackerResync) after it swaps a panel's innerHTML, so a
+// swapped panel behaves exactly like a freshly loaded one. Initial
+// page load calls the same pieces in the same order.
 (function () {
   var day = document.body.getAttribute('data-day') || '';
   var served = document.body.hasAttribute('data-fracker-ticks');
   var done = {};
-  try {
-    var raw = document.body.getAttribute('data-fracker-ticks');
-    if (raw) {
-      var store = JSON.parse(atob(raw)).days || {};
-      (store[day] || []).forEach(function (i) { done[i] = true; });
-    }
-  } catch (e) {}
+  // Checkbox ticks: the resident's loopback HTTP server is the store
+  // of record (POST /tick, keyed by item id + in-game day) and
+  // re-applies the ticks it injects onto <body data-fracker-ticks>
+  // (base64 JSON) on every serve — and in every fragment payload, so
+  // a swap carries the same store. localStorage remains only a
+  // progressive cache for a file:// page.
+  function loadTicks() {
+    day = document.body.getAttribute('data-day') || '';
+    done = {};
+    try {
+      var raw = document.body.getAttribute('data-fracker-ticks');
+      if (raw) {
+        var store = JSON.parse(atob(raw)).days || {};
+        (store[day] || []).forEach(function (i) { done[i] = true; });
+      }
+    } catch (e) {}
+  }
   function key(id) { return 'fracker:' + day + ':' + id; }
   function host(box) { return box.closest('.cell,.row,.g'); }
   function paint(box, on) {
@@ -1340,7 +1432,7 @@ const JS: &str = r#"
     if (h) { h.classList.toggle('done', on); }
     if (box.checked !== on) { box.checked = on; }
   }
-  document.querySelectorAll('input[type=checkbox][data-id]').forEach(function (box) {
+  function bindBox(box) {
     var id = box.getAttribute('data-id');
     var on = !!done[id];
     // localStorage is only a fallback for a file:// page: when the
@@ -1349,6 +1441,8 @@ const JS: &str = r#"
       try { if (localStorage.getItem(key(id)) === '1') { on = true; } } catch (e) {}
     }
     if (on) { paint(box, true); }
+    if (box.__frackerTick) { return; }
+    box.__frackerTick = true;
     box.addEventListener('change', function () {
       var checked = box.checked;
       paint(box, checked);
@@ -1364,13 +1458,20 @@ const JS: &str = r#"
         });
       } catch (e) {}
     });
-  });
+  }
+  function applyTicks() {
+    loadTicks();
+    document.querySelectorAll('input[type=checkbox][data-id]').forEach(bindBox);
+  }
+  applyTicks();
   // Tabs: the loopback server records the active tab and renders the
-  // matching radio checked, so the 60s refresh — and an app restart —
-  // land back where he was (§2, item 46). The tab links are real (they work
-  // without JS: `?tab=<slug>` is recorded on the next GET); when served,
-  // we record via a light fetch and switch instantly instead of reloading.
-  // A file:// demo export falls back to ?tab / sessionStorage.
+  // matching radio checked, so a fresh load — and an app restart —
+  // lands back where he was (§2, item 46). (Fragment swaps never
+  // touch the radios, so the viewed tab also survives every regen.)
+  // The tab links are real (they work without JS: `?tab=<slug>` is
+  // recorded on the next GET); when served, we record via a light
+  // fetch and switch instantly instead of reloading. A file:// demo
+  // export falls back to ?tab / sessionStorage.
   function showTab(id) {
     var r = document.getElementById(id);
     if (r) { r.checked = true; }
@@ -1396,7 +1497,10 @@ const JS: &str = r#"
     });
   });
   // Hunt's in-page filter controls (reference behaviour, CSS-driven).
+  var curFilter = 'all';
+  try { curFilter = sessionStorage.getItem('fracker:f') || 'all'; } catch (e) {}
   function filt(f) {
+    curFilter = f;
     document.querySelectorAll('.f').forEach(function (x) {
       x.classList.toggle('on', x.dataset.f === f);
     });
@@ -1405,28 +1509,49 @@ const JS: &str = r#"
     });
     try { sessionStorage.setItem('fracker:f', f); } catch (e) {}
   }
-  document.querySelectorAll('.f').forEach(function (x) {
-    x.addEventListener('click', function () { filt(x.dataset.f); });
-  });
-  try { filt(sessionStorage.getItem('fracker:f') || 'all'); } catch (e) {}
+  function bindFilters() {
+    document.querySelectorAll('.f').forEach(function (x) {
+      if (x.__frackerFilter) { return; }
+      x.__frackerFilter = true;
+      x.addEventListener('click', function () { filt(x.dataset.f); });
+    });
+  }
+  function applyFilter() { filt(curFilter); }
+  bindFilters();
+  applyFilter();
   // Unverified stock (thirtieth pass): Hunt part rows that are not
   // verified-Have carry data-uv with the full roster part name.
   // Clicking POSTs the toggle to the loopback server, which
   // persists stock.json and regenerates the plan — the new ⍻ state
-  // lands through the usual WebSocket push / meta-refresh, like
-  // every other regeneration. Only Hunt renders these rows, so
-  // only Hunt can mutate the unverified set.
-  document.querySelectorAll('.r.uv[data-uv]').forEach(function (row) {
-    row.addEventListener('click', function () {
-      try {
-        fetch('/unverified', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: row.getAttribute('data-uv') })
-        });
-      } catch (e) {}
+  // lands through the same fragment swap as every other
+  // regeneration. Only Hunt renders these rows, so only Hunt can
+  // mutate the unverified set.
+  function bindUv() {
+    document.querySelectorAll('.r.uv[data-uv]').forEach(function (row) {
+      if (row.__frackerUv) { return; }
+      row.__frackerUv = true;
+      row.addEventListener('click', function () {
+        try {
+          fetch('/unverified', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: row.getAttribute('data-uv') })
+          });
+        } catch (e) {}
+      });
     });
-  });
+  }
+  bindUv();
+  // The fragment-sync script's re-entry point after a swap: re-read
+  // the (possibly updated) tick/day payload and re-apply every
+  // dynamic behaviour to the swapped-in DOM. Bindings are
+  // once-per-element, so panels that were not swapped are untouched.
+  window.__frackerResync = function () {
+    applyTicks();
+    bindFilters();
+    applyFilter();
+    bindUv();
+  };
 })();
 "#;
 
@@ -1523,7 +1648,10 @@ mod tests {
             assert!(html.contains(section), "missing section: {section}");
         }
         assert!(html.contains("color-scheme:dark"), "refresh-flash rule");
-        assert!(html.contains("http-equiv=\"refresh\""), "meta refresh backstop");
+        assert!(
+            !html.contains("http-equiv=\"refresh\""),
+            "no meta refresh: updates swap fragments in place (pass 41)"
+        );
         assert!(
             html.contains("/ws") && html.contains("WebSocket"),
             "the page subscribes to generation pushes (§2 item 58)"
@@ -1533,13 +1661,28 @@ mod tests {
             "the predicate compares the push against the loaded page's token"
         );
         assert!(
+            html.contains("/fragments?gen="),
+            "a push fetches the fragment diff instead of reloading (pass 41)"
+        );
+        assert!(
+            html.contains("__frackerResync"),
+            "swapped panels re-apply ticks/filter/uv state (pass 41)"
+        );
+        assert!(
             html.contains("fracker:push-off") && html.contains("sessionStorage"),
             "the breaker is session-scoped (§2 hotfix 19)"
         );
-        assert!(html.contains("location.reload()"), "a push reloads the page");
         assert!(
-            html.contains("var MIN_MS = 5000;"),
-            "push reloads have a multi-second floor (§2 hotfix 19)"
+            html.contains("location.reload()"),
+            "only the guarded last-resort reload remains (pass 41)"
+        );
+        assert!(
+            html.contains("var FAIL_MAX = 3;"),
+            "the last-resort reload waits out its failure budget (pass 41)"
+        );
+        assert!(
+            html.contains("var POLL_MS = 60000;"),
+            "a slow fragment poll replaces the meta-refresh backstop (pass 41)"
         );
         assert!(html.contains("localStorage"), "checkbox persistence");
         assert!(
@@ -1552,6 +1695,57 @@ mod tests {
         );
         assert!(html.contains("Rajdhani"), "game-adjacent type");
         assert!(html.contains("clip-path"), "chamfered cards");
+    }
+
+    /// Forty-first pass: the rendered page splits back into exactly
+    /// the five fragments, in document order, each byte-contained in
+    /// the page — the property the /fragments diff is built on.
+    #[test]
+    fn rendered_page_extracts_all_fragments_in_order() {
+        let t = crate::tuning::Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let ctx = empty_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
+        let plan = Plan {
+            goals: vec![goal(
+                "Caliban Prime",
+                "Caliban Prime Chassis Blueprint",
+                false,
+                false,
+            )],
+            ..Default::default()
+        };
+        let html = render_plan(&plan, &ctx);
+        let frags = extract_fragments(&html);
+        let ids: Vec<&str> = frags.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, FRAGMENT_IDS);
+        for (id, frag) in &frags {
+            assert!(!frag.is_empty(), "fragment {id} is empty");
+            assert!(
+                html.contains(frag.as_str()),
+                "fragment {id} is byte-contained in the page"
+            );
+        }
+        let by_id = |want: &str| {
+            frags
+                .iter()
+                .find(|(id, _)| id == want)
+                .map(|(_, h)| h.as_str())
+                .unwrap()
+        };
+        assert!(by_id("header").contains("FRACKER"), "header fragment");
+        assert!(by_id("p1").contains("Crack queue"), "p1 fragment");
+        assert!(by_id("p2").contains("data-f=\"all\""), "p2 fragment");
+        assert!(by_id("p3").contains("class=\"bg\""), "p3 fragment");
+        assert!(by_id("p4").contains("Today"), "p4 fragment");
+        // A markerless page yields nothing (placeholder, old exports).
+        assert!(extract_fragments("<html><body>plain</body></html>").is_empty());
+        // Hash identity is the diff primitive.
+        assert_eq!(fragment_hash("x"), fragment_hash("x"));
+        assert_ne!(fragment_hash("x"), fragment_hash("y"));
     }
 
     /// Twelfth pass §1: four tabs in the reference's order. Thirteenth

@@ -13,8 +13,11 @@
 //!   exposed off-box);
 //! - `GET /` serves the current report HTML, re-applying the stored ticks
 //!   (so they survive regenerations and are browser-independent) and
-//!   rendering the remembered active tab `checked` (thirteenth pass §2, so
-//!   the 60s meta-refresh no longer resets to First Crack);
+//!   rendering the remembered active tab `checked` (thirteenth pass §2);
+//! - `GET /fragments?gen=<known>` returns the current generation, the
+//!   tick/day payload exactly as `GET /` carries it, and only the page
+//!   fragments whose rendered HTML changed since <known> (forty-first
+//!   pass) — the page swaps those in place, so updates never navigate;
 //! - `POST /tick` records one checkbox change server-side, keyed by item
 //!   id + in-game day;
 //! - `POST /unverified` toggles one part's unverified (⍻) stock
@@ -24,9 +27,8 @@
 //! - `GET /tab/<slug>` records the active plan tab (the tab links carry
 //!   `?tab=<slug>`, which `GET /` also honours);
 //! - `GET /ws` upgrades to a WebSocket and pushes the plan generation the
-//!   moment a regeneration is published (item 58), so open pages refresh
-//!   immediately instead of waiting for the 60s meta-refresh (which stays
-//!   as the backstop);
+//!   moment a regeneration is published (item 58), so open pages fetch
+//!   the fragment diff immediately instead of waiting for the slow poll;
 //! - `GET /health` is a liveness probe.
 //!
 //! The WebSocket side is a minimal RFC 6455 implementation — handshake,
@@ -55,7 +57,7 @@ use crate::ticks::TickStore;
 /// exact point the page is atomically renamed into place; the server then
 /// writes a text frame to every open WebSocket page. A page that connects
 /// late is handed the current generation immediately, so it can catch up
-/// after a dropped socket without waiting for the meta-refresh.
+/// after a dropped socket without waiting for the fragment poll.
 pub struct GenerationHub {
     current: Mutex<String>,
     subscribers: Mutex<Vec<mpsc::Sender<String>>>,
@@ -274,6 +276,7 @@ pub fn serve(
     // push names its own generation (no spurious reload).
     let hub = Arc::new(GenerationHub::new(report_generation(&report_path)));
     let hub_thread = hub.clone();
+    let frag_cache = Arc::new(Mutex::new(FragmentCache::new()));
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = stop.clone();
     let join = std::thread::spawn(move || {
@@ -285,6 +288,7 @@ pub fn serve(
             ticks,
             tabs,
             hub_thread,
+            frag_cache,
             stop_thread,
             toggle,
         )
@@ -317,6 +321,7 @@ fn accept_loop(
     ticks: Arc<Mutex<TickStore>>,
     tabs: Arc<Mutex<TabStore>>,
     hub: Arc<GenerationHub>,
+    frag_cache: Arc<Mutex<FragmentCache>>,
     stop: Arc<AtomicBool>,
     toggle: Option<Arc<UnverifiedToggle>>,
 ) {
@@ -330,6 +335,7 @@ fn accept_loop(
                 let store = ticks.clone();
                 let tab_store = tabs.clone();
                 let push = hub.clone();
+                let frags = frag_cache.clone();
                 let stopped = stop.clone();
                 let toggle_thread = toggle.clone();
                 std::thread::spawn(move || {
@@ -341,6 +347,7 @@ fn accept_loop(
                         &store,
                         &tab_store,
                         &push,
+                        &frags,
                         &stopped,
                         toggle_thread.as_ref(),
                     );
@@ -364,6 +371,7 @@ fn handle(
     ticks: &Arc<Mutex<TickStore>>,
     tabs: &Arc<Mutex<TabStore>>,
     hub: &Arc<GenerationHub>,
+    frag_cache: &Arc<Mutex<FragmentCache>>,
     stop: &Arc<AtomicBool>,
     toggle: Option<&Arc<UnverifiedToggle>>,
 ) -> std::io::Result<()> {
@@ -422,7 +430,7 @@ fn handle(
             if let Some(slug) = query_param(query, "tab") {
                 record_tab(tabs, tabs_path, report_path, &slug);
             }
-            let (status, html) = plan_page(report_path, tabs_path, ticks, tabs);
+            let (status, html) = plan_page(report_path, tabs_path, ticks, tabs, frag_cache);
             respond(&mut stream, status, "text/html; charset=utf-8", html.as_bytes())
         }
         ("GET", p) if p.starts_with("/tab/") => {
@@ -435,6 +443,13 @@ fn handle(
             } else {
                 respond(&mut stream, "404 Not Found", "text/plain", b"unknown tab")
             }
+        }
+        ("GET", "/fragments") => {
+            // The kill-full-refresh endpoint (forty-first pass): the
+            // diff since the generation the page says it shows.
+            let known = query_param(query, "gen").unwrap_or_default();
+            let (status, body) = fragments_page(report_path, ticks, frag_cache, &known);
+            respond(&mut stream, status, "application/json", body.as_bytes())
         }
         ("POST", "/tick") => respond(
             &mut stream,
@@ -506,6 +521,7 @@ fn plan_page(
     tabs_path: &std::path::Path,
     ticks: &Arc<Mutex<TickStore>>,
     tabs: &Arc<Mutex<TabStore>>,
+    frag_cache: &Arc<Mutex<FragmentCache>>,
 ) -> (&'static str, String) {
     let html = match std::fs::read_to_string(report_path) {
         Ok(h) => h,
@@ -513,8 +529,17 @@ fn plan_page(
     };
     let day = body_day(&html).unwrap_or_default();
     let generation = body_generation(&html).unwrap_or_default();
-    let store = ticks.lock().map(|s| s.clone()).unwrap_or_default();
-    let json = serde_json::to_string(&store).unwrap_or_else(|_| "{}".to_owned());
+    // Warm the fragment cache with the generation being served, so
+    // the page's first push-driven /fragments call diffs against it
+    // instead of falling back to a full swap (forty-first pass).
+    if let Ok(mut c) = frag_cache.lock() {
+        let hashes = crate::render::extract_fragments(&html)
+            .iter()
+            .map(|(id, frag)| (id.clone(), crate::render::fragment_hash(frag)))
+            .collect();
+        c.remember(&generation, hashes);
+    }
+    let ticks_b64 = tick_payload_b64(ticks);
     // The remembered slug applies across generations (addendum #86):
     // scoping only records the generation being served and persists it
     // best-effort. A slug naming no current tab falls back to t1 below.
@@ -529,7 +554,114 @@ fn plan_page(
         })
         .unwrap_or("t1");
     let html = inject_tab(&html, active);
-    ("200 OK", inject_ticks(&html, &base64_encode(json.as_bytes()), &day))
+    ("200 OK", inject_ticks(&html, &ticks_b64, &day))
+}
+
+/// The tick payload exactly as `GET /` carries it on the `<body>`
+/// tag: the tick store as JSON, base64-encoded. Shared by the full
+/// page and the fragment endpoint so the two paths can never drift
+/// (forty-first pass).
+fn tick_payload_b64(ticks: &Arc<Mutex<TickStore>>) -> String {
+    let store = ticks.lock().map(|s| s.clone()).unwrap_or_default();
+    let json = serde_json::to_string(&store).unwrap_or_else(|_| "{}".to_owned());
+    base64_encode(json.as_bytes())
+}
+
+/// Per-generation fragment hashes (forty-first pass): the server
+/// retains the last few generations' fragment hash lists so a page
+/// asking "what changed since the generation I show?" gets exactly
+/// the fragments that differ. A forgotten generation is answered
+/// with every fragment — a fuller swap, never a navigation.
+struct FragmentCache {
+    recent: std::collections::VecDeque<(String, Vec<(String, u64)>)>,
+}
+
+/// How many generations of fragment hashes the cache retains.
+const FRAGMENT_CACHE_DEPTH: usize = 4;
+
+impl FragmentCache {
+    fn new() -> Self {
+        Self {
+            recent: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// The retained fragment hashes for one generation, if any.
+    fn hashes(&self, generation: &str) -> Option<Vec<(String, u64)>> {
+        self.recent
+            .iter()
+            .find(|(g, _)| g == generation)
+            .map(|(_, h)| h.clone())
+    }
+
+    /// Remember one generation's fragment hashes (newest last,
+    /// depth-capped).
+    fn remember(&mut self, generation: &str, hashes: Vec<(String, u64)>) {
+        if generation.is_empty() {
+            return;
+        }
+        self.recent.retain(|(g, _)| g != generation);
+        self.recent.push_back((generation.to_owned(), hashes));
+        while self.recent.len() > FRAGMENT_CACHE_DEPTH {
+            self.recent.pop_front();
+        }
+    }
+}
+
+/// `GET /fragments?gen=<known>` (forty-first pass): the current
+/// generation, the day, the tick payload exactly as `GET /`
+/// carries it, and only the fragments whose rendered HTML changed
+/// since <known>. The page swaps those in place — updates arrive
+/// with no navigation, no icon repaints, no lost scroll. A request
+/// naming the current generation gets an empty change set.
+fn fragments_page(
+    report_path: &std::path::Path,
+    ticks: &Arc<Mutex<TickStore>>,
+    cache: &Arc<Mutex<FragmentCache>>,
+    known: &str,
+) -> (&'static str, String) {
+    let html = match std::fs::read_to_string(report_path) {
+        Ok(h) => h,
+        Err(_) => PLACEHOLDER.to_owned(),
+    };
+    let day = body_day(&html).unwrap_or_default();
+    let generation = body_generation(&html).unwrap_or_default();
+    let fragments = crate::render::extract_fragments(&html);
+    let hashes: Vec<(String, u64)> = fragments
+        .iter()
+        .map(|(id, html)| (id.clone(), crate::render::fragment_hash(html)))
+        .collect();
+    let known_hashes = if known.is_empty() || known == generation {
+        None
+    } else {
+        cache.lock().ok().and_then(|c| c.hashes(known))
+    };
+    let changed: Vec<serde_json::Value> = if generation.is_empty() || known == generation {
+        Vec::new()
+    } else {
+        fragments
+            .iter()
+            .filter(|(id, html)| match &known_hashes {
+                Some(old) => old
+                    .iter()
+                    .find(|(oid, _)| oid == id)
+                    .map(|(_, oh)| *oh != crate::render::fragment_hash(html))
+                    .unwrap_or(true),
+                None => true,
+            })
+            .map(|(id, html)| serde_json::json!({ "id": id, "html": html }))
+            .collect()
+    };
+    if let Ok(mut c) = cache.lock() {
+        c.remember(&generation, hashes);
+    }
+    let body = serde_json::json!({
+        "generation": generation,
+        "day": day,
+        "ticks": tick_payload_b64(ticks),
+        "fragments": changed,
+    });
+    ("200 OK", body.to_string())
 }
 
 /// The plan generation as rendered (`<body ... data-generation="…">`).
@@ -797,7 +929,7 @@ fn ws_upgrade(
     let disk = report_generation(report_path);
     let current = if disk.is_empty() { current } else { disk };
     // Equal generation is a no-op in the page predicate; only a genuinely
-    // different one reloads.
+    // different one triggers a fragment fetch.
     stream.write_all(&ws_text_frame(&generation_message(&current)))?;
     stream.flush()?;
 
@@ -1376,6 +1508,140 @@ mod tests {
             Some("42")
         );
         assert_eq!(body_generation("<body data-day=\"x\">"), None);
+    }
+
+    // ---- §41 fragments (forty-first pass) ----
+
+    /// A minimal rendered page: body attributes + the five fragment
+    /// markers, parameterised so a test can change one section.
+    fn frag_report(generation: &str, p3_note: &str) -> String {
+        format!(
+            "<!DOCTYPE html><html><body data-day=\"2026-10-18\" data-generation=\"{generation}\">\
+             <!--@frag:header-->\nHEADER\
+             <!--/@frag-->\
+             <!--@frag:p1-->\nP1\
+             <!--/@frag-->\
+             <!--@frag:p2-->\nP2\
+             <!--/@frag-->\
+             <!--@frag:p3-->\nP3 {p3_note}\
+             <!--/@frag-->\
+             <!--@frag:p4-->\nP4\
+             <!--/@frag-->\
+             </body></html>"
+        )
+    }
+
+    fn frag_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("fracker-frag-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// An up-to-date page gets an empty change set, and the fragment
+    /// payload's tick field is byte-identical to the attribute the
+    /// full page carries — the two paths share one payload builder.
+    #[test]
+    fn fragments_unchanged_generation_returns_an_empty_diff() {
+        let dir = frag_dir("same");
+        let report = dir.join("plan.html");
+        std::fs::write(&report, frag_report("gen-1", "a")).unwrap();
+        let ticks = Arc::new(Mutex::new(TickStore::default()));
+        let tabs = Arc::new(Mutex::new(TabStore::default()));
+        let cache = Arc::new(Mutex::new(FragmentCache::new()));
+        // The full-page serve comes first in production and warms
+        // the cache with the generation it handed out.
+        let (_, page) = plan_page(&report, &TabStore::file(&dir), &ticks, &tabs, &cache);
+        let (status, body) = fragments_page(&report, &ticks, &cache, "gen-1");
+        assert_eq!(status, "200 OK");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["generation"], "gen-1");
+        assert_eq!(v["day"], "2026-10-18");
+        assert_eq!(v["fragments"].as_array().unwrap().len(), 0, "{body}");
+        let attr_start =
+            page.find("data-fracker-ticks=\"").unwrap() + "data-fracker-ticks=\"".len();
+        let attr_end = page[attr_start..].find('"').unwrap() + attr_start;
+        assert_eq!(
+            v["ticks"].as_str().unwrap(),
+            &page[attr_start..attr_end],
+            "fragment tick payload must equal the full page's"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A regeneration that changes one section produces a payload
+    /// naming only that fragment.
+    #[test]
+    fn fragments_diff_names_only_the_changed_section() {
+        let dir = frag_dir("diff");
+        let report = dir.join("plan.html");
+        std::fs::write(&report, frag_report("gen-1", "a")).unwrap();
+        let ticks = Arc::new(Mutex::new(TickStore::default()));
+        let tabs = Arc::new(Mutex::new(TabStore::default()));
+        let cache = Arc::new(Mutex::new(FragmentCache::new()));
+        let _ = plan_page(&report, &TabStore::file(&dir), &ticks, &tabs, &cache);
+        // The regeneration lands: new token, one section changed.
+        std::fs::write(&report, frag_report("gen-2", "b")).unwrap();
+        let (_, body) = fragments_page(&report, &ticks, &cache, "gen-1");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["generation"], "gen-2");
+        let frags = v["fragments"].as_array().unwrap();
+        assert_eq!(frags.len(), 1, "{body}");
+        assert_eq!(frags[0]["id"], "p3");
+        assert!(frags[0]["html"].as_str().unwrap().contains("P3 b"));
+        // And the page that applied gen-2 is now up to date.
+        let (_, body) = fragments_page(&report, &ticks, &cache, "gen-2");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["fragments"].as_array().unwrap().len(), 0, "{body}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A generation the cache has forgotten (or never saw) is
+    /// answered with every fragment — a fuller swap, not a reload.
+    #[test]
+    fn fragments_unknown_generation_returns_everything() {
+        let dir = frag_dir("stale");
+        let report = dir.join("plan.html");
+        std::fs::write(&report, frag_report("gen-1", "a")).unwrap();
+        let ticks = Arc::new(Mutex::new(TickStore::default()));
+        let cache = Arc::new(Mutex::new(FragmentCache::new()));
+        let (_, body) = fragments_page(&report, &ticks, &cache, "gen-never-seen");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["generation"], "gen-1");
+        let ids: Vec<&str> = v["fragments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, crate::render::FRAGMENT_IDS);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The endpoint over real HTTP: JSON out, empty diff when
+    /// current, full set when the caller's generation is unknown.
+    #[test]
+    fn fragments_endpoint_serves_json_over_http() {
+        let dir = frag_dir("http");
+        let report = dir.join("plan.html");
+        std::fs::write(&report, frag_report("gen-1", "a")).unwrap();
+        let server = serve(
+            0,
+            report,
+            TickStore::file(&dir),
+            TabStore::file(&dir),
+            Arc::new(Mutex::new(TickStore::default())),
+            None,
+        )
+        .expect("server binds");
+        let current = http_get(server.port(), "/fragments?gen=gen-1");
+        assert!(current.contains("200"), "{current}");
+        assert!(current.contains("\"generation\":\"gen-1\""), "{current}");
+        assert!(current.contains("\"fragments\":[]"), "{current}");
+        let stale = http_get(server.port(), "/fragments?gen=gen-0");
+        assert!(stale.contains("\"id\":\"p3\""), "{stale}");
+        assert!(stale.contains("\"ticks\":\""), "{stale}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ---- §2 WebSocket push (item 58) ----

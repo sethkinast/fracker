@@ -198,7 +198,7 @@ pub async fn run(
     let tick_path = ticks::TickStore::file(&opts.state_dir);
     let tick_store = Arc::new(Mutex::new(ticks::TickStore::load(&tick_path)));
     // Thirteenth pass §2: the served page remembers the active tab
-    // server-side so the 60s meta-refresh (and a restart) lands back where
+    // server-side so a fresh load (and a restart) lands back where
     // Seth was, not on First Crack.
     let tab_path = tabs::TabStore::file(&opts.state_dir);
     // Thirtieth pass (#93): the Hunt tab's unverified-stock toggle.
@@ -237,8 +237,9 @@ pub async fn run(
         }
     };
     // Item 58: every report published by the resident pushes its new
-    // generation through the server's hub, so open pages reload the moment
-    // a regeneration lands instead of waiting for the 60s meta-refresh.
+    // generation through the server's hub, so open pages fetch the
+    // fragment diff the moment a regeneration lands instead of waiting
+    // for the slow poll (forty-first pass).
     // Attached before the watch thread or any report job starts.
     if let Some(server) = &plan_server {
         opts.report.push = Some(server.hub());
