@@ -2290,3 +2290,64 @@ it refines the brief where they disagree. For the next worker pass.
     docs/forty-fourth-pass.md. Live verification owed:
     the Citrine card's Meso C11 line should read
     +0 also on Seth's next Hunt/queue read.
+110. **Refinement x1s restored: the native eye test
+    (pass 45, shipped as v0.5.39).** Seth rejected pass
+    43's label-only safe default the night it shipped:
+    the refinement screen shows his x1 relics
+    label-less, and he does not scan twice. His
+    three-state model (2026-10-27): a count label =
+    owned xN (N > 1); no glyph = owned x1; the eye
+    glyph = unowned. The discriminator research
+    (REFINEMENT_X1_DISCRIMINATOR.md, frames workspace)
+    found the eye IS on the native frames and pass
+    38's template fails on registration (~6x8 px
+    offset, no translation tolerance), not signal:
+    bright-pixel mass in the eye window separates the
+    corpus perfectly (unowned 69-71, owned <= 20 over
+    527 settled label-less appearances). It also
+    corrected the phantom reckoning: only the 11 Axi
+    were genuinely unowned; the 26 Meso/Neo
+    "phantoms" were owned x1s stock-2's scroll never
+    reached. Fix: session-level disposition —
+    RefinementEvidence folds per-frame eye-window
+    bright-mass measurements (relic_refinement_measure,
+    production crops canonicalised to the 40x38
+    window, px > 70); a label-less stack whose
+    session-max mass reaches 40 (inside the research's
+    zero-error band [21, 68]; production reads: the 11
+    Axi 53-69, every other measured stack 0) is
+    excluded and named in the finalize line; any
+    other label-less stack imports at x1; labelled
+    stacks are untouched (411 at their voted counts).
+    One veto the corpus forced: a tile whose count
+    region carries label-scale bright mass (>= 100;
+    labels 122-170, the eye 71, bare 0) is physically
+    labelled and never eye-measured — the corpus's
+    Lith M4 x15 label sits at the region's edge,
+    parses in neither appearance, and its strokes put
+    52 bright px in the eye window, over the floor.
+    Corpus replay (25 frames, production reads):
+    517 held -> 506 stacks / 3,614 items imported =
+    411 labelled + 94 owned x1s (62 of the 65 stock-2
+    singleton pairs — three read labelled x2 in this
+    corpus — Meso V15 both tiers, the three Radiant
+    singles, the 26, Axi K2)
+    + 1 garble pair; excluded exactly the 11 Axi.
+    Known issue, pinned in the corpus gate: the
+    reader names the owned Meso C11 [Radiant] cell
+    "Meso L1" in both settled appearances (raw
+    "Mesoll Relic [Radiant]"), so that pair imports
+    at x1 Radiant under the garbled name — a wrong
+    name on a real owned x1, not a phantom; a
+    name-OCR fix must update the pin deliberately.
+    The pass-38 template gate is unchanged; the pass
+    doc carries a recommendation (re-point its eye
+    leg at the bright-mass statistic, or retire the
+    leg after a live-verified selection-variant
+    capture) for Seth's decision. Gates: suite 378
+    passed / 0 failed (lib 350; golden 15; packaging
+    7; resident 5; tray_quit 1); census gates
+    untouched. Details: docs/forty-fifth-pass.md.
+    Live verification owed: Seth's next refinement
+    sync should import his x1s and name only the 11
+    Axi in the finalize line.

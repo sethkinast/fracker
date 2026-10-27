@@ -1121,10 +1121,12 @@ pub struct CaptureSession {
     /// first-exclusion order, deduplicated — the finalize log's
     /// record of what a browse sync refused to import.
     relic_gate_excluded: Vec<String>,
-    /// Pass 43: names the refinement rule excluded this session,
-    /// same order/dedup discipline — the finalize log's record
-    /// of which label-less refinement tiles were refused.
-    relic_variant_excluded: Vec<String>,
+    /// Pass 45: the session's refinement-disposition evidence —
+    /// per relic stack, whether any appearance carried a count
+    /// label and the maximum eye-window bright mass over its
+    /// label-less appearances. Stock resolution consults it on
+    /// every rebuild; the finalize line names what it excludes.
+    relic_evidence: crate::ocr::RefinementEvidence,
 }
 
 impl CaptureSession {
@@ -1273,20 +1275,26 @@ impl CaptureSession {
         ))
     }
 
-    /// Pass 43: the refinement rule's finalize line — how many
-    /// label-less tiles were refused on refinement screens this
-    /// session, and which. `None` when the rule excluded
-    /// nothing (any session that never read a refinement
-    /// frame, and any refinement page whose tiles all carried
-    /// labels).
+    /// Pass 45: the refinement disposition's finalize line —
+    /// which stacks the eye test excluded as unowned this
+    /// session. `None` when nothing was excluded (any session
+    /// that never read a refinement frame, and any refinement
+    /// sync whose label-less tiles were all eye-free).
     pub fn relic_variant_summary(&self) -> Option<String> {
-        if self.relic_variant_excluded.is_empty() {
+        let excluded = self.relic_evidence.excluded_stacks();
+        if excluded.is_empty() {
             return None;
         }
+        let mut names: Vec<&str> = Vec::new();
+        for (name, _) in &excluded {
+            if !names.contains(&name.as_str()) {
+                names.push(name.as_str());
+            }
+        }
         Some(format!(
-            "relic refinement rule: excluded {} label-less tile(s) (no count label = no owned evidence on the refinement screen): {}",
-            self.relic_variant_excluded.len(),
-            self.relic_variant_excluded.join(", ")
+            "relic refinement rule: excluded {} unowned stack(s) (label-less refinement tile with the eye glyph): {}",
+            excluded.len(),
+            names.join(", ")
         ))
     }
 
@@ -1482,8 +1490,9 @@ impl CaptureSession {
         );
         // Pass 38: record what the owned-gate refused, for the
         // finalize log (first-exclusion order, deduplicated).
-        // Pass 43: the refinement rule's refusals ride along in
-        // their own list, same discipline.
+        // Pass 45: fold this frame's refinement measurements
+        // into the session's disposition evidence — the stock
+        // rebuild below and the finalize line both read it.
         for r in &results {
             if r.gate_excluded {
                 if let Some(name) = &r.matched {
@@ -1492,17 +1501,18 @@ impl CaptureSession {
                     }
                 }
             }
-            if r.refine_excluded {
-                if let Some(name) = &r.matched {
-                    if !self.relic_variant_excluded.contains(name) {
-                        self.relic_variant_excluded.push(name.clone());
-                    }
-                }
-            }
+        }
+        if class == ScreenClass::Relics {
+            self.relic_evidence.observe(&results, ctx.relic_names);
         }
         let frame_stock = StockState::from_results(&results, ctx.relic_names, ctx.arcane_names);
         self.observe_counts(&frame_stock);
-        self.captured = resolve_voted_stock(&self.part_votes, &self.relic_votes, &self.arcane_votes);
+        self.captured = resolve_voted_stock(
+            &self.part_votes,
+            &self.relic_votes,
+            &self.arcane_votes,
+            &self.relic_evidence,
+        );
     }
 
     /// Drain the pending parts bundle (pass 36): hand it to the
@@ -1701,6 +1711,7 @@ impl CaptureSession {
                         &self.part_votes,
                         &self.relic_votes,
                         &self.arcane_votes,
+                        &self.relic_evidence,
                     );
                 }
                 self.synth_summary = Some(summary);
@@ -1719,8 +1730,12 @@ impl CaptureSession {
         for slot in &report.slots {
             self.vote_held_slot(slot);
         }
-        self.captured =
-            resolve_voted_stock(&self.part_votes, &self.relic_votes, &self.arcane_votes);
+        self.captured = resolve_voted_stock(
+            &self.part_votes,
+            &self.relic_votes,
+            &self.arcane_votes,
+            &self.relic_evidence,
+        );
         self.stitch_reports.push(report);
     }
 
@@ -1954,16 +1969,25 @@ fn voted_count(votes: &HashMap<u32, u32>) -> u32 {
 }
 
 /// Rebuild the session stock from the count votes (pass 27).
+/// Pass 45: a relic stack the refinement disposition calls
+/// unowned (never labelled, eye glyph measured) is skipped
+/// here, whatever its x1 votes say — the disposition is
+/// consulted on every rebuild, so a late eyed appearance
+/// retracts a stack an earlier frame voted in.
 fn resolve_voted_stock(
     part_votes: &HashMap<String, HashMap<u32, u32>>,
     relic_votes: &HashMap<(String, RefinementTier), HashMap<u32, u32>>,
     arcane_votes: &HashMap<(String, u8), HashMap<u32, u32>>,
+    relic_evidence: &crate::ocr::RefinementEvidence,
 ) -> StockState {
     let mut stock = StockState::default();
     for (name, votes) in part_votes {
         stock.parts.insert(name.clone(), voted_count(votes));
     }
     for ((name, tier), votes) in relic_votes {
+        if relic_evidence.is_unowned(name, *tier) {
+            continue;
+        }
         stock
             .relics
             .entry(name.clone())
@@ -2165,14 +2189,16 @@ pub fn read_cells(
     // see ocr::relic_owned_gate). Parts and arcane frames never
     // reach it, and on owned-only relic frames it is inert.
     //
-    // Pass 43 (addendum #108): the refinement-variant rule runs
-    // after the gate, on the same terms — on refinement frames a
-    // held tile with no parsed count label carries no owned
-    // evidence (no badge, no x1 label on that variant), so it is
-    // refused. See ocr::relic_refinement_rule.
+    // Pass 45 (addendum #110): the refinement measure runs
+    // after the gate, on the same terms — on refinement frames
+    // it records the eye-window bright mass of every held,
+    // label-less tile. It refuses nothing itself; the session
+    // dispositions each stack from the aggregated evidence
+    // (ocr::RefinementEvidence): label = owned at the count,
+    // eye seen = unowned, neither = owned x1.
     if layout.key == "relic" {
         ocr::relic_owned_gate(cells, layout, &mut results, opts.relic_bright_ref);
-        ocr::relic_refinement_rule(layout, &mut results, opts.relic_variant);
+        ocr::relic_refinement_measure(cells, layout, &mut results, opts.relic_variant);
     }
     results
 }
@@ -3551,33 +3577,143 @@ mod tests {
     }
 
     #[test]
-    fn refinement_corpus_replay_refuses_the_phantoms() {
-        // Pass 43 (addendum #108) corpus gate: replay Seth's 25
-        // native refinement frames (the 2026-10-26 ALL-filter
-        // scrape whose stock imported 43 new names, 38 of them
-        // phantoms) through the production read path, with the
-        // variant taken from each frame's header exactly as the
-        // session takes it. Every phantom must be REFUSED, the
-        // label-less collateral must stay out, and labelled
-        // stacks must still import with their counts. Skips
-        // when the corpus is absent (the strip-test pattern).
+    fn refinement_corpus_replay_three_state_disposition() {
+        // Pass 45 (addendum #110) corpus gate: replay Seth's 25
+        // native refinement frames (the 2026-10-26 scrape whose
+        // stock imported 43 wrong names) through the production
+        // read path, folding each frame through the session's
+        // own machinery — evidence.observe, count votes, and
+        // resolve_voted_stock — with the variant taken from
+        // each frame's header exactly as the session takes it.
+        // The three-state disposition must land exactly:
         //
-        // The phantom set: names stock-3 gained over the
-        // verified stock-2 whose every tier read singleton —
-        // the label-less reads. The four labelled newcomers
-        // (Meso S7 x14, Neo N1 x8, Meso X1 x2, Neo C10 x2) are
-        // genuinely owned and MUST import. Meso V15 is owned
-        // in both tiers (Seth, 2026-10-26) but reads
-        // label-less singleton in both, so the rule refuses it
-        // too — the safe default's known cost, asserted here
-        // so it is a decision on record, not a surprise.
-        const PHANTOMS: &[&str] = &[
+        // - the only genuinely unowned tiles, the 11 Axi of the
+        //   catalogue's final row, are excluded (and named by
+        //   the session's finalize line);
+        // - every ground-truth owned label-less stack imports
+        //   at x1: the stock-2 singleton pairs (three of them
+        //   read labelled x2 in this corpus — Axi A21, Lith
+        //   M7, Lith T14; the corpus is authoritative for the
+        //   corpus and they are asserted with the labelled
+        //   population), Meso V15 in both tiers, the Axi V1 /
+        //   Lith A2 / Meso A8 Radiant singles, the 26 Meso/Neo
+        //   x1s pass 43 wrongly listed as phantoms (they are
+        //   Seth's; stock-2's scroll never reached them), and
+        //   Axi K2, a bare x1 stock-2 never recorded;
+        // - the labelled population is unchanged from pass 43
+        //   (411 stacks at their counts);
+        // - "Meso L1" has no tile: the reader names the Meso
+        //   C11 [Radiant] cell "Meso L1" in both its settled
+        //   appearances (raw "Mesoll Relic [Radiant]"), so the
+        //   pair imports at x1 Radiant — the brief's named
+        //   known issue, pinned here so a future name-OCR fix
+        //   changes it deliberately, never silently. Skips
+        //   when the corpus is absent (the strip-test pattern).
+        const UNOWNED_AXI: &[&str] = &[
             "Axi A12", "Axi A13", "Axi A15", "Axi A19", "Axi A2", "Axi A23", "Axi A3",
-            "Axi A6", "Axi A7", "Axi A8", "Axi B7", "Meso G7", "Meso H1", "Meso L1",
-            "Meso L3", "Meso L5", "Meso M1", "Meso N12", "Meso O3", "Meso P9", "Meso R2",
-            "Meso T2", "Meso V11", "Meso V5", "Meso Z2", "Neo A12", "Neo B6", "Neo E2",
-            "Neo F3", "Neo K9", "Neo O2", "Neo P4", "Neo P7", "Neo P9", "Neo T11",
-            "Neo V12", "Neo V7", "Neo Y1",
+            "Axi A6", "Axi A7", "Axi A8", "Axi B7",
+        ];
+        const OWNED_X1: &[(&str, RefinementTier)] = &[
+            // The 65 stock-2 singleton (name, tier) pairs.
+            ("Axi A14", RefinementTier::Intact),
+            ("Axi A20", RefinementTier::Intact),
+            ("Axi A22", RefinementTier::Intact),
+            ("Axi A9", RefinementTier::Intact),
+            ("Axi B4", RefinementTier::Intact),
+            ("Axi B8", RefinementTier::Intact),
+            ("Axi C4", RefinementTier::Intact),
+            ("Axi C6", RefinementTier::Intact),
+            ("Axi F2", RefinementTier::Intact),
+            ("Axi G5", RefinementTier::Intact),
+            ("Axi H7", RefinementTier::Intact),
+            ("Axi N3", RefinementTier::Intact),
+            ("Axi N9", RefinementTier::Intact),
+            ("Axi O3", RefinementTier::Intact),
+            ("Axi P1", RefinementTier::Intact),
+            ("Axi S16", RefinementTier::Intact),
+            ("Axi S20", RefinementTier::Intact),
+            ("Axi S8", RefinementTier::Intact),
+            ("Axi T5", RefinementTier::Intact),
+            ("Lith A12", RefinementTier::Intact),
+            ("Lith A7", RefinementTier::Radiant),
+            ("Lith B11", RefinementTier::Radiant),
+            ("Lith C1", RefinementTier::Intact),
+            ("Lith C11", RefinementTier::Radiant),
+            ("Lith C12", RefinementTier::Radiant),
+            ("Lith C14", RefinementTier::Radiant),
+            ("Lith C2", RefinementTier::Radiant),
+            ("Lith C7", RefinementTier::Intact),
+            ("Lith C9", RefinementTier::Radiant),
+            ("Lith D3", RefinementTier::Intact),
+            ("Lith D7", RefinementTier::Intact),
+            ("Lith G12", RefinementTier::Intact),
+            ("Lith G14", RefinementTier::Radiant),
+            ("Lith G6", RefinementTier::Radiant),
+            ("Lith H2", RefinementTier::Radiant),
+            ("Lith H4", RefinementTier::Radiant),
+            ("Lith H7", RefinementTier::Radiant),
+            ("Lith K12", RefinementTier::Radiant),
+            ("Lith K7", RefinementTier::Intact),
+            ("Lith L1", RefinementTier::Radiant),
+            ("Lith L7", RefinementTier::Intact),
+            ("Lith L8", RefinementTier::Radiant),
+            ("Lith N15", RefinementTier::Radiant),
+            ("Lith N16", RefinementTier::Intact),
+            ("Lith N5", RefinementTier::Intact),
+            ("Lith O4", RefinementTier::Intact),
+            ("Lith O4", RefinementTier::Radiant),
+            ("Lith P5", RefinementTier::Intact),
+            ("Lith P6", RefinementTier::Radiant),
+            ("Lith P8", RefinementTier::Intact),
+            ("Lith P9", RefinementTier::Intact),
+            ("Lith R4", RefinementTier::Radiant),
+            ("Lith S10", RefinementTier::Intact),
+            ("Lith S11", RefinementTier::Radiant),
+            ("Lith S15", RefinementTier::Radiant),
+            ("Lith S16", RefinementTier::Radiant),
+            ("Lith S9", RefinementTier::Intact),
+            ("Meso A1", RefinementTier::Intact),
+            ("Meso A5", RefinementTier::Radiant),
+            ("Meso D2", RefinementTier::Intact),
+            ("Meso E5", RefinementTier::Intact),
+            ("Meso F2", RefinementTier::Intact),
+            // Seth's ground truth, absent from stock-2.
+            ("Meso V15", RefinementTier::Intact),
+            ("Meso V15", RefinementTier::Radiant),
+            ("Axi V1", RefinementTier::Radiant),
+            ("Lith A2", RefinementTier::Radiant),
+            ("Meso A8", RefinementTier::Radiant),
+            // The 26 Meso/Neo x1s the pass-43 diff mislabelled.
+            ("Meso G7", RefinementTier::Intact),
+            ("Meso H1", RefinementTier::Intact),
+            ("Meso L3", RefinementTier::Intact),
+            ("Meso L5", RefinementTier::Intact),
+            ("Meso M1", RefinementTier::Intact),
+            ("Meso N12", RefinementTier::Intact),
+            ("Meso O3", RefinementTier::Intact),
+            ("Meso P9", RefinementTier::Intact),
+            ("Meso R2", RefinementTier::Intact),
+            ("Meso T2", RefinementTier::Intact),
+            ("Meso V5", RefinementTier::Intact),
+            ("Meso V11", RefinementTier::Intact),
+            ("Meso Z2", RefinementTier::Intact),
+            ("Neo A12", RefinementTier::Intact),
+            ("Neo B6", RefinementTier::Intact),
+            ("Neo E2", RefinementTier::Intact),
+            ("Neo F3", RefinementTier::Intact),
+            ("Neo K9", RefinementTier::Intact),
+            ("Neo O2", RefinementTier::Intact),
+            ("Neo P4", RefinementTier::Intact),
+            ("Neo P7", RefinementTier::Intact),
+            ("Neo P9", RefinementTier::Intact),
+            ("Neo T11", RefinementTier::Intact),
+            ("Neo V7", RefinementTier::Intact),
+            ("Neo V12", RefinementTier::Intact),
+            ("Neo Y1", RefinementTier::Intact),
+            // Bare in the corpus, absent from stock-2 (a gain
+            // that evening or its scroll's coverage gap — the
+            // three-state read is owned x1 either way).
+            ("Axi K2", RefinementTier::Intact),
         ];
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let corpus = root.join("../fracker-frames/live-relic-sync");
@@ -3593,8 +3729,9 @@ mod tests {
             return;
         };
         let universe = ctx.universes.for_class(ScreenClass::Relics);
-        let mut excluded: HashSet<String> = HashSet::new();
-        let mut held_pairs: HashSet<(String, RefinementTier)> = HashSet::new();
+        let mut evidence = crate::ocr::RefinementEvidence::default();
+        let mut relic_votes: HashMap<(String, RefinementTier), HashMap<u32, u32>> =
+            HashMap::new();
         let mut labelled: HashMap<(String, RefinementTier), u32> = HashMap::new();
         for i in 0..25 {
             let path = corpus.join(format!("frame-relics-{i:02}.png"));
@@ -3608,70 +3745,126 @@ mod tests {
                 "frame {i} variant (header: {header:?})"
             );
             let results = read_frame(&layout, &img, &engine, &ctx, universe, None, variant);
+            evidence.observe(&results, ctx.relic_names);
             for r in &results {
-                let Some(name) = &r.matched else { continue };
-                if r.refine_excluded {
-                    excluded.insert(name.clone());
-                }
                 if r.held {
-                    assert!(
-                        !PHANTOMS.contains(&name.as_str()),
-                        "phantom {name} imported from frame {i}"
-                    );
-                    assert_ne!(
-                        name, "Meso V15",
-                        "label-less collateral Meso V15 imported from frame {i}"
-                    );
-                    held_pairs.insert((name.clone(), r.tier));
                     if let Some(c) = r.count {
+                        let Some(name) = &r.matched else { continue };
                         let e = labelled.entry((name.clone(), r.tier)).or_insert(0);
                         *e = (*e).max(c);
                     }
                 }
             }
+            let frame_stock =
+                StockState::from_results(&results, ctx.relic_names, ctx.arcane_names);
+            for (name, stacks) in &frame_stock.relics {
+                for (tier, count) in &stacks.tiers {
+                    *relic_votes
+                        .entry((name.clone(), *tier))
+                        .or_default()
+                        .entry(*count)
+                        .or_insert(0) += 1;
+                }
+            }
         }
-        // Every phantom was read on the tail pages and refused.
-        for p in PHANTOMS {
-            assert!(excluded.contains(*p), "phantom {p} was never refused");
-        }
-        assert!(
-            excluded.contains("Meso V15"),
-            "the owned label-less collateral is refused too (the safe default's cost)"
+        let stock = resolve_voted_stock(
+            &HashMap::new(),
+            &relic_votes,
+            &HashMap::new(),
+            &evidence,
         );
-        // The poisoned stock's three in-both singleton Radiant
-        // tiers are label-less reads: refused as well.
-        for pair in [
-            ("Axi V1", RefinementTier::Radiant),
-            ("Lith A2", RefinementTier::Radiant),
-            ("Meso A8", RefinementTier::Radiant),
-        ] {
+        let total_stacks: usize = stock.relics.values().map(|s| s.tiers.len()).sum();
+        let total_items: u32 = stock.relics.values().map(|s| s.total()).sum();
+        eprintln!(
+            "corpus replay: {} stacks, {} items imported; {} labelled stacks; {} excluded",
+            total_stacks,
+            total_items,
+            labelled.len(),
+            evidence.excluded_stacks().len()
+        );
+
+        // The 11 unowned Axi are excluded, and the finalize
+        // line names them.
+        let session = {
+            let mut s = CaptureSession::new();
+            s.relic_evidence = evidence.clone();
+            s
+        };
+        let summary = session.relic_variant_summary().expect("finalize line present");
+        assert_eq!(evidence.excluded_stacks().len(), 11, "exactly the 11 Axi");
+        for name in UNOWNED_AXI {
             assert!(
-                !held_pairs.contains(&(pair.0.to_owned(), pair.1)),
-                "{pair:?} imported"
+                !stock.relics.contains_key(*name),
+                "unowned {name} imported"
             );
+            assert!(summary.contains(name), "finalize line must name {name}: {summary}");
         }
-        // The labelled newcomers of the live scrape import with
-        // their counts.
-        for (name, count) in [
-            ("Meso S7", 14),
-            ("Neo N1", 8),
-            ("Meso X1", 2),
-            ("Neo C10", 2),
-        ] {
+        // Every ground-truth owned label-less stack imports x1.
+        for (name, tier) in OWNED_X1 {
             assert_eq!(
-                labelled.get(&(name.to_owned(), RefinementTier::Intact)),
-                Some(&count),
-                "{name} must import labelled at x{count}"
+                stock.relics.get(*name).map(|s| s.get(*tier)),
+                Some(1),
+                "owned x1 {name} {tier:?} must import at x1"
             );
         }
-        // And the labelled population survives broadly: the
-        // baseline replay held 517 stacks, 305 of them with a
-        // parsed label somewhere; the rule may only cost the
-        // label-less remainder.
+        // The labelled population is pass 43's: exactly the
+        // same 411 stacks ever show a label, and each imports
+        // at the count the (unchanged, pass-27) vote machinery
+        // resolves from its per-frame reads — the mode of the
+        // counts its frames voted, ties to the larger. Where
+        // the label reads disagree across appearances (Lith
+        // C9 reads 14 and 15), the mode is the arbiter, in
+        // pass 43 and here alike; the max label is asserted
+        // only where the reads agree.
+        assert_eq!(labelled.len(), 411, "labelled stack count changed");
+        for ((name, tier), max_label) in &labelled {
+            let votes = &relic_votes[&(name.clone(), *tier)];
+            let mode = votes
+                .iter()
+                .max_by(|a, b| a.1.cmp(b.1).then(a.0.cmp(b.0)))
+                .map(|(c, _)| *c)
+                .expect("a labelled stack has votes");
+            assert_eq!(
+                stock.relics.get(name).map(|s| s.get(*tier)),
+                Some(mode),
+                "labelled {name} {tier:?} must import at its voted count"
+            );
+            if votes.len() == 1 {
+                assert_eq!(mode, *max_label, "single-read label must agree");
+            }
+        }
+        // The Lith M4 guard case: its x15 label never parses
+        // (it sits at the count region's edge), so the tile
+        // imports at the vote-resolved count — what matters
+        // is that it imports at all: the eye disposition must
+        // not exclude a physically labelled stack.
         assert!(
-            labelled.len() >= 290,
-            "only {} labelled stacks imported",
-            labelled.len()
+            stock.relics.contains_key("Lith M4"),
+            "physically labelled Lith M4 must not be eye-excluded"
+        );
+        // Known issue, pinned (brief scope 4): no "Meso L1"
+        // tile exists, but the reader names the owned Meso
+        // C11 [Radiant] cell "Meso L1" in both settled
+        // appearances, so that pair imports at x1 Radiant
+        // under the garbled name — a wrong name on a real
+        // owned x1 stack, not a phantom. A name-OCR fix must
+        // update this assertion deliberately.
+        assert_eq!(
+            stock.relics.get("Meso L1").map(|s| s.tiers.len()),
+            Some(1),
+            "L1 imports only as the C11 garble pair"
+        );
+        assert_eq!(
+            stock.relics.get("Meso L1").map(|s| s.get(RefinementTier::Radiant)),
+            Some(1),
+            "the C11 [Radiant] garble imports at x1 Radiant"
+        );
+        // Totals reconcile: 411 labelled + the owned x1 list
+        // + the L1 garble pair.
+        assert_eq!(
+            total_stacks,
+            411 + OWNED_X1.len() + 1,
+            "import composition changed"
         );
     }
 

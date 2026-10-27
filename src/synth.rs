@@ -1506,7 +1506,7 @@ pub fn adjudicate_session(
                 tier: crate::ocr::RefinementTier::Unknown,
                 rank: None,
                 gate_excluded: false,
-                refine_excluded: false,
+                refine_eye_mass: None,
             });
             result.matched = Some(name.clone());
             result.held = true;
