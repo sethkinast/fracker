@@ -2034,3 +2034,46 @@ it refines the brief where they disagree. For the next worker pass.
     band components, 2 selection regressions); suite 345
     passed / 0 failed (lib 317 = 308 + 9; golden 15).
     Details: docs/fortieth-pass.md.
+106. **Fragment swap — full-page refresh killed (pass 41,
+    shipped as v0.5.35).** Seth's fix #2 in the low-fork
+    shape decided 2026-10-26: the server stays the only
+    renderer, no client-side templating. (1) The renderer
+    marks five fragments (header + tab pages p1–p4) with
+    inert comment markers; extract_fragments splits the
+    rendered file back into swap units — container tags,
+    tab radios/nav, and scripts are static shell, never
+    swapped. (2) GET /fragments?gen=<known> returns JSON
+    {generation, day, ticks, only the changed fragments}
+    via per-fragment hash comparison against a
+    4-generation cache warmed by the full-page serve and
+    every fragment answer; current generation → empty
+    set; forgotten generation → full set (a fuller swap,
+    never a navigation). The tick payload comes from one
+    shared builder for GET / and /fragments; a test
+    asserts byte-identity with the served page's
+    data-fracker-ticks attribute. (3) Client: the push
+    guard's differing-generation action is Fetch (1 s
+    floor, burst-coalesced), not Reload; the page swaps
+    innerHTML per fragment, adopts the payload's day/tick
+    attributes, and re-applies dynamic state through
+    window.__frackerResync (the page script factored
+    into once-per-element bindings — swapped panels run
+    the same code path as initial load; tick painting
+    keeps its load semantics verbatim). A 60 s fragment
+    poll replaces the meta-refresh, whose tag is removed
+    from the served page (the pre-first-report
+    placeholder keeps its own 5 s refresh: no scripts, no
+    panels, and it is the only way off the interstitial).
+    The only navigation left is a last-resort reload
+    after 3 consecutive HTTP failures, behind the
+    session breaker (≤3 per 30 s window, ≥5 s spacing,
+    sessionStorage-persisted); network failures never
+    count — reloading into a dead server would trade a
+    good stale page for a browser error. Gates: 7 net-new
+    tests (lib 317 → 324) plus the rewritten push-guard
+    suite and updated behaviour pins (no meta-refresh; a
+    push fetches fragments); suite 352 passed / 0 failed
+    (golden 15); cargo build --release --locked --offline
+    green pre-tag. Details: docs/forty-first-pass.md.
+    Live visual verification (no blink on regen) is
+    Seth's, post-ship.
