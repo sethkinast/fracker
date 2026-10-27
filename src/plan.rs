@@ -360,7 +360,8 @@ pub struct CrackInfo {
     pub batch: u32,
     /// Total void-trace cost for the batch (`400 tr`).
     pub traces: u32,
-    /// Other wanted parts the same relic drops (`+2 also`).
+    /// Other still-needed parts the same relic drops (`+2 also`;
+    /// pass 44: PartState::Need only).
     pub covers: usize,
     /// The radshare verdict for this crack when sharing beats solo
     /// (pass 38, addendum #103): the full verdict line, carried so
@@ -690,7 +691,9 @@ pub struct CrackCandidate {
     pub refinement: Refinement,
     pub batch: u32,
     pub owned: Option<u32>,
-    /// Other wanted parts the same relic can drop (coverage bonus).
+    /// Other still-needed parts the same relic can drop (coverage
+    /// bonus; pass 44: PartState::Need only, never mere want-list
+    /// membership).
     pub coverage: usize,
     /// Score: chance x coverage, stock-weighted.
     pub score: f64,
@@ -731,12 +734,18 @@ fn crack_outranks(
 /// already tier/chance ranked, so the name falls out of it).
 /// Returns None only when the part has no relics or every relic
 /// for it is known-empty.
+///
+/// `other_needs` is the plan-wide coverage universe (pass 44):
+/// the names of parts whose PartState is Need, built once in
+/// plan construction ([`need_set`]) and threaded to every
+/// caller, so a relic reward counts as coverage only while its
+/// part is still genuinely needed.
 pub fn best_crack_candidate(
     part: &str,
     relics: &RelicTables,
     stock: &RelicStock,
     varzia: &VarziaAvailability,
-    other_wants: &HashSet<String>,
+    other_needs: &HashSet<String>,
     tuning: &Tuning,
 ) -> Option<CrackCandidate> {
     let mut best: Option<CrackCandidate> = None;
@@ -762,7 +771,7 @@ pub fn best_crack_candidate(
         let coverage = relic
             .rewards
             .iter()
-            .filter(|r| r.name != part && other_wants.contains(&r.name))
+            .filter(|r| r.name != part && other_needs.contains(&r.name))
             .count();
         let stock_factor = match owned {
             Some(_) => tuning.planner.known_stock_factor,
@@ -808,13 +817,13 @@ pub fn best_crack_for_part(
     relics: &RelicTables,
     stock: &RelicStock,
     varzia: &VarziaAvailability,
-    other_wants: &HashSet<String>,
+    other_needs: &HashSet<String>,
     fissures: &[crate::model::Fissure],
     now: DateTime<Utc>,
     steel_path_tiebreak: bool,
     tuning: &Tuning,
 ) -> Option<(CrackCandidate, FissurePick)> {
-    let cand = best_crack_candidate(part, relics, stock, varzia, other_wants, tuning)?;
+    let cand = best_crack_candidate(part, relics, stock, varzia, other_needs, tuning)?;
     let pick = rank_fissures(
         fissures,
         &[cand.era.as_str()],
@@ -1119,6 +1128,23 @@ pub fn prune_wants(
     (active, pruned)
 }
 
+/// THE coverage universe (pass 44, addendum #109): the names of
+/// parts still genuinely needed — PartState::Need on some card,
+/// plan-wide. Built ONCE per plan construction and threaded to
+/// every coverage consumer (the Hunt action derivation, the
+/// crack-queue ranked pass, farm co-yield), so the surfaces
+/// agree by construction. Before this pass each consumer
+/// rebuilt a want-LIST set, and a want retires only when its
+/// parent gear is profile-owned — so a part already satisfied
+/// (Have in either stock form, or ⍻-asserted) still counted
+/// toward a relic's coverage and its (1 + coverage) score
+/// factor, and the consumers did not even disagree alike.
+fn need_set<'a>(rows: impl Iterator<Item = &'a PartRow>) -> HashSet<String> {
+    rows.filter(|p| p.state == PartState::Need)
+        .map(|p| p.name.clone())
+        .collect()
+}
+
 /// Rank-ordered goal cards for the surviving wants.
 fn goal_cards(
     input: &PlanInput<'_>,
@@ -1139,71 +1165,104 @@ fn goal_cards(
         .as_ref()
         .map(|v| v.gear_tokens())
         .unwrap_or_default();
-    let mut cards: Vec<GoalCard> = by_gear
+    // Two phases (pass 44): part rows for every card first, so
+    // the plan-wide coverage universe (the Need set) exists
+    // before any card's action is derived from it. Actions were
+    // previously derived inside this same per-card pass, when
+    // only the want LIST was available to price coverage with.
+    struct PendingCard {
+        gear: String,
+        wants: Vec<String>,
+        parts: Vec<PartRow>,
+        is_warframe: bool,
+        vaulted: bool,
+        resurgence_live: bool,
+        parts_have: usize,
+        parts_total: usize,
+        ready: bool,
+        partially_unobtainable: bool,
+    }
+    let mut pending: Vec<PendingCard> = Vec::new();
+    for (gear, mut wants) in by_gear {
+        wants.sort();
+        let item = input.roster.by_name(&gear);
+        let is_warframe = item.map(|i| i.is_warframe()).unwrap_or(false);
+        let vaulted = item.map(|i| i.vaulted).unwrap_or(false);
+        let parts = part_rows_for_gear(
+            &gear,
+            &wants,
+            input.roster,
+            input.relics,
+            input.stock,
+            input.part_stock,
+            input.unverified_parts,
+            varzia,
+            &want_set,
+            input.tuning,
+        );
+        // Progress in units (pass 42): the total sums each
+        // part's required count; the have side sums held
+        // units capped per part at its requirement (surplus
+        // copies of one part never paper over a missing
+        // unit of another). Held = verified Have +
+        // unverified-held (thirtieth pass): progress counts
+        // both evidence classes; the card stays
+        // distinguishable through the rows'/pips' ⍻ rendering.
+        let parts_total: usize = parts.iter().map(|p| p.required as usize).sum();
+        let parts_have: usize = parts
+            .iter()
+            .map(|p| p.held.min(p.required) as usize)
+            .sum();
+        // Ready = buildable now: every part satisfied
+        // (pass 42). Owned gear is pruned before cards are
+        // built, so a ready card is never an owned item.
+        let ready = !parts.is_empty() && parts.iter().all(|p| p.state.is_held());
+        let partially_unobtainable = parts.iter().any(|p| {
+            p.state == PartState::Need
+                && p.relics
+                    .iter()
+                    .any(|r| r.source_tier == SourceTier::Unobtainable)
+        });
+        let resurgence_live =
+            !resurgence_tokens.is_empty() && gear_in_tokens(&gear, &resurgence_tokens);
+        pending.push(PendingCard {
+            gear,
+            wants,
+            parts,
+            is_warframe,
+            vaulted,
+            resurgence_live,
+            parts_have,
+            parts_total,
+            ready,
+            partially_unobtainable,
+        });
+    }
+    let needs = need_set(pending.iter().flat_map(|p| p.parts.iter()));
+    let mut cards: Vec<GoalCard> = pending
         .into_iter()
-        .map(|(gear, mut wants)| {
-            wants.sort();
-            let item = input.roster.by_name(&gear);
-            let is_warframe = item.map(|i| i.is_warframe()).unwrap_or(false);
-            let vaulted = item.map(|i| i.vaulted).unwrap_or(false);
-            let parts = part_rows_for_gear(
-                &gear,
-                &wants,
-                input.roster,
-                input.relics,
-                input.stock,
-                input.part_stock,
-                input.unverified_parts,
-                varzia,
-                &want_set,
-                input.tuning,
-            );
-            // Progress in units (pass 42): the total sums each
-            // part's required count; the have side sums held
-            // units capped per part at its requirement (surplus
-            // copies of one part never paper over a missing
-            // unit of another). Held = verified Have +
-            // unverified-held (thirtieth pass): progress counts
-            // both evidence classes; the card stays
-            // distinguishable through the rows'/pips' ⍻ rendering.
-            let parts_total: usize = parts.iter().map(|p| p.required as usize).sum();
-            let parts_have: usize = parts
-                .iter()
-                .map(|p| p.held.min(p.required) as usize)
-                .sum();
-            // Ready = buildable now: every part satisfied
-            // (pass 42). Owned gear is pruned before cards are
-            // built, so a ready card is never an owned item.
-            let ready = !parts.is_empty() && parts.iter().all(|p| p.state.is_held());
-            let partially_unobtainable = parts.iter().any(|p| {
-                p.state == PartState::Need
-                    && p.relics
-                        .iter()
-                        .any(|r| r.source_tier == SourceTier::Unobtainable)
-            });
-            let resurgence_live =
-                !resurgence_tokens.is_empty() && gear_in_tokens(&gear, &resurgence_tokens);
+        .map(|p| {
             let action = derive_action(
                 input,
-                &gear,
-                &wants,
-                &parts,
-                vaulted,
-                resurgence_live,
+                &p.gear,
+                &p.wants,
+                &p.parts,
+                p.vaulted,
+                p.resurgence_live,
                 varzia,
-                &want_set,
+                &needs,
             );
             GoalCard {
-                gear,
-                is_warframe,
-                vaulted,
-                resurgence_live,
-                wants,
-                parts_have,
-                parts_total,
-                parts,
-                ready,
-                partially_unobtainable,
+                gear: p.gear,
+                is_warframe: p.is_warframe,
+                vaulted: p.vaulted,
+                resurgence_live: p.resurgence_live,
+                wants: p.wants,
+                parts_have: p.parts_have,
+                parts_total: p.parts_total,
+                parts: p.parts,
+                ready: p.ready,
+                partially_unobtainable: p.partially_unobtainable,
                 action,
             }
         })
@@ -1252,7 +1311,7 @@ fn derive_action(
     vaulted: bool,
     resurgence_live: bool,
     varzia: &VarziaAvailability,
-    want_set: &HashSet<String>,
+    needs: &HashSet<String>,
 ) -> GoalAction {
     // Needed parts, bottleneck (rarest) first.
     let mut needed: Vec<&PartRow> = parts
@@ -1291,9 +1350,10 @@ fn derive_action(
     }
     let mut best_crack: Option<(CrackCandidate, FissurePick, String)> = None;
     for part in &needed {
-        let mut others = want_set.clone();
+        let mut others = needs.clone();
         others.remove(&part.name);
-        // Other wants on THIS card get coverage weight too.
+        // Other NEEDED parts — this card's included, via the
+        // plan-wide set (pass 44) — get coverage weight too.
         if let Some((cand, pick)) = best_crack_for_part(
             &part.name,
             input.relics,
@@ -1627,12 +1687,16 @@ fn build_chunks(
     // the chunk's mission, never as a condition.
     let focus_set: HashSet<String> =
         focus.iter().map(|f| f.part.clone()).collect();
+    // The coverage universe (pass 44): the plan-wide Need set,
+    // built once — the same definition the Hunt action
+    // derivation consumed, so the queue's coverage figures and
+    // scores agree with Hunt's by construction. (This replaces
+    // a want-list set that was rebuilt, identically, per card.)
+    let needs = need_set(cards.iter().flat_map(|c| c.parts.iter()));
     // Real ranked pass (owned values, no borrow tangle).
     let mut ranked: Vec<(String, CrackCandidate, Option<FissurePick>, String, String)> =
         Vec::new();
     for card in cards {
-        let want_set: HashSet<String> =
-            cards.iter().flat_map(|c| c.wants.clone()).collect();
         let mut needed: Vec<&PartRow> = card
             .parts
             .iter()
@@ -1650,7 +1714,7 @@ fn build_chunks(
         // enters the crack queue — there is nothing to run for it.
         let mut representative = None;
         for part in needed {
-            let mut others = want_set.clone();
+            let mut others = needs.clone();
             others.remove(&part.name);
             if let Some(cand) = best_crack_candidate(
                 &part.name,
@@ -1746,7 +1810,7 @@ fn build_chunks(
             .unwrap_or(false);
         let mut alternates = String::new();
         if cand.coverage > 0 {
-            alternates = format!(" Covers {} other want(s) in the same relic.", cand.coverage);
+            alternates = format!(" Covers {} other needed part(s) in the same relic.", cand.coverage);
         }
         let (title, minutes_label, expiry_dt) = match &pick {
             Some(pick) => {
@@ -1952,14 +2016,20 @@ fn build_chunks(
 }
 
 /// Co-yield farm scoring (§17): per node, expected wanted-relics/hour =
-/// Σ over ALL wanted relics dropping there of rotation chance ×
-/// rotations/hour for the mission type.
+/// Σ over relics for still-needed parts dropping there of rotation
+/// chance × rotations/hour for the mission type.
 fn score_farms(input: &PlanInput<'_>, cards: &[GoalCard]) -> Vec<FarmHint> {
-    let want_set: HashSet<String> =
-        cards.iter().flat_map(|c| c.wants.clone()).collect();
+    // Pass 44 (addendum #109): the same Need universe as crack
+    // coverage. Under the old want-list set, a satisfied part's
+    // relics kept contributing yield, inflating exactly the
+    // nodes that drop relics for finished parts — the same
+    // defect class as the coverage inflation, so the same fix.
+    // A satisfied part's relics have no hunt value (surplus
+    // identification is a separate, parked question).
+    let needs = need_set(cards.iter().flat_map(|c| c.parts.iter()));
     // node key -> (planet, mode, relics, score).
     let mut agg: HashMap<String, (String, String, Vec<String>, f64)> = HashMap::new();
-    for w in &want_set {
+    for w in &needs {
         for (relic, _p) in input.relics.relics_for_part(w) {
             if relic.vaulted {
                 continue;
@@ -4026,5 +4096,210 @@ mod tests {
             .unwrap();
         assert!(in_tie_band(&c20, &c18, &t), "20 vs 18: at the band edge, tied");
         assert!(!in_tie_band(&c20, &c17, &t), "20 vs 17: outside the band");
+    }
+
+    /// Pass 44 fixture (addendum #109): Seth's live Citrine case,
+    /// generalised. Citrine Prime's only want is its Blueprint
+    /// (Need). The relic that drops it, Meso C11, also drops one
+    /// part per satisfaction class — Lavos Prime Chassis
+    /// Blueprint (held as the BUILT component), Kompressa Prime
+    /// Blueprint (held as the blueprint), Daikyu Prime Upper
+    /// Limb (⍻-asserted) — plus one genuinely needed part of
+    /// another card, Banshee Prime Neuroptics Blueprint (whose
+    /// own best crack is decisively a different relic, Lith B3 —
+    /// flat 26% against Meso C11's rare-band line — so the
+    /// queue's one-chunk-per-relic rule leaves the Meso C11
+    /// chunk to Citrine). Under the pre-pass want-list coverage,
+    /// all four dropped parts counted toward Meso C11's figure;
+    /// need-based coverage counts only the Banshee part. The
+    /// `need_reward` variant drops the Banshee want: every
+    /// other Meso C11 reward is then satisfied or unwanted.
+    fn coverage_fixture(need_reward: bool) -> Plan {
+        let roster = Roster::from_json(
+            r#"[
+              {"name": "Citrine Prime", "vaulted": false, "type": "warframe",
+               "parts": [{"name": "Citrine Prime Blueprint"}]},
+              {"name": "Lavos Prime", "vaulted": false, "type": "warframe",
+               "parts": [{"name": "Lavos Prime Chassis Blueprint"}]},
+              {"name": "Kompressa Prime", "vaulted": false, "type": "secondary",
+               "parts": [{"name": "Kompressa Prime Blueprint"}]},
+              {"name": "Daikyu Prime", "vaulted": false, "type": "bow",
+               "parts": [{"name": "Daikyu Prime Upper Limb"}]},
+              {"name": "Banshee Prime", "vaulted": false, "type": "warframe",
+               "parts": [{"name": "Banshee Prime Neuroptics Blueprint"}]}
+            ]"#,
+        )
+        .unwrap();
+        let tables = RelicTables::from_json(
+            r#"{"relics": {
+                "Meso C11": {"name": "Meso C11", "vaulted": false, "sources": {},
+                    "rewards": [
+                        {"name": "Citrine Prime Blueprint", "chance": {"Intact": 2, "Exceptional": 4, "Flawless": 6, "Radiant": 10}},
+                        {"name": "Lavos Prime Chassis Blueprint", "chance": {"Intact": 25.33, "Exceptional": 23.33, "Flawless": 20, "Radiant": 16.67}},
+                        {"name": "Kompressa Prime Blueprint", "chance": {"Intact": 25.33, "Exceptional": 23.33, "Flawless": 20, "Radiant": 16.67}},
+                        {"name": "Daikyu Prime Upper Limb", "chance": {"Intact": 11, "Exceptional": 13, "Flawless": 17, "Radiant": 20}},
+                        {"name": "Banshee Prime Neuroptics Blueprint", "chance": {"Intact": 2, "Exceptional": 4, "Flawless": 6, "Radiant": 10}},
+                        {"name": "Forma Blueprint", "chance": {"Intact": 25.33, "Exceptional": 23.33, "Flawless": 20, "Radiant": 16.67}}
+                    ]},
+                "Lith B3": {"name": "Lith B3", "vaulted": false, "sources": {},
+                    "rewards": [
+                        {"name": "Banshee Prime Neuroptics Blueprint", "chance": {"Intact": 26, "Exceptional": 26, "Flawless": 26, "Radiant": 26}},
+                        {"name": "Forma Blueprint", "chance": {"Intact": 25.33, "Exceptional": 23.33, "Flawless": 20, "Radiant": 16.67}}
+                    ]}
+            }, "sources": {}}"#,
+        )
+        .unwrap();
+        // Captured stock in SCREEN names: the Lavos Chassis is
+        // held as the built component (no " Blueprint" suffix),
+        // the Kompressa part as its blueprint — #89
+        // canonicalisation sums both onto the roster parts.
+        let captured = crate::ocr::StockState {
+            parts: [
+                ("Lavos Prime Chassis".to_owned(), 1),
+                ("Kompressa Prime Blueprint".to_owned(), 1),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let part_stock = captured.canonical_part_counts(&roster);
+        let unverified: HashMap<String, u32> = [("Daikyu Prime Upper Limb".to_owned(), 1)]
+            .into_iter()
+            .collect();
+        let mut wants = vec![
+            "Citrine Prime Blueprint".to_owned(),
+            "Lavos Prime Chassis Blueprint".to_owned(),
+            "Kompressa Prime Blueprint".to_owned(),
+            "Daikyu Prime Upper Limb".to_owned(),
+        ];
+        if need_reward {
+            wants.push("Banshee Prime Neuroptics Blueprint".to_owned());
+        }
+        let stock = RelicStock::Known(crate::model::KnownStock::from_totals(
+            [("Meso C11".to_owned(), 3), ("Lith B3".to_owned(), 5)]
+                .into_iter()
+                .collect(),
+        ));
+        let mut world = WorldState::default();
+        world.fissures = vec![syn_fissure(
+            "Yuvarium (Lua)",
+            "Survival",
+            "Omnia",
+            "2026-10-15T23:00:00Z",
+        )];
+        let owned = OwnedEquipment::empty();
+        let recent: HashSet<String> = HashSet::new();
+        let now: DateTime<Utc> = "2026-10-15T21:00:00Z".parse().unwrap();
+        plan(&PlanInput {
+            now,
+            world: &world,
+            owned: &owned,
+            wants: &wants,
+            roster: &roster,
+            relics: &tables,
+            stock: &stock,
+            part_stock: &part_stock,
+            unverified_parts: &unverified,
+            pins: &[],
+            recent_gear: &recent,
+            steel_path_tiebreak: true,
+            completed_missions: &[],
+            item_names: test_item_names(),
+            tuning: &tuning(),
+        })
+    }
+
+    fn citrine_crack(p: &Plan) -> &CrackInfo {
+        p.chunks
+            .iter()
+            .filter_map(|c| c.crack.as_ref())
+            .find(|ci| ci.gear == "Citrine Prime")
+            .expect("a crack chunk for Citrine Prime")
+    }
+
+    #[test]
+    fn coverage_counts_only_still_needed_parts_on_both_surfaces() {
+        // The regression this pass exists to pin (addendum
+        // #109): three of Meso C11's other rewards are already
+        // satisfied — one per evidence class — and must not
+        // count; the one still-needed reward must, identically,
+        // on the queue (CrackInfo) and in the Hunt action
+        // derivation (whose score carries the same coverage in
+        // its (1 + coverage) factor).
+        let p = coverage_fixture(true);
+        let state_of = |gear: &str, part: &str| {
+            p.goals
+                .iter()
+                .find(|g| g.gear == gear)
+                .and_then(|g| g.parts.iter().find(|r| r.name == part))
+                .map(|r| r.state.clone())
+        };
+        assert_eq!(
+            state_of("Lavos Prime", "Lavos Prime Chassis Blueprint"),
+            Some(PartState::Have),
+            "built-form satisfaction"
+        );
+        assert_eq!(
+            state_of("Kompressa Prime", "Kompressa Prime Blueprint"),
+            Some(PartState::Have),
+            "blueprint satisfaction"
+        );
+        assert_eq!(
+            state_of("Daikyu Prime", "Daikyu Prime Upper Limb"),
+            Some(PartState::HaveUnverified),
+            "unverified satisfaction"
+        );
+        assert_eq!(
+            state_of("Banshee Prime", "Banshee Prime Neuroptics Blueprint"),
+            Some(PartState::Need),
+            "the one covered part that is still needed"
+        );
+        let ci = citrine_crack(&p);
+        assert_eq!(ci.relic, "Meso C11");
+        assert_eq!(ci.covers, 1, "only the still-needed reward counts");
+        // Hunt agreement: the Citrine action chose the same
+        // candidate, and its score decomposes with the SAME
+        // coverage figure (chance x (1 + covers) x stock factor).
+        let card = p
+            .goals
+            .iter()
+            .find(|g| g.gear == "Citrine Prime")
+            .expect("Citrine card");
+        assert_eq!(card.action.kind, ActionKind::Crack);
+        assert_eq!(card.action.relic.as_deref(), Some("Meso C11"));
+        let t = tuning();
+        let expected = ci.chance * (1.0 + ci.covers as f64) * t.planner.known_stock_factor;
+        assert!(
+            (card.action.score - expected).abs() < 1e-9,
+            "Hunt score {} decomposes with the queue's coverage {} (expected {})",
+            card.action.score,
+            ci.covers,
+            expected
+        );
+    }
+
+    #[test]
+    fn coverage_zero_when_every_other_reward_is_satisfied() {
+        // Seth's exact live figure: the Meso C11 line read
+        // "+3 also" while every other part it drops was already
+        // in hand. Need-based coverage reads +0, and the score
+        // is chance x stock factor with no coverage multiplier.
+        let p = coverage_fixture(false);
+        let ci = citrine_crack(&p);
+        assert_eq!(ci.relic, "Meso C11");
+        assert_eq!(ci.covers, 0, "no still-needed reward on the relic");
+        let card = p
+            .goals
+            .iter()
+            .find(|g| g.gear == "Citrine Prime")
+            .expect("Citrine card");
+        let t = tuning();
+        let expected = ci.chance * t.planner.known_stock_factor;
+        assert!(
+            (card.action.score - expected).abs() < 1e-9,
+            "score {} == chance x stock factor exactly ({})",
+            card.action.score,
+            expected
+        );
     }
 }
