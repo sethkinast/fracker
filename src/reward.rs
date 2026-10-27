@@ -95,63 +95,125 @@ pub fn name_band_region(fw: u32, fh: u32, slot: usize) -> [f32; 4] {
     ]
 }
 
-/// Border continuity per slot: for each perimeter sample line
-/// (top/bottom/left/right), take the max over a small window
+/// A perimeter side contributes to a slot's continuity only
+/// when some single offset in the sampling window carries a
+/// real line on that side: the side's best single-offset
+/// continuity must clear this bar. Measured on the two real
+/// frames (pass 43, addendum #108): true border sides bottom
+/// at 0.77 (the fixture's bottom line straddles two rows:
+/// 0.57 / 0.77), while scene content on unbordered sides
+/// peaks at 0.42 — the per-card progress bar under an
+/// unpicked card, picker-name text, panel glow; none of it
+/// sustains a line. 0.60 sits between the two populations,
+/// so a side with no line contributes zero instead of its
+/// scattered noise (under the pass-39 aggregation that noise
+/// summed to 0.14–0.23 on unbordered slots).
+const SIDE_LINE_MIN: f32 = 0.60;
+
+/// One perimeter side's contribution to a slot's continuity:
+/// `(bright, total)` sample counts, where a sample position
+/// is bright when any offset in `offs` reads at or above
+/// [`BORDER_BRIGHT`] there — unless no single offset carries
+/// a line ([`SIDE_LINE_MIN`]), in which case the side
+/// contributes zero bright samples. `fixed` is the edge
+/// coordinate the offsets displace (the row for horizontal
+/// sides, the column for vertical ones); samples run over
+/// `from..=to` along the edge.
+fn border_side(
+    frame: &GrayImage,
+    horizontal: bool,
+    fixed: i32,
+    from: i32,
+    to: i32,
+    offs: &[i32],
+) -> (u32, u32) {
+    let (fw, fh) = (frame.width as i32, frame.height as i32);
+    let at = |x: i32, y: i32| -> u8 {
+        if x < 0 || y < 0 || x >= fw || y >= fh {
+            0
+        } else {
+            frame.get(x as u32, y as u32)
+        }
+    };
+    let sample = |p: i32, o: i32| -> u8 {
+        if horizontal {
+            at(p, fixed + o)
+        } else {
+            at(fixed + o, p)
+        }
+    };
+    // The side's best single-offset continuity: does any one
+    // offset carry a line along the whole edge?
+    let mut best = 0.0f32;
+    for &o in offs {
+        let (mut b, mut n) = (0u32, 0u32);
+        for p in from..=to {
+            n += 1;
+            if sample(p, o) >= BORDER_BRIGHT {
+                b += 1;
+            }
+        }
+        if n > 0 {
+            best = best.max(b as f32 / n as f32);
+        }
+    }
+    let (mut bright, mut total) = (0u32, 0u32);
+    for p in from..=to {
+        total += 1;
+        if offs.iter().map(|&o| sample(p, o)).max().unwrap_or(0) >= BORDER_BRIGHT {
+            bright += 1;
+        }
+    }
+    if best >= SIDE_LINE_MIN {
+        (bright, total)
+    } else {
+        (0, total)
+    }
+}
+
+/// Border continuity per slot: for each perimeter side
+/// (top/bottom/left/right), take the max over a window
 /// straddling the card edge (the frame line is 1–2 px and our
 /// rect can sit a pixel off), then count the fraction of
 /// samples at or above [`BORDER_BRIGHT`]. The selected card's
 /// frame is continuous; an unselected card has no frame at
 /// all, so its "perimeter" is scene content — bright in
 /// patches, never all the way around.
+///
+/// Pass 43 (addendum #108): the window is CONTIGUOUS in frame
+/// pixels — every integer offset in [-3s, +3s], the same on
+/// all four sides, where s scales the fixture width to the
+/// frame's. The pass-39 sets were four measured offsets per
+/// side that scaling + dedup made sparse ([-1, 0, 1, 3] /
+/// [-3, -1, 0, 1] at 2560 wide): on Seth's 2026-10-26 live
+/// frame the border sits at top +1 / bottom +2 / left -2 /
+/// right -2 from the assumed rect, and only the top side's
+/// set contained its line — the bordered card read 0.31 and
+/// the pick missed. A side now also has to carry a real line
+/// somewhere in the window ([`SIDE_LINE_MIN`]) before its
+/// samples count, which keeps the wider window from
+/// inflating unbordered slots on scene content (the live
+/// frame's runner-up reads 0.00; it read 0.14–0.22 under
+/// window-union alone).
 pub fn border_scores(frame: &GrayImage) -> [f32; SLOTS] {
     let (fw, fh) = (frame.width, frame.height);
     let mut out = [0.0f32; SLOTS];
-    // Window offsets (in px, fixture scale ~1769 wide) measured
-    // against the fixture's frame line; scaled with the frame.
     let s = fw as f32 / 1769.0;
-    let offs = |base: [i32; 4]| -> Vec<i32> {
-        let mut v: Vec<i32> = base
-            .iter()
-            .map(|o| (*o as f32 * s).round() as i32)
-            .collect();
-        v.sort_unstable();
-        v.dedup();
-        v
-    };
-    let top_offs = offs([-1, 0, 1, 2]);
-    let bot_offs = offs([-2, -1, 0, 1]);
-    let at = |x: i32, y: i32| -> u8 {
-        if x < 0 || y < 0 || x >= fw as i32 || y >= fh as i32 {
-            0
-        } else {
-            frame.get(x as u32, y as u32)
-        }
-    };
+    let half = (3.0 * s).round() as i32;
+    let offs: Vec<i32> = ((-half)..=half).collect();
     for slot in 0..SLOTS {
         let (x, y, w, h) = slot_rect(fw, fh, slot);
         let (x0, y0) = (x as i32, y as i32);
         let (x1, y1) = (x0 + w as i32 - 1, y0 + h as i32 - 1);
-        let mut bright = 0u32;
-        let mut total = 0u32;
-        for px in x0..=x1 {
-            let top = top_offs.iter().map(|o| at(px, y0 + o)).max().unwrap_or(0);
-            let bot = bot_offs.iter().map(|o| at(px, y1 + o)).max().unwrap_or(0);
-            for v in [top, bot] {
-                total += 1;
-                if v >= BORDER_BRIGHT {
-                    bright += 1;
-                }
-            }
-        }
-        for py in y0..=y1 {
-            let lef = top_offs.iter().map(|o| at(x0 + o, py)).max().unwrap_or(0);
-            let rig = bot_offs.iter().map(|o| at(x1 + o, py)).max().unwrap_or(0);
-            for v in [lef, rig] {
-                total += 1;
-                if v >= BORDER_BRIGHT {
-                    bright += 1;
-                }
-            }
+        let (mut bright, mut total) = (0u32, 0u32);
+        for (b, t) in [
+            border_side(frame, true, y0, x0, x1, &offs),
+            border_side(frame, true, y1, x0, x1, &offs),
+            border_side(frame, false, x0, y0, y1, &offs),
+            border_side(frame, false, x1, y0, y1, &offs),
+        ] {
+            bright += b;
+            total += t;
         }
         out[slot] = if total == 0 {
             0.0
@@ -617,6 +679,62 @@ mod tests {
         // A second credit increments.
         assert_eq!(credit_part(&stock_path, &name).unwrap(), 2);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Load a sibling-tree fixture image, or `None` when the
+    /// fracker-frames tree is absent (the strip-test pattern:
+    /// verdicts on real pixels where they exist, a skip where
+    /// they do not).
+    fn sibling_image(rel: &str) -> Option<GrayImage> {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
+        let bytes = std::fs::read(&path).ok()?;
+        GrayImage::from_bytes(&bytes).ok()
+    }
+
+    #[test]
+    fn fixture_border_winner_stays_in_the_nineties() {
+        // Pass 39's fixture (Seth's screencap, 1769x996): the
+        // bordered slot 0 must still win, with continuity in
+        // the 0.9s, under the pass-43 contiguous window.
+        let Some(frame) = sibling_image("../fracker-frames/fixtures/reward-screen.png") else {
+            eprintln!("skip reward fixture: absent");
+            return;
+        };
+        let scores = border_scores(&frame);
+        assert_eq!(border_winner(&scores), Some(0), "scores: {scores:?}");
+        assert!(
+            scores[0] >= 0.90,
+            "fixture winner continuity {:.3} left the 0.9s",
+            scores[0]
+        );
+    }
+
+    #[test]
+    fn live_frame_border_offsets_resolve_the_pick() {
+        // Pass 43's live regression: Seth's 2026-10-26 T+14
+        // frame (2560x1440) whose bordered card (slot 2,
+        // Steflos Prime Receiver) the pass-39 sparse offsets
+        // read at 0.31 and missed. The contiguous window must
+        // resolve it: winner slot 2 at >= 0.90, every other
+        // slot <= 0.10.
+        let Some(frame) =
+            sibling_image("../fracker-frames/live-relic-sync/reward-1793062149.png")
+        else {
+            eprintln!("skip live reward frame: absent");
+            return;
+        };
+        let scores = border_scores(&frame);
+        assert_eq!(border_winner(&scores), Some(2), "scores: {scores:?}");
+        assert!(
+            scores[2] >= 0.90,
+            "live winner continuity {:.3} below 0.90",
+            scores[2]
+        );
+        for (i, s) in scores.iter().enumerate() {
+            if i != 2 {
+                assert!(*s <= 0.10, "live slot {i} continuity {s:.3} above 0.10");
+            }
+        }
     }
 
     #[test]
