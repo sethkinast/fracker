@@ -385,6 +385,21 @@ pub fn load_item_names(
         .unwrap_or_default()
 }
 
+/// Load the baked projection-texture map
+/// (`data/cache/relic-textures.json`: projection uniqueName ->
+/// Public Export textureLocation, pass 48). Missing/unreadable
+/// = empty map: relic icons degrade to the monogram, never a
+/// guessed URL. Baked data — refreshed per data/cache/README.md,
+/// never fetched at runtime.
+pub fn load_relic_textures(
+    data_dir: &Path,
+) -> std::collections::HashMap<String, String> {
+    std::fs::read_to_string(data_dir.join("cache/relic-textures.json"))
+        .ok()
+        .and_then(|t| crate::model::load_relic_textures(&t).ok())
+        .unwrap_or_default()
+}
+
 /// Resolve profile XPInfo uniqueNames to display names via the
 /// uniqueName -> name map (`data/cache/item-names.json`, built from the
 /// WFCD items dataset). Unresolvable entries are skipped, never guessed.

@@ -2527,3 +2527,49 @@ it refines the brief where they disagree. For the next worker pass.
     during a real reward window (trigger feel,
     one-glance legibility, a ⍻ toggle from the
     overlay landing in the plan).
+114. **Real relic icons in the search overlay (pass 48,
+    shipped as v0.5.43).** Closes pass 47's one data-forced
+    substitution: Seth supplied DE's Public Export as the
+    relic image source (2026-10-27) — ExportManifest pairs
+    every item's uniqueName with a textureLocation, and
+    http://content.warframe.com/PublicExport/<textureLocation>
+    is the image asset. Access follows the two-server
+    pattern (#51): language index on the ORIGIN server over
+    HTTPS (index_en.txt.lzma, hashed manifest names), the
+    manifest itself from the CONTENT server. Design: the
+    ExportManifest subset for the 3,204 projections
+    item-names knows is BAKED to data/cache/relic-textures.json
+    (refresh procedure in data/cache/README.md — always from
+    the live index, since hashed names rotate; texture assets
+    are hash-addressed and cacheable forever); the join runs
+    at report time in model::relic_icon_urls — relic name ->
+    projection uniqueName via item-names (Intact preferred,
+    then Exceptional/Flawless/Radiant; the overlay shows ONE
+    icon per relic, per the pass-47 total-count ruling) ->
+    textureLocation -> content-server URL. Source naming
+    quirks normalized in the join: title-case roman numerals
+    in the tables ("Requiem Ii" vs item-names' "Requiem II",
+    absorbed by case-folded keys), "Axi Vanguard C1" vs the
+    projections' plain "Vanguard C1" (dual-keyed), and the
+    tier-less "Requiem Eterna Relic" (base minus " Relic" at
+    the Intact slot). Render: the relic header chip takes the
+    gear icons' exact markup (<img> over the monogram
+    initial, onerror removes it); an unresolvable relic keeps
+    the monogram alone — never an invented URL. No runtime
+    fetch, no per-render network; textures hotlink the
+    content server as gear icons hotlink their CDN. Live
+    spot-check (2026-10-27): index line
+    ExportManifest.json!00_ctbDG9gRd4GzkO0LrBP9Kw (manifest
+    3,838,178 bytes, 20,153 entries); Meso C11 Intact ->
+    /Lotus/Interface/Icons/Relics/RelicMesoD.png!00_YnW-MWrqd3JE32EROH2M1g
+    -> HTTP 200, PNG 512x512, 77,697 bytes (no Content-Type
+    header served; PNG by signature). Coverage on current
+    data: 800/800 relic names resolve; the offline-demo
+    sidecar's 800 relic blocks all carry the <img>. Gates:
+    suite 398 passed / 0 failed (lib 370; golden 15;
+    packaging 7; resident 5; tray_quit 1) — two new tests
+    (the manifest join on fixtures; the rendered icon block
+    vs the monogram fallback); pass-47 gates and census
+    gates untouched. Details: docs/forty-eighth-pass.md.
+    Live verification owed: the overlay during a real
+    reward window now shows the relic's own icon.
