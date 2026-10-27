@@ -2351,3 +2351,62 @@ it refines the brief where they disagree. For the next worker pass.
     Live verification owed: Seth's next refinement
     sync should import his x1s and name only the 11
     Axi in the finalize line.
+111. **Relic name admission: refuse the name the
+    read did not prove (pass 46, shipped as
+    v0.5.40).** Seth's ruling on #110's pinned
+    issue: importing a relic under an unproven
+    name is actively false information, worse
+    than missing the relic — "Meso L1" is a
+    real, different relic, so membership in the
+    universe cannot catch the error; only the
+    read's own evidence can. Resolver trace: one
+    resolver (Universe::best_match_margin via
+    ocr::validate_read) feeds every relic-stock
+    write path (live capture read_cells, folder
+    ingest, --ocr-ingest); its three bars are
+    score >= 0.8, margin >= 0.10, and the
+    pass-33 hold_permitted head-witness — whose
+    merged-witness clause is the hole: one fused
+    token testifies for head + code at once
+    ("Mesoll" is zero edits from the merged
+    target "mesol1"). Calibration (corpus
+    replay, 1,235 held reads): margins cannot
+    separate — the garble's 0.1071 sits inside
+    the legitimate population (median 0.1429;
+    a clean C11 read wins with margin 0.125),
+    and its 0.8571 score clears any absolute bar
+    the one legitimate sub-0.875 read ("Ayi V2",
+    0.8333) clears. The token-witness axis
+    separates perfectly: exactly 2 of 1,235 held
+    reads cannot assign the winner's tokens to
+    distinct ordered read tokens — the two
+    garble appearances; every legitimate read
+    assigns at per-token confusable-Levenshtein
+    <= 1. Fix: relic_name_admission runs first
+    on relic frames in both write paths — a
+    held result imports only when every token
+    of the resolved name is witnessed by a
+    distinct read token, in order, at per-token
+    distance <= 1; below the bar the result is
+    un-held and a NameRefusal (raw, winner,
+    runner-up, margin) is recorded before the
+    owned-gate or refinement measure can see
+    it. The finalize log states refusals;
+    folder ingest prints them. Corpus replay:
+    505 stacks / 3,613 items = 411 labelled +
+    94 owned x1s (pass 45's 506/3,614 minus
+    exactly the garble pair); exactly 2 refusals,
+    both the C11 [Radiant] appearances; "Meso
+    L1" no longer imports — the stack is missed,
+    not misnamed. A fused read refuses even
+    when unambiguous (the shape is the defect
+    class); a boundary-preserving garble
+    remains indistinguishable from a true read
+    by string evidence and is out of scope.
+    Gates: suite 380 passed / 0 failed (lib 352;
+    golden 15; packaging 7; resident 5; tray_quit
+    1); census gates untouched.
+    Details: docs/forty-sixth-pass.md. Live
+    verification owed: Seth's next refinement
+    sync should show the refusal line naming
+    the C11 garble and import no "Meso L1".

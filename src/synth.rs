@@ -1507,6 +1507,7 @@ pub fn adjudicate_session(
                 rank: None,
                 gate_excluded: false,
                 refine_eye_mass: None,
+                name_refused: None,
             });
             result.matched = Some(name.clone());
             result.held = true;

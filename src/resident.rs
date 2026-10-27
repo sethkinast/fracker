@@ -1209,6 +1209,13 @@ async fn finalize_capture(
     if let Some(vs) = session.relic_variant_summary() {
         log.record("finalizing", &vs);
     }
+    // Pass 46: name-admission refusals ride the finalize log
+    // on the same principle — a sync states which resolved
+    // names it refused to import as unproven, with the raw
+    // read and the margin that failed to prove them.
+    if let Some(ns) = session.relic_name_summary() {
+        log.record("finalizing", &ns);
+    }
     set_capture_stage(status, log, CaptureStage::Idle);
     true
 }

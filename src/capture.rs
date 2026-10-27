@@ -1127,6 +1127,11 @@ pub struct CaptureSession {
     /// label-less appearances. Stock resolution consults it on
     /// every rebuild; the finalize line names what it excludes.
     relic_evidence: crate::ocr::RefinementEvidence,
+    /// Pass 46: name-admission refusals this session, in
+    /// first-refusal order, deduplicated on (raw, winner) —
+    /// the finalize log's record of the reads whose resolved
+    /// names their own evidence did not prove.
+    relic_name_refused: Vec<crate::ocr::NameRefusal>,
 }
 
 impl CaptureSession {
@@ -1295,6 +1300,27 @@ impl CaptureSession {
             "relic refinement rule: excluded {} unowned stack(s) (label-less refinement tile with the eye glyph): {}",
             excluded.len(),
             names.join(", ")
+        ))
+    }
+
+    /// Pass 46: the name-admission finalize line — every read
+    /// this session whose resolved name was refused because
+    /// the read's own tokens did not witness it, with the raw
+    /// read, the refused winner, the runner-up and the
+    /// margin. `None` when nothing was refused.
+    pub fn relic_name_summary(&self) -> Option<String> {
+        if self.relic_name_refused.is_empty() {
+            return None;
+        }
+        let parts: Vec<String> = self
+            .relic_name_refused
+            .iter()
+            .map(|r| r.describe())
+            .collect();
+        Some(format!(
+            "relic name admission: refused {} read(s) whose resolved name the read did not prove: {}",
+            parts.len(),
+            parts.join("; ")
         ))
     }
 
@@ -1499,6 +1525,19 @@ impl CaptureSession {
                     if !self.relic_gate_excluded.contains(name) {
                         self.relic_gate_excluded.push(name.clone());
                     }
+                }
+            }
+            // Pass 46: record name-admission refusals for the
+            // finalize log (first-refusal order, deduplicated
+            // on raw + winner — the same garbled tile read on
+            // five frames is one refusal, stated once).
+            if let Some(nr) = &r.name_refused {
+                if !self
+                    .relic_name_refused
+                    .iter()
+                    .any(|x| x.raw == nr.raw && x.winner == nr.winner)
+                {
+                    self.relic_name_refused.push(nr.clone());
                 }
             }
         }
@@ -2182,12 +2221,15 @@ pub fn read_cells(
             }
         }
     }
-    // Pass 38 (addendum #103): the relic owned-gate runs last on
+    // Pass 38 (addendum #103): the relic owned-gate runs on
     // relic frames only — after validation, so it sees exactly the
     // tiles that would enter stock, and only ever REMOVES holds
     // (on catalogue frames, under the full evidence conjunction;
     // see ocr::relic_owned_gate). Parts and arcane frames never
     // reach it, and on owned-only relic frames it is inert.
+    // Pass 46 (addendum #111): the name-admission gate runs
+    // BEFORE it, on the same frames — the owned-gate sees only
+    // tiles whose names were admitted.
     //
     // Pass 45 (addendum #110): the refinement measure runs
     // after the gate, on the same terms — on refinement frames
@@ -2197,6 +2239,12 @@ pub fn read_cells(
     // (ocr::RefinementEvidence): label = owned at the count,
     // eye seen = unowned, neither = owned x1.
     if layout.key == "relic" {
+        // Pass 46 (addendum #111): the name-admission gate
+        // runs first among the relic passes — a read whose
+        // resolved name its own tokens do not witness is
+        // refused here and feeds no other evidence (not the
+        // owned-gate, not the refinement disposition).
+        ocr::relic_name_admission(&mut results, universe);
         ocr::relic_owned_gate(cells, layout, &mut results, opts.relic_bright_ref);
         ocr::relic_refinement_measure(cells, layout, &mut results, opts.relic_variant);
     }
@@ -3604,11 +3652,12 @@ mod tests {
         //   (411 stacks at their counts);
         // - "Meso L1" has no tile: the reader names the Meso
         //   C11 [Radiant] cell "Meso L1" in both its settled
-        //   appearances (raw "Mesoll Relic [Radiant]"), so the
-        //   pair imports at x1 Radiant — the brief's named
-        //   known issue, pinned here so a future name-OCR fix
-        //   changes it deliberately, never silently. Skips
-        //   when the corpus is absent (the strip-test pattern).
+        //   appearances (raw "Mesoll Relic [Radiant]"). Pass 45
+        //   pinned that false import as a known issue; pass 46
+        //   refuses it at the name-admission gate — L1 does not
+        //   import, the refusal is recorded, and the finalize
+        //   line names it. Skips when the corpus is absent
+        //   (the strip-test pattern).
         const UNOWNED_AXI: &[&str] = &[
             "Axi A12", "Axi A13", "Axi A15", "Axi A19", "Axi A2", "Axi A23", "Axi A3",
             "Axi A6", "Axi A7", "Axi A8", "Axi B7",
@@ -3730,6 +3779,7 @@ mod tests {
         };
         let universe = ctx.universes.for_class(ScreenClass::Relics);
         let mut evidence = crate::ocr::RefinementEvidence::default();
+        let mut name_refusals: Vec<crate::ocr::NameRefusal> = Vec::new();
         let mut relic_votes: HashMap<(String, RefinementTier), HashMap<u32, u32>> =
             HashMap::new();
         let mut labelled: HashMap<(String, RefinementTier), u32> = HashMap::new();
@@ -3745,6 +3795,11 @@ mod tests {
                 "frame {i} variant (header: {header:?})"
             );
             let results = read_frame(&layout, &img, &engine, &ctx, universe, None, variant);
+            for r in &results {
+                if let Some(nr) = &r.name_refused {
+                    name_refusals.push(nr.clone());
+                }
+            }
             evidence.observe(&results, ctx.relic_names);
             for r in &results {
                 if r.held {
@@ -3842,28 +3897,53 @@ mod tests {
             stock.relics.contains_key("Lith M4"),
             "physically labelled Lith M4 must not be eye-excluded"
         );
-        // Known issue, pinned (brief scope 4): no "Meso L1"
-        // tile exists, but the reader names the owned Meso
-        // C11 [Radiant] cell "Meso L1" in both settled
-        // appearances, so that pair imports at x1 Radiant
-        // under the garbled name — a wrong name on a real
-        // owned x1 stack, not a phantom. A name-OCR fix must
-        // update this assertion deliberately.
-        assert_eq!(
-            stock.relics.get("Meso L1").map(|s| s.tiers.len()),
-            Some(1),
-            "L1 imports only as the C11 garble pair"
+        // Pass 46 (addendum #111): no "Meso L1" tile exists.
+        // The reader names the owned Meso C11 [Radiant] cell
+        // "Meso L1" in both settled appearances (raw "Mesoll
+        // Relic [Radiant]" — the code token burned down and
+        // fused with the era). Pass 45 pinned that false
+        // import as a known issue; Seth's ruling reversed the
+        // priority — a false name in stock is worse than a
+        // missing relic — so the name-admission gate now
+        // REFUSES the read: L1 does not import at all, the
+        // C11 stack is missed (never misnamed), and the
+        // refusal is recorded and named in the finalize line.
+        assert!(
+            !stock.relics.contains_key("Meso L1"),
+            "the C11 garble must not import under the false name L1"
         );
-        assert_eq!(
-            stock.relics.get("Meso L1").map(|s| s.get(RefinementTier::Radiant)),
-            Some(1),
-            "the C11 [Radiant] garble imports at x1 Radiant"
+        assert!(
+            !stock.relics.contains_key("Meso C11")
+                || stock.relics["Meso C11"].get(RefinementTier::Radiant) == 0,
+            "the garbled appearance must not credit C11 Radiant either"
         );
-        // Totals reconcile: 411 labelled + the owned x1 list
-        // + the L1 garble pair.
+        // Both settled appearances refused, one distinct
+        // record (same raw, same winner), and the finalize
+        // line names it with its runner-up and margin.
+        assert_eq!(name_refusals.len(), 2, "both garble appearances refused");
+        assert!(
+            name_refusals
+                .iter()
+                .all(|nr| nr.winner == "Meso L1" && nr.raw == "Mesoll Relic [Radiant]"),
+            "refusals are the C11 garble: {name_refusals:?}"
+        );
+        let name_session = {
+            let mut s = CaptureSession::new();
+            s.relic_name_refused = vec![name_refusals[0].clone()];
+            s
+        };
+        let name_summary = name_session
+            .relic_name_summary()
+            .expect("name-admission finalize line present");
+        assert!(
+            name_summary.contains("Meso L1") && name_summary.contains("Mesoll"),
+            "finalize line must name the refusal: {name_summary}"
+        );
+        // Totals reconcile: 411 labelled + the owned x1 list;
+        // the garble pair is gone (505, down from 506).
         assert_eq!(
             total_stacks,
-            411 + OWNED_X1.len() + 1,
+            411 + OWNED_X1.len(),
             "import composition changed"
         );
     }

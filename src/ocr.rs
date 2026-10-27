@@ -2743,6 +2743,59 @@ pub struct CellResult {
     /// count label (a label is positive owned evidence and
     /// needs no second signal).
     pub refine_eye_mass: Option<u32>,
+    /// Pass 46 (addendum #111): the relic name-admission gate
+    /// refused this read's resolved name (see
+    /// [`relic_name_admission`]). `held` is already false;
+    /// this record is what the finalize log names, so a
+    /// refused read reads as a decision, not a loss.
+    pub name_refused: Option<NameRefusal>,
+}
+
+/// One relic name resolution the admission gate refused
+/// (pass 46, addendum #111): the raw read as the engine
+/// produced it, the name the resolver would have imported,
+/// and the nearest other universe name under the resolver's
+/// own metric — the finalize log's record of what was not
+/// imported and why.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NameRefusal {
+    /// The raw engine read, unmodified.
+    pub raw: String,
+    /// The resolved name that was refused.
+    pub winner: String,
+    /// The winner's resolver score (0..1).
+    pub winner_score: f32,
+    /// The nearest other universe name, when one scored.
+    pub runner_up: Option<String>,
+    /// The runner-up's resolver score (0..1).
+    pub runner_up_score: f32,
+}
+
+impl NameRefusal {
+    /// Winner minus runner-up under the resolver's metric.
+    pub fn margin(&self) -> f32 {
+        self.winner_score - self.runner_up_score
+    }
+
+    /// One-line log form: raw read, refused winner,
+    /// runner-up, and the margin between them.
+    pub fn describe(&self) -> String {
+        match &self.runner_up {
+            Some(r) => format!(
+                "{:?} -> {} ({:.2}) over {} ({:.2}), margin {:.2}",
+                self.raw,
+                self.winner,
+                self.winner_score,
+                r,
+                self.runner_up_score,
+                self.margin()
+            ),
+            None => format!(
+                "{:?} -> {} ({:.2}), no runner-up",
+                self.raw, self.winner, self.winner_score
+            ),
+        }
+    }
 }
 
 /// Ambiguity guard: the runner-up name must trail the winner by at least
@@ -2769,6 +2822,7 @@ pub fn validate_read(
         rank: read.rank,
         gate_excluded: false,
         refine_eye_mass: None,
+        name_refused: None,
     };
     if read.confidence < min_confidence {
         return out;
@@ -2957,6 +3011,159 @@ pub fn relic_owned_gate(
         }
     }
     outcome
+}
+
+// ---------------------------------------------------------------------------
+// Relic name admission (pass 46, addendum #111)
+// ---------------------------------------------------------------------------
+//
+// Seth's ruling (2026-10-27): importing a relic under a name
+// the read does not prove is actively false information in
+// stock.json — strictly worse than missing the relic. A miss
+// costs a re-sync; a false import fabricates ownership.
+//
+// The defect: the owned Meso C11 [Radiant] tile read as
+// "Mesoll Relic [Radiant]" in both of its settled corpus
+// appearances, and the resolver held "Meso L1" — a REAL,
+// different relic, so universe membership cannot catch it.
+// It is a sibling false-accept, and the resolver's own bars
+// do not refuse it: the whole-string score is 0.857 (floor
+// 0.8), the margin over the runner-up (Meso A11, 0.750) is
+// 0.107 (guard 0.10), and the shared hold predicate passes
+// because its merged-witness clause lets the one fused token
+// "mesoll" testify for the head token and the code token at
+// once. Score-space cannot fix this: corpus-wide, held
+// relic reads run margins of 0.10-0.20 (median 0.143 —
+// siblings sit one edit apart), and a clean "Meso C11" read
+// itself only margins 0.125 over Meso A11. The garble's
+// margin sits INSIDE the legitimate distribution.
+//
+// What separates it is evidence shape, the parts
+// discipline's real core: every token of the name must be
+// witnessed, and one blob of glyphs cannot testify twice.
+// A relic name's tokens are each discriminative against a
+// different sibling set (the era against the other eras'
+// same-code names, the code against the same era's other
+// codes — 205 of 265 codes exist in more than one era), so
+// each needs its OWN read token. The fused read is exactly
+// the shape where a destroyed discriminative glyph hides:
+// "C11" burned down to "ll" and fused with the era, and no
+// string metric can tell the ashes from a genuine fused
+// "Meso L1" (the two are zero edits apart under the
+// confusable metric closure). The fused shape is therefore
+// refused as a shape, at any score.
+//
+// Calibration (the 25-frame corpus replay, 1,235 held
+// reads): every legitimate held read assigns its winner's
+// tokens to distinct read tokens, in order, with per-token
+// confusable-Levenshtein distance at most 1 — worst total
+// assignment cost 1, across clean reads, one-glyph garbles
+// ("Ayi V2" for Axi V2), split glyphs ("| ith" for Lith) and
+// junk-prefixed reads alike. The ONLY assignment-impossible
+// held reads in the corpus are the two C11 garble
+// appearances. The bar below is set at exactly that
+// observation: per-token distance <=
+// [`RELIC_TOKEN_WITNESS_MAX`], distinct tokens, in order.
+//
+// Known limit, stated plainly: a garble that preserves the
+// token boundary ("Meso L1" read cleanly off a C11 tile)
+// is indistinguishable from a true L1 read by ANY string
+// evidence, and this gate does not pretend otherwise. The
+// corpus contains no such case; the observed defect class
+// is the fused read, and the fused read is what dies here.
+
+/// Per-token confusable-Levenshtein budget for the relic
+/// name witness (pass 46): a candidate token counts as
+/// witnessed by a read token at most this many edits away.
+/// Corpus calibration: every legitimate held read witnesses
+/// every token at distance <= 1 (most at 0); the budget is
+/// the observation, not a round number near it.
+pub const RELIC_TOKEN_WITNESS_MAX: usize = 1;
+
+/// Does the read witness EVERY token of `candidate`, each
+/// by a DISTINCT read token, in order, within
+/// [`RELIC_TOKEN_WITNESS_MAX`] confusable edits? The read
+/// is cleaned exactly as the resolver cleans it (tier label
+/// and the trailing "Relic" dropped) before tokenising, so
+/// the witness judges the same evidence the resolver scored.
+/// Extra read tokens (icon bleed, junk) testify for nothing
+/// and cost nothing; a read with fewer tokens than the
+/// candidate can never witness it.
+fn relic_name_witnessed(read: &str, candidate: &str) -> bool {
+    let cleaned = strip_tier_label(read);
+    let cleaned = strip_relic_suffix(&cleaned);
+    let read_toks: Vec<String> = fold(&cleaned)
+        .split(' ')
+        .filter(|t| !t.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let cand_folded = fold(candidate);
+    let cand_toks: Vec<&str> = cand_folded.split(' ').filter(|t| !t.is_empty()).collect();
+    if cand_toks.is_empty() || read_toks.len() < cand_toks.len() {
+        return false;
+    }
+    // Ordered distinct assignment: candidate token k takes a
+    // read token strictly after the one token k-1 took.
+    fn assign(read: &[String], cand: &[&str], start: usize) -> bool {
+        if cand.is_empty() {
+            return true;
+        }
+        if read.len() - start < cand.len() {
+            return false;
+        }
+        for i in start..=(read.len() - cand.len()) {
+            if levenshtein_confusable(&read[i], cand[0]) <= RELIC_TOKEN_WITNESS_MAX
+                && assign(read, &cand[1..], i + 1)
+            {
+                return true;
+            }
+        }
+        false
+    }
+    assign(&read_toks, &cand_toks, 0)
+}
+
+/// The relic name-admission gate (pass 46): un-hold every
+/// held result whose resolved name the read does not witness
+/// token-by-token ([`relic_name_witnessed`]), and record the
+/// refusal on the result ([`CellResult::name_refused`]) for
+/// the finalize log. Runs FIRST among the relic post-read
+/// passes — before the owned-gate and the refinement
+/// measure — so a refused name feeds no other evidence: it
+/// is not in stock, not in the disposition, not anywhere.
+/// Applied on every path that writes relic stock (live
+/// capture via `capture::read_cells`, folder ingest via
+/// [`ingest_folder`]), with the same universe the resolver
+/// itself scored against, so the discipline cannot drift
+/// between paths. Parts and arcane reads never reach it
+/// (both call sites key on the relic layout, exactly as the
+/// owned-gate does).
+pub fn relic_name_admission(results: &mut [CellResult], universe: &Universe) {
+    for result in results.iter_mut() {
+        if !result.held {
+            continue;
+        }
+        let Some(winner) = result.matched.clone() else {
+            continue;
+        };
+        if relic_name_witnessed(&result.raw_text, &winner) {
+            continue;
+        }
+        let (runner_up, runner_up_score) = universe
+            .top_matches(&result.raw_text, 3)
+            .into_iter()
+            .find(|(n, _)| *n != winner.as_str())
+            .map(|(n, s)| (Some(n.to_owned()), s))
+            .unwrap_or((None, 0.0));
+        result.held = false;
+        result.name_refused = Some(NameRefusal {
+            raw: result.raw_text.clone(),
+            winner,
+            winner_score: result.match_score,
+            runner_up,
+            runner_up_score,
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4125,6 +4332,11 @@ pub fn ingest_folder(
         // session reference exists here; the gate works from the
         // page's own split.
         if layout.key == "relic" {
+            // Pass 46: the name-admission gate applies here
+            // first, on the same terms as live capture — a
+            // garbled name must not import through the back
+            // door either.
+            relic_name_admission(&mut page_results, universe);
             relic_owned_gate(&cells, layout, &mut page_results, None);
             // Pass 45: the refinement measure applies here too,
             // and the folder as a whole is the session the
@@ -4280,6 +4492,97 @@ mod tests {
         // Low confidence never validates even when exact.
         let shy = validate_read(&read("Neo C5", 0.2, None), &u, 0.5, 0.8, 3);
         assert!(!shy.held);
+    }
+
+    /// Pass 46 test universe: a slice of the relic catalogue
+    /// around the C11/L1 sibling pair.
+    fn relic_test_universe() -> Universe {
+        Universe::from_names(
+            &[
+                "Axi V2",
+                "Lith M10",
+                "Meso A11",
+                "Meso C11",
+                "Meso L1",
+                "Meso L3",
+                "Neo C5",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>(),
+        )
+    }
+
+    #[test]
+    fn relic_name_admission_refuses_fused_sibling_garble() {
+        // The pass-46 defect, synthetically: the C11 tile's
+        // fused garble. The resolver's own bars ADMIT it —
+        // that is the bug — so assert the pre-gate hold first,
+        // then the gate's refusal and its record.
+        let u = relic_test_universe();
+        let mut results = vec![validate_read(
+            &read("Mesoll Relic [Radiant]", 0.9, None),
+            &u,
+            0.5,
+            0.8,
+            0,
+        )];
+        assert!(
+            results[0].held,
+            "pre-gate, the resolver admits the garble (the defect): {:?}",
+            results[0]
+        );
+        assert_eq!(results[0].matched.as_deref(), Some("Meso L1"));
+        relic_name_admission(&mut results, &u);
+        assert!(!results[0].held, "the gate must refuse the fused garble");
+        let nr = results[0]
+            .name_refused
+            .as_ref()
+            .expect("refusal is recorded");
+        assert_eq!(nr.winner, "Meso L1");
+        assert!(nr.runner_up.is_some(), "record names the runner-up: {nr:?}");
+        assert!(nr.margin() >= 0.0 && nr.margin() < 0.25, "record: {nr:?}");
+        // A fused read refuses even when its string is an
+        // unambiguous name: the shape is the defect class,
+        // not the ambiguity.
+        let mut fused = vec![validate_read(
+            &read("MesoC11 Relic", 0.9, None),
+            &u,
+            0.5,
+            0.8,
+            0,
+        )];
+        if fused[0].held {
+            relic_name_admission(&mut fused, &u);
+            assert!(
+                !fused[0].held,
+                "fused clean read refuses as a shape: {fused:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn relic_name_admission_keeps_witnessed_reads() {
+        // Clean reads of BOTH siblings import — the gate
+        // refuses the garble, not the name it garbled into.
+        // Noisy-but-witnessed reads import: one glyph wrong
+        // per token, split glyphs, a junk token in front.
+        let u = relic_test_universe();
+        for (text, want) in [
+            ("Meso L1 Relic", "Meso L1"),
+            ("Meso C11 Relic", "Meso C11"),
+            ("Meso C11 Relic [Radiant]", "Meso C11"),
+            ("Ayi V2 Relic", "Axi V2"),
+            ("Lith MI 0 Relic", "Lith M10"),
+            ("x8 Meso C11 Relic", "Meso C11"),
+        ] {
+            let mut results = vec![validate_read(&read(text, 0.9, None), &u, 0.5, 0.8, 0)];
+            assert!(results[0].held, "pre-gate hold for {text:?}: {:?}", results[0]);
+            relic_name_admission(&mut results, &u);
+            assert!(results[0].held, "gate keeps witnessed read {text:?}");
+            assert_eq!(results[0].matched.as_deref(), Some(want));
+            assert!(results[0].name_refused.is_none());
+        }
     }
 
     #[test]
@@ -4840,6 +5143,7 @@ mod tests {
             rank: None,
             gate_excluded: false,
             refine_eye_mass: None,
+            name_refused: None,
         }
     }
 
