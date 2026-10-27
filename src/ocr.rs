@@ -888,6 +888,84 @@ pub fn eye_badge_present(cell: &GrayImage) -> bool {
     eye_badge_score(cell) >= EYE_NCC_MIN
 }
 
+/// Grey level above which a pixel counts toward the eye glyph's
+/// bright mass (pass 45, addendum #110). The native eye renders
+/// as a flat, deterministic bright outline peaking at 154; the
+/// research measurement (REFINEMENT_X1_DISCRIMINATOR,
+/// 2026-10-27) found nothing else on a label-less tile puts
+/// pixels anywhere near this level inside the badge window.
+pub const EYE_BRIGHT_PX: u8 = 70;
+
+/// Bright-mass floor for "the eye glyph is present on this
+/// tile" (pass 45, addendum #110). Measured on Seth's 25
+/// native refinement frames: unowned tiles read 69-71 bright
+/// pixels in the canonical window, owned x1 tiles at most 20
+/// across all 527 settled label-less appearances — any
+/// threshold in [21, 68] classifies the corpus with zero
+/// errors; 40 sits mid-gap.
+pub const EYE_BRIGHT_MASS_MIN: u32 = 40;
+
+/// Canonical size the relic count region is resampled to
+/// before the label-presence check — its size at the
+/// canonical capture cell (168x174 at 2560x1440), so the
+/// check is resolution-independent like the eye window's.
+pub const LABEL_REGION_W: u32 = 57;
+pub const LABEL_REGION_H: u32 = 35;
+
+/// Bright-mass floor for "a count label is physically
+/// present in this tile's count region" (pass 45, addendum
+/// #110). Measured on the corpus with production crops: a
+/// bare corner reads 0 in the region, the eye glyph reads
+/// exactly 71 (the whole blob sits inside the region), and
+/// real count labels read 122-170 (frame 0's page minimum;
+/// the unparsed "x15" of Lith M4 reads 138). 100 sits in the
+/// (71, 122) gap. The check is a guard, not a gate: it only
+/// ever VETOES an eye measurement on a tile whose corner
+/// carries label-scale bright mass — a physically labelled
+/// tile the count parser failed to read, whose strokes share
+/// the eye window and must not be mistaken for the glyph.
+pub const LABEL_PRESENT_MASS_MIN: u32 = 100;
+
+/// The number of bright pixels ([`EYE_BRIGHT_PX`]) in the
+/// cell's count region, resampled to the canonical region
+/// size. A present-but-unparsed count label is the one
+/// corner state whose bright strokes overlap the eye
+/// window; this is how the refinement measure tells it
+/// apart from the glyph (see [`LABEL_PRESENT_MASS_MIN`]).
+pub fn count_region_bright_mass(cell: &GrayImage, layout: &Layout) -> u32 {
+    let region = crop_region(cell, layout.count);
+    if region.width < 8 || region.height < 8 {
+        return 0;
+    }
+    let region = resize_bilinear(&region, LABEL_REGION_W, LABEL_REGION_H);
+    region
+        .pixels
+        .iter()
+        .filter(|&&p| p > EYE_BRIGHT_PX)
+        .count() as u32
+}
+
+/// The number of bright pixels ([`EYE_BRIGHT_PX`]) in the
+/// cell's canonical eye window — the pass-45 eye statistic.
+/// Where the pass-38 template NCC fails on native frames (its
+/// blob sits ~6x8 px off the native position and the scorer
+/// tolerates no translation), a pixel count is registration-
+/// free: the eye's outline mass lands in the window wherever
+/// exactly it sits. A window too small to judge reads 0 — an
+/// unreadable corner is never an eye. Valid on settled frames
+/// only: a transient smears the glyph across the window edge
+/// (one corpus transient reads 16 on an unowned tile), which
+/// is why the disposition aggregates this per stack over the
+/// session's appearances and takes the maximum.
+pub fn eye_window_bright_mass(cell: &GrayImage) -> u32 {
+    let win = crop_region(cell, EYE_WINDOW);
+    if win.width < 16 || win.height < 10 {
+        return 0;
+    }
+    let win = resize_bilinear(&win, EYE_WINDOW_W, EYE_WINDOW_H);
+    win.pixels.iter().filter(|&&p| p > EYE_BRIGHT_PX).count() as u32
+}
+
 /// The measured eye template, exposed for capture-path tests
 /// (the calibration itself is owned by this module's tests).
 #[cfg(test)]
@@ -2656,12 +2734,15 @@ pub struct CellResult {
     /// tile as an unowned catalogue entry. `held` is already false;
     /// this flag is the observable record the capture report lists.
     pub gate_excluded: bool,
-    /// Pass 43 (addendum #108): the refinement-variant rule
-    /// excluded this tile — a held, label-less tile on the
-    /// refinement screen, where no count label means no owned
-    /// evidence. `held` is already false; same observability
-    /// contract as `gate_excluded`.
-    pub refine_excluded: bool,
+    /// Pass 45 (addendum #110): the eye-window bright mass
+    /// measured for this tile on a refinement frame, when it
+    /// was held without a count label — the session-level
+    /// unowned evidence for the three-state disposition (see
+    /// [`RefinementEvidence`]). `None` when not measured: not
+    /// a refinement frame, tile not held, or tile carried a
+    /// count label (a label is positive owned evidence and
+    /// needs no second signal).
+    pub refine_eye_mass: Option<u32>,
 }
 
 /// Ambiguity guard: the runner-up name must trail the winner by at least
@@ -2687,7 +2768,7 @@ pub fn validate_read(
         tier: RefinementTier::Unknown,
         rank: read.rank,
         gate_excluded: false,
-        refine_excluded: false,
+        refine_eye_mass: None,
     };
     if read.confidence < min_confidence {
         return out;
@@ -2879,36 +2960,67 @@ pub fn relic_owned_gate(
 }
 
 // ---------------------------------------------------------------------------
-// Relic refinement-variant rule (pass 43, addendum #108)
+// Relic refinement-variant disposition (pass 43, addendum
+// #108; pass 45, addendum #110)
 // ---------------------------------------------------------------------------
 //
-// Two screens share ScreenClass::Relics and they certify
-// ownership differently. The SELECTION variant (fissure-flow
-// picker) badges its unowned catalogue tiles — pass 38's gate
-// works there. The REFINEMENT variant (orbiter segment; the
-// header names it, "VOID RELICS / REFINEMENT") shows the
-// same catalogue with NO badge and NO count label on x1
-// stacks, and an owned x1 tile is pixel-indistinguishable
-// from an unowned one: measured on Seth's 25 native frames
-// (2026-10-26), the production badge scorer peaks at 0.328
-// over 1,925 cells and the name text is identical across
-// classes. Nor is a refinement second line owned evidence —
-// Meso L1, which Seth does not own at all, imported as
-// Radiant x1 from this screen. The only positive owned
-// evidence on this variant is a parsed count label, so a
-// held tile WITHOUT one is refused: 43 phantom names entered
-// stock from one ALL-filter refinement scrape before this
-// rule existed.
+// Two screens share ScreenClass::Relics. The SELECTION
+// variant (fissure-flow picker) shows owned tiles only —
+// unowned relics never render there. The REFINEMENT variant
+// (orbiter segment; the header names it, "VOID RELICS /
+// REFINEMENT") shows the full catalogue, and its tiles have
+// exactly three states (Seth, 2026-10-27): a count label =
+// owned xN (N > 1); no glyph = owned x1; the eye glyph =
+// unowned. One screen, one model — the pass-38 strip was a
+// crop of this same screen.
 //
-// The brief's OWNED-filter branch (label-less tiles sound
-// when every tile is owned) has no calibratable signal in
-// the corpus: the header's owned-related control is a sort
-// dropdown, the catalogue renders under it in all 25 frames,
-// and the header's "ALL" is the era filter, not an owned
-// filter. Until an owned-only refinement state is captured
-// and a signal calibrated against it, refinement frames
-// take the safe rule unconditionally — a lost x1 sync is
-// recoverable, a poisoned bucket is the bug being fixed.
+// Pass 43, working from the strip-calibrated template's
+// failure on native frames (production scorer peaks at
+// 0.328 over 1,925 cells), concluded the variant carried no
+// badge and refused every label-less tile — safe, but it
+// dropped every owned x1 stack on every refinement sync.
+// The 2026-10-27 discriminator research (REFINEMENT_X1_
+// DISCRIMINATOR) found the eye IS present on native frames
+// and the template fails on REGISTRATION, not signal: its
+// blob sits ~6x8 px off the native position and the scorer
+// tolerates no translation. A one-number statistic of the
+// same window — bright-pixel mass, [`eye_window_bright_mass`]
+// — separates the corpus perfectly (unowned 69-71, owned at
+// most 20 over 527 settled label-less appearances). The
+// research also corrected the pass-43 phantom reckoning:
+// only the 11 Axi were genuinely unowned; the 26 Meso/Neo
+// "phantoms" were Seth's owned x1s the earlier sync's
+// scroll never reached; and "Meso L1" was no tile at all —
+// a name misread of the owned Meso C11 [Radiant] tile.
+//
+// Pass 45 therefore dispositions refinement stacks by the
+// three-state model, at SESSION level ([`RefinementEvidence`]):
+// a stack with a parsed count label on any settled
+// appearance imports at that count; a label-less stack
+// whose eye-window bright mass reaches
+// [`EYE_BRIGHT_MASS_MIN`] on any settled appearance is
+// unowned and excluded; any other label-less stack imports
+// at x1. Per-frame code only MEASURES ([`relic_refinement_measure`]);
+// the session aggregates, because a transient frame smears
+// the glyph (one corpus transient reads mass 16 on an
+// unowned tile) and the maximum over settled appearances is
+// what makes the test robust — the same repeated-sighting
+// discipline the parts pipeline already uses.
+//
+// One veto on the measurement: a tile whose count region
+// carries label-scale bright mass is physically labelled
+// even when its label fails to parse (the corpus's Lith M4
+// x15, at the count region's edge — its strokes share the
+// eye window, 52 bright px, and would convict a stack
+// owned 15-deep). Such tiles are never measured
+// ([`LABEL_PRESENT_MASS_MIN`]): a glyph IS present in
+// their corner, so the three-state model owns them.
+//
+// The header's "ALL" is the era filter, not an owned
+// filter, and the "OWNED ▾" control is a sort dropdown —
+// the catalogue renders in full under both in all 25
+// corpus frames. There is no filter state to condition on;
+// the three-state model needs none.
 
 /// Which relic screen variant a frame came from (pass 43).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2919,7 +3031,8 @@ pub enum RelicScreenVariant {
     /// The fissure-flow picker. Pass 38's gate applies; this
     /// rule is inert.
     Selection,
-    /// The orbiter refinement screen. Label-only import.
+    /// The orbiter refinement screen. Three-state disposition
+    /// (see [`RefinementEvidence`]).
     Refinement,
 }
 
@@ -2931,9 +3044,10 @@ pub enum RelicScreenVariant {
 /// re-measured pass 43: every strip read parses Intact).
 /// Anything else proves nothing and stays `Unknown` — the
 /// failure mode is a refinement page whose visible stacks
-/// are all Intact, which infers Unknown and keeps the old
-/// behaviour; the live session path never relies on this
-/// (it reads the variant off the header).
+/// are all Intact, which infers Unknown and is not measured
+/// (its label-less tiles then import at x1 unmeasured; the
+/// folder-ingest seam only — the live session path never
+/// relies on this, it reads the variant off the header).
 pub fn relic_variant_from_reads(results: &[CellResult]) -> RelicScreenVariant {
     if results.iter().any(|r| {
         r.held
@@ -2950,47 +3064,161 @@ pub fn relic_variant_from_reads(results: &[CellResult]) -> RelicScreenVariant {
     }
 }
 
-/// One frame's refinement-rule outcome (pass 43).
-#[derive(Debug, Clone, Default)]
-pub struct RelicRefineOutcome {
-    /// Names of the held tiles the rule excluded, in cell order.
-    pub excluded: Vec<String>,
-}
-
-/// Apply the refinement-variant import rule to one relic
-/// frame's validated results: on a refinement frame, every
-/// held tile without a parsed count label is excluded
-/// (`held = false`, `refine_excluded = true`); labelled
-/// tiles and all other variants are untouched. Like the
-/// owned-gate it only ever REMOVES holds, and it runs after
-/// it, so a tile the gate already refused is not recounted.
-pub fn relic_refinement_rule(
+/// Measure one refinement frame's label-less tiles (pass
+/// 45): every held result without a parsed count label gets
+/// its eye-window bright mass recorded in
+/// `refine_eye_mass`. Nothing is held or refused here — the
+/// disposition is a session-level decision
+/// ([`RefinementEvidence`]) because the statistic is only
+/// valid per settled appearance and the rule takes the
+/// maximum over a stack's appearances. Labelled tiles are
+/// not measured (a label is positive owned evidence), unheld
+/// results are not measured (they never reach stock), and
+/// non-refinement variants are untouched. Runs after the
+/// owned-gate, so a tile the gate already refused is not
+/// measured either.
+///
+/// One veto: a tile whose count region carries label-scale
+/// bright mass ([`count_region_bright_mass`] >=
+/// [`LABEL_PRESENT_MASS_MIN`]) is physically labelled even
+/// though the parser read no count — the corpus's Lith M4
+/// x15, whose label sits at the count region's edge and
+/// parses in neither of its appearances. Its strokes fall
+/// inside the eye window (52 bright px) and would convict a
+/// stack Seth owns 15 of. Such a tile is not measured: it is
+/// owned by the three-state model (a glyph IS present in
+/// its corner), and it imports at the vote-resolved count
+/// like any tile the disposition has no evidence against.
+pub fn relic_refinement_measure(
+    cells: &[Option<GrayImage>],
     layout: &Layout,
     results: &mut [CellResult],
     variant: RelicScreenVariant,
-) -> RelicRefineOutcome {
-    let mut outcome = RelicRefineOutcome::default();
+) {
     if layout.key != "relic" {
-        return outcome;
+        return;
     }
     let variant = match variant {
         RelicScreenVariant::Unknown => relic_variant_from_reads(results),
         v => v,
     };
     if variant != RelicScreenVariant::Refinement {
-        return outcome;
+        return;
     }
-    for result in results.iter_mut() {
+    for (i, result) in results.iter_mut().enumerate() {
         if !result.held || result.count.is_some() {
-            continue; // not held anyway, or a label proves ownership
+            continue;
         }
-        result.held = false;
-        result.refine_excluded = true;
-        if let Some(name) = &result.matched {
-            outcome.excluded.push(name.clone());
+        let Some(cell) = cells.get(i).and_then(|c| c.as_ref()) else {
+            continue;
+        };
+        if count_region_bright_mass(cell, layout) >= LABEL_PRESENT_MASS_MIN {
+            continue; // physically labelled: owned, never the eye
+        }
+        result.refine_eye_mass = Some(eye_window_bright_mass(cell));
+    }
+}
+
+/// Session-level evidence for the refinement three-state
+/// disposition (pass 45, addendum #110): per relic stack,
+/// whether any settled appearance carried a parsed count
+/// label, and the maximum eye-window bright mass over its
+/// label-less appearances. The disposition itself:
+///
+/// - labelled on any appearance -> owned, at the labelled
+///   count (the count votes decide which);
+/// - never labelled, max bright mass >=
+///   [`EYE_BRIGHT_MASS_MIN`] -> unowned: the eye glyph was
+///   seen; the stack is excluded from stock;
+/// - never labelled, no eye seen -> owned x1.
+///
+/// Aggregation is by maximum, not per-frame vote: a single
+/// settled sighting of the glyph is deterministic evidence,
+/// while a single smeared transient (bright mass 16 on an
+/// unowned tile in the corpus) must not outvote it — the
+/// maximum is the aggregation that respects both facts.
+#[derive(Debug, Clone, Default)]
+pub struct RefinementEvidence {
+    labelled: HashSet<(String, RefinementTier)>,
+    eye_max: HashMap<(String, RefinementTier), u32>,
+}
+
+impl RefinementEvidence {
+    /// Fold one frame's validated results into the evidence.
+    /// Only held reads of known relic names count; unheld
+    /// reads and non-relic names carry no disposition
+    /// evidence.
+    pub fn observe(&mut self, results: &[CellResult], relic_names: &HashSet<String>) {
+        for r in results {
+            if !r.held {
+                continue;
+            }
+            let Some(name) = &r.matched else { continue };
+            if !relic_names.contains(name) {
+                continue;
+            }
+            let key = (name.clone(), r.tier);
+            if r.count.is_some() {
+                self.labelled.insert(key.clone());
+            }
+            if let Some(mass) = r.refine_eye_mass {
+                let e = self.eye_max.entry(key).or_insert(0);
+                *e = (*e).max(mass);
+            }
         }
     }
-    outcome
+
+    /// The session maximum eye-window bright mass recorded
+    /// for one stack, when any label-less appearance was
+    /// measured (diagnostics and tests).
+    pub fn eye_max(&self, name: &str, tier: RefinementTier) -> Option<u32> {
+        self.eye_max.get(&(name.to_owned(), tier)).copied()
+    }
+
+    /// Is this stack unowned under the disposition: never
+    /// labelled, and the eye glyph seen on at least one
+    /// settled appearance.
+    pub fn is_unowned(&self, name: &str, tier: RefinementTier) -> bool {
+        let key = (name.to_owned(), tier);
+        !self.labelled.contains(&key)
+            && self
+                .eye_max
+                .get(&key)
+                .map(|&m| m >= EYE_BRIGHT_MASS_MIN)
+                .unwrap_or(false)
+    }
+
+    /// Every stack the disposition excludes, sorted by name
+    /// then tier — the finalize line's record of what a
+    /// refinement sync refused to import as unowned.
+    pub fn excluded_stacks(&self) -> Vec<(String, RefinementTier)> {
+        let mut out: Vec<(String, RefinementTier)> = self
+            .eye_max
+            .keys()
+            .filter(|k| self.is_unowned(&k.0, k.1))
+            .cloned()
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Drop every excluded stack from a stock built by
+    /// union (the folder-ingest path, whose stock is a
+    /// `from_results` union rather than session votes).
+    pub fn apply_to(&self, stock: &mut StockState) {
+        for (name, tier) in self.excluded_stacks() {
+            let became_empty = match stock.relics.get_mut(&name) {
+                Some(stacks) => {
+                    stacks.tiers.remove(&tier);
+                    stacks.tiers.is_empty()
+                }
+                None => false,
+            };
+            if became_empty {
+                stock.relics.remove(&name);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3898,16 +4126,28 @@ pub fn ingest_folder(
         // page's own split.
         if layout.key == "relic" {
             relic_owned_gate(&cells, layout, &mut page_results, None);
-            // Pass 43: the refinement rule applies here too. No
-            // header exists on this path, so the variant is
-            // inferred from the page's reads (a refinement
-            // second line proves it) — see
-            // relic_variant_from_reads for the failure mode.
-            relic_refinement_rule(layout, &mut page_results, RelicScreenVariant::Unknown);
+            // Pass 45: the refinement measure applies here too,
+            // and the folder as a whole is the session the
+            // disposition aggregates over. No header exists on
+            // this path, so the variant is inferred from the
+            // page's reads (a refinement second line proves it)
+            // — see relic_variant_from_reads for the failure
+            // mode.
+            relic_refinement_measure(
+                &cells,
+                layout,
+                &mut page_results,
+                RelicScreenVariant::Unknown,
+            );
         }
         results.extend(page_results);
     }
-    let stock = StockState::from_results(&results, relic_names, arcane_names);
+    let mut stock = StockState::from_results(&results, relic_names, arcane_names);
+    if layout.key == "relic" {
+        let mut evidence = RefinementEvidence::default();
+        evidence.observe(&results, relic_names);
+        evidence.apply_to(&mut stock);
+    }
     Ok((stock, results))
 }
 
@@ -4599,7 +4839,7 @@ mod tests {
             tier: RefinementTier::Intact,
             rank: None,
             gate_excluded: false,
-            refine_excluded: false,
+            refine_eye_mass: None,
         }
     }
 
@@ -4727,70 +4967,242 @@ mod tests {
         assert!(results.iter().all(|r| r.held));
     }
 
+    /// A bare relic cell at the canonical capture size: dark,
+    /// eye window empty (pass 45 measure tests).
+    fn bare_cell() -> GrayImage {
+        GrayImage::blank(168, 174, 6)
+    }
+
+    /// A relic cell carrying the eye glyph at its native
+    /// placement (research bbox: x 23-41, y 22-33 cell-relative,
+    /// flat peak 154): a thin outline plus pupil, ~65 bright
+    /// px — the real glyph's mass, which is also what keeps
+    /// it under the label-presence floor in the count region.
+    fn eyed_cell() -> GrayImage {
+        let mut cell = GrayImage::blank(168, 174, 6);
+        for x in 23..41 {
+            cell.set(x, 22, 154);
+            cell.set(x, 33, 154);
+        }
+        for y in 22..34 {
+            cell.set(23, y, 154);
+            cell.set(40, y, 154);
+        }
+        for y in 26..29 {
+            for x in 30..33 {
+                cell.set(x, y, 154);
+            }
+        }
+        cell
+    }
+
     #[test]
-    fn refinement_rule_excludes_labelless_and_keeps_labelled() {
-        // A refinement frame: two labelled stacks (positive
-        // owned evidence) and two label-less tiles — an owned
-        // x1 and an unowned catalogue entry, indistinguishable
-        // on this variant. Both label-less tiles are refused.
+    fn eye_window_bright_mass_counts_bright_pixels_only() {
+        assert_eq!(eye_window_bright_mass(&bare_cell()), 0, "bare corner is empty");
+        let mass = eye_window_bright_mass(&eyed_cell());
+        assert!(mass >= EYE_BRIGHT_MASS_MIN, "eyed cell mass {mass}");
+        // A sub-floor smudge (5x5 = 25 bright px) stays under
+        // the floor — the transient-smear regime.
+        let mut smudge = GrayImage::blank(168, 174, 6);
+        for y in 22..27 {
+            for x in 23..28 {
+                smudge.set(x, y, 154);
+            }
+        }
+        assert!(
+            eye_window_bright_mass(&smudge) < EYE_BRIGHT_MASS_MIN,
+            "smudge mass {}",
+            eye_window_bright_mass(&smudge)
+        );
+        // Pixels AT the threshold grey do not count (the rule
+        // is strictly above EYE_BRIGHT_PX).
+        let mut at = GrayImage::blank(168, 174, EYE_BRIGHT_PX);
+        for y in 22..34 {
+            for x in 23..41 {
+                at.set(x, y, EYE_BRIGHT_PX);
+            }
+        }
+        assert_eq!(eye_window_bright_mass(&at), 0);
+    }
+
+    #[test]
+    fn refinement_measure_skips_physically_labelled_tiles() {
+        // The Lith M4 shape (corpus, frames 0/1): a solid
+        // bright count label in the count region that the
+        // parser did not read. Its strokes fill the eye
+        // window too, but the tile is owned — a glyph IS
+        // present in its corner — and must not be measured.
         let layout = relic_layout();
-        let mut results = vec![
-            held_cell_result(0, "Meso S7", Some(14)),
-            held_cell_result(1, "Neo N1", Some(8)),
-            held_cell_result(2, "Meso V15", None),
-            held_cell_result(3, "Meso L1", None),
-        ];
-        results[3].tier = RefinementTier::Radiant;
-        let out = relic_refinement_rule(
+        let mut labelled = GrayImage::blank(168, 174, 6);
+        for y in 12..42 {
+            for x in 20..70 {
+                labelled.set(x, y, 200);
+            }
+        }
+        assert!(
+            count_region_bright_mass(&labelled, &layout) >= LABEL_PRESENT_MASS_MIN,
+            "label-scale region mass"
+        );
+        assert!(
+            count_region_bright_mass(&eyed_cell(), &layout) < LABEL_PRESENT_MASS_MIN,
+            "the eye glyph stays under the label floor"
+        );
+        assert_eq!(count_region_bright_mass(&bare_cell(), &layout), 0);
+        let cells: Vec<Option<GrayImage>> = vec![Some(labelled)];
+        let mut results = vec![held_cell_result(0, "Lith M4", None)];
+        relic_refinement_measure(
+            &cells,
             &layout,
             &mut results,
             RelicScreenVariant::Refinement,
         );
-        assert_eq!(out.excluded, vec!["Meso V15", "Meso L1"]);
-        assert!(results[0].held && results[1].held, "labels prove ownership");
-        assert!(!results[2].held && results[2].refine_excluded);
-        assert!(!results[3].held && results[3].refine_excluded);
+        assert_eq!(results[0].refine_eye_mass, None, "physically labelled: not measured");
+        assert!(results[0].held);
     }
 
     #[test]
-    fn refinement_rule_inert_off_the_refinement_variant() {
-        // Selection frames (pass 38's gate owns them) and
-        // undetermined frames with no second line anywhere
-        // keep the old behaviour bit-identically.
+    fn refinement_measure_annotates_labelless_and_refuses_nothing() {
+        // A refinement frame: two labelled stacks (not
+        // measured — a label is owned evidence on its own) and
+        // two label-less tiles, one bare (owned x1) and one
+        // eyed (unowned). The measure only RECORDS the
+        // statistic; disposition is the session's job.
+        let layout = relic_layout();
+        let cells: Vec<Option<GrayImage>> = vec![
+            Some(bare_cell()),
+            Some(bare_cell()),
+            Some(bare_cell()),
+            Some(eyed_cell()),
+        ];
+        let mut results = vec![
+            held_cell_result(0, "Meso S7", Some(14)),
+            held_cell_result(1, "Neo N1", Some(8)),
+            held_cell_result(2, "Meso V15", None),
+            held_cell_result(3, "Axi A2", None),
+        ];
+        relic_refinement_measure(
+            &cells,
+            &layout,
+            &mut results,
+            RelicScreenVariant::Refinement,
+        );
+        assert!(results.iter().all(|r| r.held), "the measure refuses nothing");
+        assert_eq!(results[0].refine_eye_mass, None, "labelled: not measured");
+        assert_eq!(results[1].refine_eye_mass, None, "labelled: not measured");
+        assert_eq!(results[2].refine_eye_mass, Some(0), "bare corner measures empty");
+        let eyed = results[3].refine_eye_mass.expect("eyed tile measured");
+        assert!(eyed >= EYE_BRIGHT_MASS_MIN, "eyed tile mass {eyed}");
+    }
+
+    #[test]
+    fn refinement_measure_inert_off_the_refinement_variant() {
+        // Selection frames and undetermined frames with no
+        // second line anywhere are not measured at all.
         let layout = relic_layout();
         for variant in [RelicScreenVariant::Selection, RelicScreenVariant::Unknown] {
+            let cells: Vec<Option<GrayImage>> =
+                vec![Some(eyed_cell()), Some(bare_cell())];
             let mut results = vec![
                 held_cell_result(0, "Lith A1", None),
                 held_cell_result(1, "Meso B2", Some(3)),
             ];
-            let out = relic_refinement_rule(&layout, &mut results, variant);
-            assert!(out.excluded.is_empty(), "variant {variant:?} must be inert");
-            assert!(results.iter().all(|r| r.held && !r.refine_excluded));
+            relic_refinement_measure(&cells, &layout, &mut results, variant);
+            assert!(
+                results.iter().all(|r| r.refine_eye_mass.is_none()),
+                "variant {variant:?} must be inert"
+            );
         }
     }
 
     #[test]
-    fn refinement_rule_infers_the_variant_from_a_second_line() {
+    fn refinement_measure_infers_the_variant_from_a_second_line() {
         // Unknown variant (the ingest seam): one held read
         // carrying a refinement tier proves the frame is a
-        // refinement frame, and the label-only rule then
-        // applies to the whole frame — the Intact label-less
-        // tile beside it is refused too.
+        // refinement frame, and the whole frame is measured —
+        // the Intact label-less tile beside it included.
         let layout = relic_layout();
+        let cells: Vec<Option<GrayImage>> =
+            vec![Some(eyed_cell()), Some(bare_cell()), Some(bare_cell())];
         let mut results = vec![
             held_cell_result(0, "Lith G6", None),
-            held_cell_result(1, "Meso L1", None),
+            held_cell_result(1, "Meso C11", None),
             held_cell_result(2, "Axi A1", Some(8)),
         ];
         results[0].tier = RefinementTier::Radiant;
         results[1].tier = RefinementTier::Radiant;
-        let out = relic_refinement_rule(
+        relic_refinement_measure(
+            &cells,
             &layout,
             &mut results,
             RelicScreenVariant::Unknown,
         );
-        assert_eq!(out.excluded, vec!["Lith G6", "Meso L1"]);
-        assert!(results[2].held, "the labelled stack still imports");
+        assert!(results[0].refine_eye_mass.is_some(), "frame proven refinement: measured");
+        assert!(results[1].refine_eye_mass.is_some(), "same frame: measured");
+        assert_eq!(results[2].refine_eye_mass, None, "labelled: not measured");
+    }
+
+    #[test]
+    fn refinement_evidence_dispositions_the_three_states() {
+        let names: HashSet<String> = ["Axi A2", "Axi A9", "Lith G6", "Meso S7", "Meso V15"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let mut ev = RefinementEvidence::default();
+        let mut frame = vec![
+            held_cell_result(0, "Meso S7", Some(14)),
+            held_cell_result(1, "Axi A2", None),
+            held_cell_result(2, "Meso V15", None),
+            held_cell_result(3, "Axi A9", None),
+            held_cell_result(4, "Lith G6", None),
+        ];
+        frame[1].refine_eye_mass = Some(70); // settled eye
+        frame[2].refine_eye_mass = Some(0); // bare: owned x1
+        frame[3].refine_eye_mass = Some(16); // smeared transient only, so far
+        frame[4].tier = RefinementTier::Radiant;
+        frame[4].refine_eye_mass = Some(71);
+        ev.observe(&frame, &names);
+        assert!(ev.is_unowned("Axi A2", RefinementTier::Intact));
+        assert!(ev.is_unowned("Lith G6", RefinementTier::Radiant));
+        assert!(!ev.is_unowned("Lith G6", RefinementTier::Intact), "tiers are distinct stacks");
+        assert!(!ev.is_unowned("Meso V15", RefinementTier::Intact), "bare window: owned x1");
+        assert!(!ev.is_unowned("Axi A9", RefinementTier::Intact), "a smear alone does not convict");
+        // A later settled appearance shows A9's eye clearly:
+        // the session maximum, not any single frame, decides.
+        let mut frame2 = vec![held_cell_result(0, "Axi A9", None)];
+        frame2[0].refine_eye_mass = Some(69);
+        ev.observe(&frame2, &names);
+        assert!(ev.is_unowned("Axi A9", RefinementTier::Intact), "max over appearances");
+        assert_eq!(ev.excluded_stacks().len(), 3);
+        // A count label on any appearance is positive owned
+        // evidence and outranks the eye record entirely.
+        let frame3 = vec![held_cell_result(0, "Axi A2", Some(3))];
+        ev.observe(&frame3, &names);
+        assert!(!ev.is_unowned("Axi A2", RefinementTier::Intact), "label wins");
+        assert_eq!(ev.excluded_stacks().len(), 2);
+        // apply_to drops exactly the excluded stacks from a
+        // union-built stock, and a name left with no tiers
+        // disappears with them.
+        let mut stock = StockState::default();
+        for (name, tier, n) in [
+            ("Axi A2", RefinementTier::Intact, 3),
+            ("Axi A9", RefinementTier::Intact, 1),
+            ("Lith G6", RefinementTier::Radiant, 1),
+            ("Lith G6", RefinementTier::Intact, 36),
+            ("Meso V15", RefinementTier::Intact, 1),
+            ("Meso S7", RefinementTier::Intact, 14),
+        ] {
+            stock
+                .relics
+                .entry(name.to_owned())
+                .or_default()
+                .merge(tier, n);
+        }
+        ev.apply_to(&mut stock);
+        assert!(!stock.relics.contains_key("Axi A9"), "unowned name dropped");
+        assert_eq!(stock.relics["Axi A2"].get(RefinementTier::Intact), 3, "label win kept");
+        assert_eq!(stock.relics["Lith G6"].get(RefinementTier::Radiant), 0, "tier dropped");
+        assert_eq!(stock.relics["Lith G6"].get(RefinementTier::Intact), 36, "other tier kept");
+        assert_eq!(stock.relics["Meso V15"].get(RefinementTier::Intact), 1, "x1 kept");
     }
 
     #[test]

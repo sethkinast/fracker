@@ -911,7 +911,7 @@ impl LineOutcome {
                 tier: ocr::RefinementTier::Unknown,
                 rank: None,
                 gate_excluded: false,
-                refine_excluded: false,
+                refine_eye_mass: None,
             },
             lines: Vec::new(),
             assembled: String::new(),
