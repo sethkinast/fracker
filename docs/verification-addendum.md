@@ -2466,3 +2466,64 @@ it refines the brief where they disagree. For the next worker pass.
     Details: docs/forty-seventh-pass.md. Live
     verification owed: Seth's first searches
     on the resident page.
+
+113. **Item search overlay (pass 47, shipped as
+    v0.5.42; supersedes the draft design shipped
+    as v0.5.41, entry #112).** Seth's spec, set by him directly
+    after he halted a draft whose acceptance
+    criteria he had not written: an Alfred-style
+    overlay for checking crack status during the
+    15-second reward window. Triggers: a header
+    icon, and any printable keypress anywhere on
+    the page (modifier combos ignored) seeding
+    the query with that character; Esc and blur
+    are the only exits. ~90% dark, big type, no
+    submit/selection/navigation; exactly ONE
+    result, fully expanded. Index: relics and
+    prime items only — parts never standalone.
+    Matching (search::best_match, mirrored by the
+    client script): prefix on word token, never
+    substring; "Prime" excluded from the token
+    set; the query compared WHOLE, never
+    tokenised ("Silva Aegis" does not match
+    "Silva & Aegis"; "Silva" and "Aegis" do);
+    minimum 2 characters; ranking by closest
+    token fit (a token equal to the query beats
+    the longer token it prefixes — "Bo" before
+    "Boar", pinned), then shorter name, then
+    alphabetical. Relic result: vault status,
+    his stock as the TOTAL count only (no tier
+    breakdown), rewards common-first in the
+    app's rarity colours, each marked Need vs
+    Have from the plan's own part rows, falling
+    back to the raw stock shapes; untracked
+    rewards (Forma, owned gear's parts) carry no
+    mark. Item result: parts with state incl.
+    held/required, vaulted status, and the Hunt
+    rows' exact toggle contract (data-uv, same
+    titles) through POST /unverified — and NO
+    crack line (Seth, explicitly). Delivery: the
+    server renders every block once per
+    generation into a sidecar (plan-search.html,
+    published before the page so a new
+    generation always finds its index) served
+    at GET /search-index; the client PREFETCHES
+    it at page load (the first open, mid reward
+    window, must never wait on the network) and
+    refetches on generation change via the
+    __frackerResync chain, filtering locally
+    over data-name/data-tokens. Relic icon: the
+    app's icon data is gear-only and the relic
+    tables carry no image field, so the header
+    takes the unresolved-icon monogram chip
+    rather than an invented URL (recorded in
+    the pass doc). Gates: suite 396 passed / 0
+    failed (lib 368; golden 15; packaging 7;
+    resident 5; tray_quit 1); census gates
+    untouched; offline-demo smoke wrote 861
+    blocks (800 relics + 61 items).
+    Details: docs/forty-seventh-pass.md. Live
+    verification owed: Seth opens the overlay
+    during a real reward window (trigger feel,
+    one-glance legibility, a ⍻ toggle from the
+    overlay landing in the plan).

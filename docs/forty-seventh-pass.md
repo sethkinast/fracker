@@ -1,127 +1,171 @@
-# Forty-seventh pass — item search: one box, the plan's own status
+# Forty-seventh pass — item search overlay (Seth's spec)
 
 Verification addendum: #112.
 
 ## The ask
 
-Seth's "next feature" sketch in QUEUE_REVIEW.md (2026-10-26):
-"a little search bar where I can quickly search for an item to
-see its status" — one search box, results drawn from the app's
-existing plan knowledge. Fixed at brief time: the box lives in
-the page header (reachable from all four tabs), answers come
-from the already-computed plan (never a second computation),
-matching is plain case-insensitive substring (no fuzzy — this
-app refuses to paper over garbles), and the surface is
-read-only: no ticks, no ⍻ toggles, no tab changes ride along.
+Seth's spec, set by him directly (2026-10-27) after he halted a
+first draft whose acceptance criteria he had not written: an
+Alfred / cmd+space-style overlay for checking an item's crack
+status DURING the 15-second reward window — speed and glance
+legibility are the design drivers. Not a page search box.
 
-## The shape
+- Trigger: an icon in the header, AND a global key listener —
+  the page has no text inputs, so any printable keypress
+  (Ctrl/Cmd/Alt combos ignored) opens the overlay seeded with
+  that character. Esc closes; window/tab blur closes. Those
+  are the only exits.
+- Look: ~90% dark opaque, much bigger type than the page.
+- Interaction: no submit, no selection, no jumping or
+  navigation. Typing filters; exactly ONE result shows, fully
+  expanded.
+- Index: relics and prime items (gear) only. Parts are not
+  indexed standalone.
+- Matching: prefix match by word token, never substring. A
+  name tokenises into words; the token "Prime" is excluded
+  (it discriminates nothing). The ENTIRE query is compared as
+  one string — never tokenised — and a name matches iff the
+  query is a prefix of one single token. Minimum query length
+  2. Ranking: closest token fit first (a token EQUAL to the
+  query beats a longer token it prefixes), then shorter name,
+  then alphabetical.
+- Relic result: vault status; his stock count, TOTAL only
+  (no refinement-tier breakdown); its rewards common-first in
+  the app's rarity colouring, each marked by his state (Need
+  vs Have).
+- Prime item result: its parts with acquisition status
+  (incl. held/required), its vaulted status, and ⍻
+  (unconfirmed) toggling via the existing POST /unverified
+  path — the one permitted mutation. NO crack line (Seth,
+  explicitly excluded).
+- All status derives from the already-computed plan and
+  stock; the overlay is a view over existing truth, never a
+  second computation of it.
 
-Pass 41's architecture is not re-opened: the server stays the
-only renderer.
+## What shipped
 
-- **Snapshot, not request-time rendering.** `GET /search` is
-  answered from a `SearchSnapshot` — the generation's `Plan`
-  plus the relic tables plus a per-tier distillation of the
-  parsed stock file — published by the report pipeline at the
-  page's own publication point (next to the generation-hub
-  publish, after the report file is renamed into place). A
-  search answer is therefore always the generation the page
-  on screen shows. The snapshot distils at publish time
-  because `RelicStock` carries only totals + a radiant split;
-  the per-tier stock a relic result shows lives in the parsed
-  `StockState`, which only the pipeline holds. `report.rs`
-  keeps the parsed state whole and derives the planner's
-  shapes from it exactly as before.
-- **Endpoint.** `GET /search?q=<name>` returns a
-  server-rendered HTML fragment (`src/search.rs` renders every
-  result block). Unwired (no store — `--demo`, tests), the
-  route answers 404, mirroring the unverified toggle; wired
-  but pre-first-generation, the fragment says "No plan
-  generated yet."
-- **Box.** One text input in the header fragment (so every tab
-  reaches it and fragment swaps carry it), with its results
-  container under it. The page script fetches
-  `/search?q=…` debounced at 150 ms; answers land as the
-  container's innerHTML. Two disciplines from pass 41 are
-  kept: bindings are once-per-element (a header swap re-binds
-  the fresh nodes), and box state (query, results, focus)
-  lives in script closures that `__frackerResync` restores
-  onto swapped-in DOM, so a pushed generation never eats a
-  query mid-typing. **Staleness: monotonically increasing
-  sequence numbers** — a response renders only when its
-  sequence is still the newest; an empty query clears the
-  results and invalidates in-flight answers; Escape clears.
-  The box is hidden on non-http pages (file exports), whose
-  loopback endpoints do not exist.
+**Matching core** (`src/search.rs`). `name_tokens` (split on
+non-alphanumerics, lowercase, drop "prime"), `token_fit`
+(smallest token-minus-query length over prefixed tokens),
+`best_match` (min by fit, name length, name). The pinned cases
+are unit tests: "Bo" beats "Boar"; "Silva Aegis" matches
+nothing while "Silva" and "Aegis" each match "Silva & Aegis
+Prime"; "prime" matches nothing; a 1-character query engages
+nothing; case-insensitive; relic code tokens match ("C11"
+finds Meso C11); substrings never match.
 
-## What a result shows
+**Index fragment** (`render::search_index_html`). Every prime
+item (the plan's goal cards) and every relic (the full
+800-name table) as a fully rendered result block, items then
+relics, each alphabetical. A block carries its matching
+metadata in data attributes (`data-kind`, `data-name`,
+`data-tokens`); the client filters over those and clones the
+single winning block into the overlay — it never templates
+plan data. The render context gained a `SearchData` borrow
+(the report pipeline's own locals: relic tables, relic stock,
+canonical part stock, ⍻ map — the same values PlanInput
+took), so the overlay cannot drift from the planner's truth.
 
-Matching is case-insensitive substring over gear, part, and
-relic names; hits rank exact > prefix > substring, gear before
-parts before relics within a rank, then by name; at most 8
-render, with a "+N more — keep typing" line beyond that.
-Ambiguity is shown, never silently resolved. No match is a
-plain line: `No match for "<query>" in the current plan.`
+- Item block: icon, name, the Hunt card's vault badges
+  (VAULTED / VARZIA / UNVAULTED, same rule), the card's
+  segmented progress, and one row per part reusing the Hunt
+  row's exact toggle contract (classes, `data-uv`, titles) —
+  verified-Have rows never toggle; every other row does. The
+  `.gf` crack footer is absent by construction (pinned by
+  test against a card whose action text is a crack line).
+- Relic block: name, vault badge, stock as
+  `RelicStock::count` — the per-relic TOTAL across tiers;
+  "stock unknown" when holdings are Unknown. Rewards sorted
+  common → uncommon → rare (rarity banded off the Intact
+  chance by the planner's tuning, stable within a band) in
+  the app's rarity colours. Each reward's state mark comes
+  from the plan's own part rows when the plan tracks the
+  part; otherwise from the raw stock shapes (verified count,
+  then ⍻ assertion); a reward the plan does not track at all
+  (Forma, a part of gear he already owns) carries NO mark —
+  it is not a Need, and the overlay never invents a Have.
+- Relic icon: the brief asks for the relic's icon in the
+  result header. The app's icon dataset (data/icons.json) is
+  gear-only (67 entries) and the relic tables carry no image
+  field — no relic image source exists in the app's data.
+  The header therefore takes the same letter-monogram chip
+  an unresolved gear icon gets, rather than an invented URL.
+  Recorded here as a data-forced substitution; if a relic
+  image source is adopted later, the chip is the one-line
+  swap point (`search_relic_html`).
 
-- **Gear** — the card's state: vaulted / resurgence / READY
-  badges, "have / total parts", every part row with its state
-  (✓ held / ⍻ unverified / needed / unknown), held/required
-  units on multi-unit parts (the pass-42 model), the part's
-  relic source, and the card's crack line — rendered by the
-  Hunt card footer itself, extracted verbatim into
-  `card_footer_html` so the search hit and the Hunt card can
-  never drift apart.
-- **Part** — its state, held/required, which goal gear(s) it
-  belongs to (every card that lists it), its best crack where
-  the planner computed one (relic, tier, chance, expected
-  cracks, owned/radiant counts), and the relics that drop it
-  (chance at Intact, vaulted tagged). The ⍻ state renders as
-  a **badge only** — deliberately not `data-uv`, so a result
-  row can never be mistaken for the Backlog's toggle surface.
-- **Relic** — held count, the per-tier breakdown (Intact ·
-  Exceptional · Flawless · Radiant), and which of its rewards
-  are in genuine Need state (the pass-44 universe). Unknown
-  stock says "stock unknown", never a guessed zero.
+**Delivery** (pass-41 discipline, latency-adapted). The index
+is a per-generation SIDECAR: `generate()` renders it from the
+same plan + context and publishes it (tmp+rename) beside the
+report as `plan-search.html` BEFORE the page itself, so a
+client that sees the new generation always finds the
+matching index. A sidecar write failure degrades the overlay
+only and is swallowed — never the report. The loopback
+server serves it at `GET /search-index` (a missing sidecar is
+an empty 200). A sidecar rather than a sixth page fragment:
+the ~800 relic blocks (~690 KB against real data) stay out of
+the plan page's payload and out of the fragment-diff path.
 
-## Scope decisions (defaults taken at brief time, confirmed in build)
+**Client** (`search::client_script`, page script tail). The
+overlay shell (query line, result mount, hint) ships in the
+page OUTSIDE every fragment, so fragment swaps never disturb
+it; the trigger icon rides inside the header fragment (its
+click is document-delegated, surviving header swaps). The
+script PREFETCHES the index at page load and refetches when
+the generation changes (chained onto `__frackerResync`):
+prefetch, not lazy-first-open, because the overlay exists
+for the reward window — the first open must never wait on
+the network, and loopback makes the prefetch free. Keystroke
+handling is local: seed on open, append printable chars,
+Backspace deletes, Esc closes, blur closes; while the
+overlay is closed, modifier combos and non-printables are
+ignored and typing in a form field (none exist today) is
+respected. The shown block's ⍻ rows POST through the same
+`/unverified` path under the same once-per-element guard
+flag the page's binder uses, so the two binders can never
+double-bind a row; the toggle's regen flows back through the
+normal push/poll sync, which invalidates and refetches the
+index, so statuses stay truthful. Opening/closing touches no
+tab, no tick, no page state.
 
-- **Relic results: included.** The per-tier distillation was
-  cheap once the pipeline kept the parsed stock state; the
-  brief's conditional ("include only if it falls out cheaply,
-  else defer") resolves to include.
-- **Part universe = the plan cards' parts.** A part appears
-  when a goal card lists it, because `PartState` (and held /
-  required) exists only there. A part on no card has no state
-  to show, and a name-only hit would be a second, weaker kind
-  of result; it does not match. Gear matches are card names;
-  relic matches are the relic tables.
-- **No jump-to-card.** Results are inline status only, per
-  the brief's default; tabs are not switched and nothing is
-  highlighted elsewhere on the page.
+**Look.** Fixed overlay at rgba(4,6,9,.9); query at 38px,
+result title 30px, rows 20px against the page's 14px body —
+one-glance sizing. Styles live only in the renderer's
+extension CSS block; the reference stylesheet is untouched.
 
 ## Tests
 
-Full suite green: 393 passed / 0 failed (lib 365; golden 15;
-packaging 7; resident 5; tray_quit 1), up from 380 at pass 46 —
-thirteen new tests (eleven in `search.rs`, two HTTP tests in
-`server.rs`), plus search-surface assertions folded into two
-existing `render.rs` tests.
+Full suite green: 396 passed / 0 failed (lib 368; golden 15;
+packaging 7; resident 5; tray_quit 1), up from 380 at pass
+46 — sixteen new tests:
 
-- `search.rs` unit tests (11): ranking exact > prefix >
-  substring (case-insensitive), the 8-result cap with the
-  keep-typing line, gear status (progress, per-part states,
-  multi-unit 1/2, the Hunt crack line × batch size), part
-  status (multi-unit partial; ⍻ badge with no `data-uv`;
-  best-crack line; relic sources), relic status (tier
-  breakdown, Need-only rewards, unknown-stock variant),
-  plain no-match, empty query → empty fragment, lookup
-  before first publish.
-- `server.rs` HTTP tests (2): the route serves the rendered
-  fragment for a known item over real HTTP and the no-match
-  fragment for nonsense, with the main page still serving;
-  unwired, the route 404s.
-- `render.rs`: the header fragment carries the box and its
-  container while the five-fragment extraction test still
-  passes unchanged, and the page-script test pins the fetch
-  and the stale-response guard in the served script.
-- Census gates untouched; no plan computation changed.
+- `search`: the pinned matching cases above, the ranking
+  tie-breaks, the tokeniser, the sidecar path, and a mirror
+  test pinning the client script to the matcher's constants
+  and semantics (minimum length substituted from the Rust
+  constant, token-prefix test, routes, Esc/blur, resync
+  chaining).
+- `render`: the relic block (vault status; ×5 total with a
+  3-Radiant split present in the fixture and no tier text;
+  rewards reordered common-first in rarity classes; exactly
+  one Need mark and one Have mark, the untracked Forma
+  unmarked); the item block (progress, ✓/⍻/Need rows,
+  toggle offered on unverified and Need rows, never on
+  verified Have, and no crack line); the page gate (overlay
+  shell ships, script prefetches, five fragments still
+  extract in order, trigger icon inside the header fragment);
+  empty index without search data.
+- `server`: `/search-index` serves the published sidecar and
+  answers an empty 200 before one exists.
+
+Census gates untouched. End-to-end smoke (offline demo
+fixtures): the sidecar lands beside the page with 861 blocks
+(800 relics + 61 goal items); the Meso C11 block shows its
+rewards common-first with the Citrine-family parts marked
+Need and Paris Prime Blueprint correctly unmarked (owned,
+mastered).
+
+Live verification owed: Seth opens the overlay during a real
+reward window — trigger feel, one-glance legibility at his
+resolution, and a ⍻ toggle from the overlay landing in the
+plan.
