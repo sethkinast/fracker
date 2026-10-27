@@ -216,12 +216,6 @@ pub async fn run(
             }),
         ))
     };
-    // Forty-seventh pass: the item-search store. The report
-    // pipeline publishes each generation's plan snapshot into it
-    // (opts.report.search below); the loopback server renders
-    // GET /search answers from it.
-    let search_store = Arc::new(crate::search::SearchStore::new());
-    opts.report.search = Some(search_store.clone());
     let plan_server = match server::serve(
         opts.serve_port,
         opts.report.out.clone(),
@@ -229,7 +223,6 @@ pub async fn run(
         tab_path,
         tick_store.clone(),
         Some(unverified_toggle),
-        Some(search_store),
     ) {
         Ok(s) => {
             println!("resident: serving the plan at {}", s.url());

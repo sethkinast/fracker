@@ -144,7 +144,6 @@ async fn run_demo(args: &Args) -> Result<(), String> {
         offline: args.offline,
         embed_icons: true,
         push: None,
-        search: None,
     };
     let outcome = report::generate(&cfg, &[]).await?;
     println!("demo: {} -> {}", outcome.summary(), outcome.out.display());
@@ -191,7 +190,6 @@ async fn run_resident(args: &Args) -> Result<(), String> {
         offline: args.offline,
         embed_icons: false,
         push: None,
-        search: None,
     };
     let opts = resident::ResidentOptions {
         report: report_cfg,
