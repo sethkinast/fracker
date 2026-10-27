@@ -912,6 +912,7 @@ impl LineOutcome {
                 rank: None,
                 gate_excluded: false,
                 refine_eye_mass: None,
+                name_refused: None,
             },
             lines: Vec::new(),
             assembled: String::new(),

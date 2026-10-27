@@ -305,6 +305,20 @@ fn run_ocr_ingest(args: &Args, dir: &std::path::Path) -> Result<(), String> {
     )?;
     stock.write_to(&args.stock_out)?;
     let held = results.iter().filter(|r| r.held).count();
+    // Pass 46: name-admission refusals are stated, not silent —
+    // the same record the live finalize log carries.
+    let mut refused_seen: Vec<String> = Vec::new();
+    for r in &results {
+        if let Some(nr) = &r.name_refused {
+            let line = nr.describe();
+            if !refused_seen.contains(&line) {
+                refused_seen.push(line);
+            }
+        }
+    }
+    for line in &refused_seen {
+        println!("ocr: refused unproven relic name: {line}");
+    }
     let (relic_copies, part_copies, arcane_copies) = stock.totals();
     println!(
         "ocr: {} cells, {} held ({} relic stacks/{} copies, {} parts, {} arcane stacks/{} copies) -> {}",
