@@ -18,6 +18,11 @@
 //!   tick/day payload exactly as `GET /` carries it, and only the page
 //!   fragments whose rendered HTML changed since <known> (forty-first
 //!   pass) — the page swaps those in place, so updates never navigate;
+//! - `GET /search?q=<name>` returns a server-rendered results fragment
+//!   for the header search box (forty-seventh pass), answered from the
+//!   plan snapshot the report pipeline publishes per generation
+//!   ([`crate::search::SearchStore`]) — a read-only lookup that
+//!   mutates nothing; unwired (no store), the route answers 404;
 //! - `POST /tick` records one checkbox change server-side, keyed by item
 //!   id + in-game day;
 //! - `POST /unverified` toggles one part's unverified (⍻) stock
@@ -256,7 +261,9 @@ fn roster_part_names(roster: &crate::model::Roster) -> std::collections::HashSet
 /// checkbox change is persisted (the store of record); `tabs_path` is
 /// where the active plan tab is persisted (thirteenth pass §2).
 /// `toggle` wires `POST /unverified` (thirtieth pass); `None` leaves
-/// the route answering 404.
+/// the route answering 404. `search` wires `GET /search`
+/// (forty-seventh pass) to the snapshot store the report pipeline
+/// publishes into; `None` leaves that route answering 404.
 pub fn serve(
     preferred_port: u16,
     report_path: PathBuf,
@@ -264,6 +271,7 @@ pub fn serve(
     tabs_path: PathBuf,
     ticks: Arc<Mutex<TickStore>>,
     toggle: Option<Arc<UnverifiedToggle>>,
+    search: Option<Arc<crate::search::SearchStore>>,
 ) -> Result<PlanServer, String> {
     let listener = bind(preferred_port)?;
     let port = listener
@@ -291,6 +299,7 @@ pub fn serve(
             frag_cache,
             stop_thread,
             toggle,
+            search,
         )
     });
     Ok(PlanServer {
@@ -324,6 +333,7 @@ fn accept_loop(
     frag_cache: Arc<Mutex<FragmentCache>>,
     stop: Arc<AtomicBool>,
     toggle: Option<Arc<UnverifiedToggle>>,
+    search: Option<Arc<crate::search::SearchStore>>,
 ) {
     let _ = listener.set_nonblocking(true);
     while !stop.load(Ordering::Relaxed) {
@@ -338,6 +348,7 @@ fn accept_loop(
                 let frags = frag_cache.clone();
                 let stopped = stop.clone();
                 let toggle_thread = toggle.clone();
+                let search_thread = search.clone();
                 std::thread::spawn(move || {
                     let _ = handle(
                         stream,
@@ -350,6 +361,7 @@ fn accept_loop(
                         &frags,
                         &stopped,
                         toggle_thread.as_ref(),
+                        search_thread.as_ref(),
                     );
                 });
             }
@@ -374,6 +386,7 @@ fn handle(
     frag_cache: &Arc<Mutex<FragmentCache>>,
     stop: &Arc<AtomicBool>,
     toggle: Option<&Arc<UnverifiedToggle>>,
+    search: Option<&Arc<crate::search::SearchStore>>,
 ) -> std::io::Result<()> {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
@@ -450,6 +463,30 @@ fn handle(
             let known = query_param(query, "gen").unwrap_or_default();
             let (status, body) = fragments_page(report_path, ticks, frag_cache, &known);
             respond(&mut stream, status, "application/json", body.as_bytes())
+        }
+        ("GET", "/search") => {
+            // Item search (forty-seventh pass): a server-rendered
+            // results fragment out of the current generation's plan
+            // snapshot. Read-only — no ticks, no toggles, no tab
+            // change ride along. Before the first generation
+            // publishes, the fragment says so; unwired, 404.
+            let q = query_param(query, "q").unwrap_or_default();
+            match search {
+                Some(store) => {
+                    let html = store
+                        .lookup(&q)
+                        .unwrap_or_else(|| {
+                            "<div class=\"sr-none\">No plan generated yet.</div>\n".to_owned()
+                        });
+                    respond(
+                        &mut stream,
+                        "200 OK",
+                        "text/html; charset=utf-8",
+                        html.as_bytes(),
+                    )
+                }
+                None => respond(&mut stream, "404 Not Found", "text/plain", b"not found"),
+            }
         }
         ("POST", "/tick") => respond(
             &mut stream,
@@ -1212,6 +1249,7 @@ mod tests {
             TabStore::file(&dir),
             Arc::new(Mutex::new(TickStore::default())),
             Some(toggle),
+            None,
         )
         .expect("server binds");
         let post = |body: &str| -> String {
@@ -1283,6 +1321,7 @@ mod tests {
             TabStore::file(&dir),
             ticks.clone(),
             None,
+            None,
         )
         .expect("server binds");
         let get = |path: &str| -> String {
@@ -1336,6 +1375,7 @@ mod tests {
             TickStore::file(&dir),
             TabStore::file(&dir),
             Arc::new(Mutex::new(TickStore::default())),
+            None,
             None,
         )
         .expect("falls back");
@@ -1406,6 +1446,7 @@ mod tests {
             tabs_path.clone(),
             Arc::new(Mutex::new(TickStore::default())),
             None,
+            None,
         )
         .expect("server binds");
 
@@ -1437,6 +1478,7 @@ mod tests {
             TickStore::file(&dir),
             tabs_path,
             Arc::new(Mutex::new(TickStore::default())),
+            None,
             None,
         )
         .expect("restart binds");
@@ -1474,6 +1516,7 @@ mod tests {
             TickStore::file(&dir),
             tabs_path.clone(),
             Arc::new(Mutex::new(TickStore::default())),
+            None,
             None,
         )
         .expect("server binds");
@@ -1632,6 +1675,7 @@ mod tests {
             TabStore::file(&dir),
             Arc::new(Mutex::new(TickStore::default())),
             None,
+            None,
         )
         .expect("server binds");
         let current = http_get(server.port(), "/fragments?gen=gen-1");
@@ -1754,6 +1798,7 @@ mod tests {
             TabStore::file(&dir),
             Arc::new(Mutex::new(TickStore::default())),
             None,
+            None,
         )
         .expect("server binds");
 
@@ -1832,6 +1877,7 @@ mod tests {
             TabStore::file(&dir),
             Arc::new(Mutex::new(TickStore::default())),
             None,
+            None,
         )
         .expect("server binds");
 
@@ -1860,6 +1906,105 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // ---- §47 search (forty-seventh pass) ----
+
+    /// A search store holding one published snapshot: a single
+    /// Citrine Prime card with one Need part, over empty tables
+    /// and unknown stock.
+    fn search_store() -> Arc<crate::search::SearchStore> {
+        use crate::plan::{ActionKind, GoalAction, GoalCard, PartRow, PartState};
+        use crate::tuning::Rarity;
+        let card = GoalCard {
+            gear: "Citrine Prime".to_owned(),
+            is_warframe: true,
+            vaulted: false,
+            resurgence_live: false,
+            wants: vec!["Citrine Prime Blueprint".to_owned()],
+            parts_have: 0,
+            parts_total: 1,
+            parts: vec![PartRow {
+                name: "Citrine Prime Blueprint".to_owned(),
+                state: PartState::Need,
+                held: 0,
+                required: 1,
+                relics: vec![],
+                best_odds: String::new(),
+                rarity: Rarity::Rare,
+                deal: None,
+            }],
+            ready: false,
+            partially_unobtainable: false,
+            action: GoalAction {
+                text: String::new(),
+                kind: ActionKind::Crack,
+                relic: None,
+                score: 0.0,
+            },
+        };
+        let store = Arc::new(crate::search::SearchStore::new());
+        store.publish(crate::search::SearchSnapshot::new(
+            crate::plan::Plan {
+                goals: vec![card],
+                ..Default::default()
+            },
+            crate::model::RelicTables::default(),
+            None,
+        ));
+        store
+    }
+
+    /// The route over real HTTP: the rendered fragment for a known
+    /// item, the plain no-match fragment for a nonsense query, and
+    /// the main page still serving alongside.
+    #[test]
+    fn search_endpoint_serves_the_rendered_fragment() {
+        let dir = frag_dir("search");
+        let report = dir.join("plan.html");
+        std::fs::write(&report, frag_report("gen-1", "a")).unwrap();
+        let server = serve(
+            0,
+            report,
+            TickStore::file(&dir),
+            TabStore::file(&dir),
+            Arc::new(Mutex::new(TickStore::default())),
+            None,
+            Some(search_store()),
+        )
+        .expect("server binds");
+        let hit = http_get(server.port(), "/search?q=citrine");
+        assert!(hit.contains("200"), "{hit}");
+        assert!(hit.contains("sr-item"), "{hit}");
+        assert!(hit.contains("Citrine Prime"), "{hit}");
+        let miss = http_get(server.port(), "/search?q=zzzqqq");
+        assert!(miss.contains("200"), "{miss}");
+        assert!(miss.contains("No match for"), "{miss}");
+        let page = http_get(server.port(), "/");
+        assert!(page.contains("200"), "{page}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Unwired (no store), the route 404s like the unverified
+    /// toggle does.
+    #[test]
+    fn search_endpoint_404s_when_unwired() {
+        let dir = frag_dir("search-off");
+        let report = dir.join("plan.html");
+        std::fs::write(&report, frag_report("gen-1", "a")).unwrap();
+        let server = serve(
+            0,
+            report,
+            TickStore::file(&dir),
+            TabStore::file(&dir),
+            Arc::new(Mutex::new(TickStore::default())),
+            None,
+            None,
+        )
+        .expect("server binds");
+        let resp = http_get(server.port(), "/search?q=citrine");
+        assert!(resp.contains("404"), "{resp}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn websocket_upgrade_without_a_key_is_refused() {
         let dir = std::env::temp_dir().join(format!("fracker-ws-nokey-{}", std::process::id()));
@@ -1870,6 +2015,7 @@ mod tests {
             TickStore::file(&dir),
             TabStore::file(&dir),
             Arc::new(Mutex::new(TickStore::default())),
+            None,
             None,
         )
         .expect("server binds");

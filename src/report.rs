@@ -62,6 +62,12 @@ pub struct ReportConfig {
     /// WebSocket pages at the same instant the report file is renamed into
     /// place. `--demo` and tests leave it `None`.
     pub push: Option<Arc<GenerationHub>>,
+    /// Item search (forty-seventh pass). When set (the resident supplies
+    /// the store its loopback server serves), every generation publishes
+    /// its plan snapshot here at the same publication point as the page,
+    /// so `GET /search` answers from exactly the plan the page shows.
+    /// `--demo` and tests leave it `None`.
+    pub search: Option<Arc<crate::search::SearchStore>>,
 }
 
 impl ReportConfig {
@@ -82,6 +88,7 @@ impl ReportConfig {
             offline: false,
             embed_icons: false,
             push: None,
+            search: None,
         }
     }
 }
@@ -313,19 +320,27 @@ pub async fn generate(
     // lights the Hunt/Backlog part states. Addendum #93 adds the
     // third shape: Seth's unverified (⍻) assertions, already keyed
     // by roster part name, driving PartState::HaveUnverified.
-    let (stock, part_stock, unverified_parts) = match std::fs::read_to_string(&cfg.stock_path) {
+    // The parsed capture state is kept whole (forty-seventh pass:
+    // the search snapshot distils its per-tier relic stock); the
+    // planner shapes derive from it exactly as before — a missing
+    // or unparseable file is unknown stock, never an error.
+    let stock_state = match std::fs::read_to_string(&cfg.stock_path) {
         Ok(text) => match crate::ocr::StockState::from_json(&text) {
-            Ok(s) => (
-                s.to_relic_stock(),
-                s.canonical_part_counts(&roster),
-                s.unverified_part_counts(),
-            ),
+            Ok(s) => Some(s),
             Err(e) => {
                 endpoint_failures.push(format!("stock {}: {e}", cfg.stock_path.display()));
-                (RelicStock::Unknown, HashMap::new(), HashMap::new())
+                None
             }
         },
-        Err(_) => (RelicStock::Unknown, HashMap::new(), HashMap::new()),
+        Err(_) => None,
+    };
+    let (stock, part_stock, unverified_parts) = match &stock_state {
+        Some(s) => (
+            s.to_relic_stock(),
+            s.canonical_part_counts(&roster),
+            s.unverified_part_counts(),
+        ),
+        None => (RelicStock::Unknown, HashMap::new(), HashMap::new()),
     };
 
     let (cfg_file, _) = config::Config::load(&cfg.config_path)
@@ -414,6 +429,16 @@ pub async fn generate(
     // #86).
     if let Some(hub) = &cfg.push {
         hub.publish(&generation);
+    }
+    // Forty-seventh pass: the search snapshot rides the same
+    // publication point, swapped wholesale, so a search answer is
+    // always the generation the just-published page shows.
+    if let Some(store) = &cfg.search {
+        store.publish(crate::search::SearchSnapshot::new(
+            plan.clone(),
+            relics.clone(),
+            stock_state.as_ref(),
+        ));
     }
 
     // Pass-4 bars: one per standing pool (PvP excluded) + focus.
@@ -714,6 +739,7 @@ mod tests {
             offline: true,
             embed_icons: false,
             push: None,
+            search: None,
         }
     }
 

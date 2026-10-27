@@ -42,6 +42,7 @@ fn offline_report_config(base: &std::path::Path) -> ReportConfig {
         offline: true,
         embed_icons: false,
         push: None,
+        search: None,
     }
 }
 

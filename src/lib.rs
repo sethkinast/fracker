@@ -20,6 +20,7 @@ pub mod report;
 pub mod resident;
 pub mod reward;
 pub mod screencast;
+pub mod search;
 pub mod server;
 pub mod state;
 pub mod tabs;
