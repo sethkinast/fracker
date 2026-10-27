@@ -2124,3 +2124,81 @@ it refines the brief where they disagree. For the next worker pass.
     border, Backlog unperturbed); suite 357 passed /
     0 failed (lib 329 = 324 + 5; golden 15); census
     gates untouched. Details: docs/forty-second-pass.md.
+108. **Live-trial fixes: refinement-variant relic rule +
+    reward border offsets (pass 43, shipped as
+    v0.5.37).** Seth's 2026-10-26 loop trial: the Baza
+    crack credited live (pass 39 verified on native
+    frames), but (a) his relic sync imported 43 phantom
+    names and (b) a Steflos Prime Receiver pick, fully
+    bordered at T+14, read continuity 0.31 and missed.
+    (1) TWO RELIC VARIANTS. Pass 38's owned-gate was
+    scoped to the badged SELECTION variant from Seth's
+    strip; the live sync ran on the REFINEMENT variant
+    (orbiter segment, header "VOID RELICS/REFINEMENT",
+    tier-split stacks), which has NO badge and NO x1
+    count label — owned-x1 and unowned tiles are
+    pixel-indistinguishable there (production badge
+    scorer peaks at 0.328 over the corpus's 1,925
+    cells; name luminance identical across classes;
+    the gate excluded nothing on corpus replay). The
+    refinement rule: on a Refinement frame, a held tile
+    with NO parsed count label is refused (a second
+    line is not owned evidence — Meso L1, unowned per
+    Seth, had imported as Radiant x1). Variant signal:
+    the header title, REFINEMENT verbatim in 25/25
+    corpus headers, via the classifier's squash+fuzzy
+    discipline; headerless seams infer the variant
+    from a parsed second line (selection tiles read
+    Intact on every cell, real-engine re-measure).
+    FILTER STATE: SAFE DEFAULT TAKEN — the header's
+    owned control is a sort dropdown ("OWNED ▾") under
+    which the catalogue renders in all 25 frames; the
+    "ALL" is the era filter; no owned-visibility signal
+    exists to calibrate, so the rule applies to
+    refinement frames unconditionally. Corpus verdict
+    (production read path; pre-rule replay reproduces
+    the live 517 stacks exactly): 0 of 39 label-less
+    phantom names held, 411 labelled stacks import,
+    the scrape's labelled newcomers at exact counts
+    (Meso S7 x14, Neo N1 x8, Meso X1 x2, Neo C10 x2),
+    and the three in-both singleton Radiant tiers
+    (Axi V1, Lith A2, Meso A8) refused. COLLATERAL ON
+    RECORD: owned label-less stacks are refused too —
+    Meso V15 (owned both tiers, Seth) and every owned
+    x1 stack; a refinement sync now captures exactly
+    the labelled population, and the finalize log's
+    new refinement-rule line names every refusal.
+    Pass 38's gate remains strip-verified (eye 0.81–
+    0.97 vs ≤ 0.07 at its measured phase) but is inert
+    on the native corpus — refinement import safety no
+    longer depends on it; the selection variant's live
+    verification is still owed. (2) REWARD BORDER:
+    root cause CONFIRMED by Seth's correction (his
+    name was under slot 2's card; the border existed;
+    T+14 was right — the 15 s window is strict, no
+    retry ladder). The live border sits at top +1 /
+    bottom +2 / left −2 / right −2 from the assumed
+    rect; pass 39's [−1,0,1,3]/[−3,−1,0,1] scaled sets
+    sampled only the top side. Fix: contiguous integer
+    window [−3s..+3s] on all four sides, plus a
+    per-side presence gate the brief's own numbers
+    force — under window-union alone the runner-up
+    slot unions 0.143–0.224 at ANY width containing
+    the winner's lines (its bottom side's 0.394 is the
+    per-card progress bar at the winner's own +2
+    offset; per-side decomposition proves no window
+    satisfies the <= 0.10 gate), so a side contributes
+    only when its best single-offset continuity >=
+    SIDE_LINE_MIN 0.60 (true sides bottom at 0.77,
+    scene sides peak at 0.42). Fixture winner still
+    0.962; live frame resolves slot 2 at 0.994, others
+    0.00. Floor 0.55 / margin 0.30 untouched. Gates:
+    corpus regression test + 2 reward frame tests +
+    4 rule/variant unit tests (net-new 7); suite
+    364 passed / 0 failed (lib 336 = 329 + 7; golden
+    15); census gates untouched.
+    cargo build --release --locked --offline green
+    pre-tag. Details: docs/forty-third-pass.md. Live
+    verification owed: Seth's next refinement sync
+    (refinement-rule finalize line, no phantoms) and
+    his next cracks at native resolution.
