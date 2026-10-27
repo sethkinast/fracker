@@ -2241,3 +2241,52 @@ it refines the brief where they disagree. For the next worker pass.
     verification owed: Seth's next refinement sync
     (refinement-rule finalize line, no phantoms) and
     his next cracks at native resolution.
+109. **Need-based coverage: one definition on both
+    surfaces (pass 44, shipped as v0.5.38).** Seth's
+    sanity check in the 2026-10-26 loop trial: the
+    Citrine Prime Hunt card read "+3 also" for Meso
+    C11 while all three counted parts were confirmed
+    owned on the Hunt tab itself — Lavos Prime Chassis
+    Blueprint (satisfied via the built Chassis, #89),
+    Kompressa Prime Blueprint (held), Daikyu Prime
+    Upper Limb (held; Daikyu unowned, card legitimately
+    active; Paris Prime Blueprint correctly absent —
+    owned + mastered, pruned). Root cause:
+    CrackCandidate.coverage (CrackInfo.covers and the
+    (1 + coverage) score factor) counted relic rewards
+    on the active want LIST, and a want retires only
+    when its parent gear is profile-owned — so
+    satisfied parts counted, and the two consumers
+    built the list differently (derive_action cloned
+    the post-prune set; the queue rebuilt a card-wants
+    union per card), which is how Hunt and the queue
+    disagreed over the Chassis. Fix: coverage counts a
+    reward only when its part's PartState is exactly
+    Need. need_set() builds that universe once per plan
+    from part rows; goal_cards is two-phase (rows for
+    all cards, then actions) so derive_action consumes
+    it; the queue's ranked pass builds the same set
+    once from the finished cards; the (1 + coverage)
+    factor and pass 40's tie-band coverage comparisons
+    consume the redefined figure in unchanged form.
+    Farm-hint verdict: CHANGED — score_farms summed
+    co-yield over the same want-list set, so satisfied
+    parts' relics inflated the nodes dropping them; it
+    consumes the Need universe too (surplus value is
+    the parked surplus question, not a farm input).
+    Out of scope, untouched: prune_wants, the
+    profile-owned set, part-state computation.
+    Gates: 2 net-new tests — the generalised Citrine
+    fixture (three satisfied parts, one per evidence
+    class: built-form Have, blueprint Have,
+    HaveUnverified; plus one still-needed reward)
+    pins covers == 1 on the queue's CrackInfo AND the
+    Hunt action score decomposing with the same figure
+    (surface agreement), and the all-satisfied variant
+    pins covers == 0 with score == chance x stock
+    factor exactly. Suite 375 passed / 0 failed (lib
+    347 = 345 + 2; golden 15; packaging 7; resident 5;
+    tray_quit 1); census gates untouched. Details:
+    docs/forty-fourth-pass.md. Live verification owed:
+    the Citrine card's Meso C11 line should read
+    +0 also on Seth's next Hunt/queue read.
