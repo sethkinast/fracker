@@ -5,12 +5,13 @@
 //! reward-choice screen — it names only his own relic's roll,
 //! and the other rewards not at all (QUEUE_REVIEW.md, EE-2.log
 //! analysis). But the log timestamps the moment all rewards
-//! exist (`Event::RelicRewardScreen`), the choice screen stays
-//! up exactly 15 s, and at T+14 s the selected card carries a
-//! light frame border with the pick final in practice. So: one
-//! frame at T+14, classify it positively as the reward screen,
-//! find the bordered card, OCR its name against the roster
-//! parts universe, and credit +1 into stock.json.
+//! exist (`Event::RelicRewardScreen`), and on the choice
+//! screen the selected card carries a light frame border. So:
+//! grab a short burst of frames from the already-open stream
+//! (T+8/10/12/14), classify each positively as the reward
+//! screen, find the bordered card, OCR its name against the
+//! roster parts universe, and credit +1 into stock.json —
+//! from the LATEST burst frame that clears every gate.
 //!
 //! Every failure is a silent MISS (a log line, no credit),
 //! never a wrong credit: the frame must classify, the border
@@ -26,10 +27,44 @@ use std::sync::Mutex;
 
 use crate::ocr::{GrayImage, OcrEngine, Universe, MATCH_MARGIN};
 
-/// Delay from trigger detection to the grab (seconds). The
-/// choice screen lives 15 s from "Got rewards"; at T+14 the
-/// pick is final and a full second of slack remains.
-pub const GRAB_DELAY_SECS: u64 = 14;
+/// Burst grab offsets from trigger detection (seconds;
+/// pass 43 amendment, Seth's live evidence 2026-10-26
+/// evening). Pass 39's single T+14 grab assumed the choice
+/// screen always lives its full 15 s — true in
+/// extraction-style missions (two of tonight's frames show
+/// the countdown at 2 at grab time), false in ENDLESS
+/// rotations, where the screen closes as soon as picks +
+/// the continue/extract vote complete, often before T+14:
+/// three of tonight's four T+14 grabs landed on non-reward
+/// screens entirely (the next rotation's SELECT RELIC
+/// screen; mid-wave Defense gameplay), and the classifier
+/// correctly refused them — the grab was simply too late.
+/// A second measurement killed the first burst draft
+/// (anchored at T+8): the EE.log trigger itself can trail
+/// the screen's appearance by ~10 s — tailing the log
+/// live, Seth saw the "armed" line with only 5 s left on
+/// the reward timer, so an armed+8 sample can land at
+/// screen+18, after the close. The burst therefore
+/// samples from T+0 at arming, roughly every 2 s through
+/// T+14 — the stream is already open at T+0; sample it,
+/// don't wait. Late-armed episodes are caught by the
+/// first samples. Every frame that classifies is scored
+/// under the unchanged per-frame gates, and the credit
+/// comes from the LATEST frame that clears them — a
+/// requirement, not a preference: the screen opens with
+/// the player's OWN rolled reward pre-selected, so a
+/// border is present from screen-open, before any click,
+/// and a first-clearing rule would credit that default
+/// even when the player then picks another card. Only
+/// the latest clearing frame reflects the actual choice
+/// (if the player never changes it, the default IS the
+/// pick and an early clear is correct). A border cannot
+/// un-happen, so an early-clearing frame still credits
+/// when the screen closes early. Accepted residual
+/// (Seth, confirming the design on these terms): a pick
+/// switched in the final ~second, after the last
+/// readable frame, credits the earlier selection.
+pub const BURST_OFFSETS_SECS: [u64; 8] = [0, 2, 4, 6, 8, 10, 12, 14];
 
 // ---------------------------------------------------------------------------
 // Card geometry, measured on fixtures/reward-screen.png
@@ -398,6 +433,114 @@ pub fn detect_pick(
 }
 
 // ---------------------------------------------------------------------------
+// Burst selection (pass 43 amendment)
+// ---------------------------------------------------------------------------
+
+/// One burst frame's detection outcome: its grab offset and
+/// the unchanged per-frame verdict.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BurstFrame {
+    pub offset_secs: u64,
+    pub outcome: Result<String, Miss>,
+}
+
+/// The burst's verdict. `Pick` credits the named part;
+/// `Miss` carries the one-line reason for the resident log,
+/// naming the closest attempt and the frame it came from.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BurstVerdict {
+    Pick { offset_secs: u64, name: String },
+    Miss(String),
+}
+
+/// Choose the burst's outcome. The credit comes from the
+/// LATEST frame that cleared every per-frame gate — the
+/// screen opens with the player's own roll pre-selected
+/// (a border from screen-open), so the latest clearing
+/// frame is the only one certain to reflect the player's
+/// actual choice rather than the default (and a border
+/// cannot un-happen: an early frame that cleared still
+/// credits when later frames show the screen already
+/// closed).
+/// Never-a-wrong-credit is untouched: selection only ever
+/// picks among frames that individually cleared the
+/// classifier, the border floor + margin, and the name
+/// discipline.
+///
+/// When nothing clears, the miss names the CLOSEST
+/// attempt: a frame that reached name matching outranks
+/// one that only failed the border gate, which outranks
+/// frames that never classified; within a tier, the frame
+/// with the strongest best-side continuity (border tier)
+/// resp. the latest frame wins.
+pub fn select_burst_pick(frames: &[BurstFrame]) -> BurstVerdict {
+    let mut pick: Option<&BurstFrame> = None;
+    for f in frames {
+        if f.outcome.is_ok() {
+            pick = Some(f);
+        }
+    }
+    if let Some(f) = pick {
+        return BurstVerdict::Pick {
+            offset_secs: f.offset_secs,
+            name: f.outcome.clone().unwrap(),
+        };
+    }
+    // Closest name-tier miss: the latest frame that had a
+    // gate-clearing border but failed the name discipline.
+    for f in frames.iter().rev() {
+        if matches!(f.outcome, Err(Miss::NameNoMatch { .. })) {
+            let why = f.outcome.as_ref().unwrap_err().describe();
+            return BurstVerdict::Miss(format!(
+                "burst of {} grab(s) cleared nothing; closest: T+{} frame — {why}",
+                frames.len(),
+                f.offset_secs
+            ));
+        }
+    }
+    // Closest border-tier miss: the strongest best-slot
+    // continuity seen anywhere (ties go to the later frame).
+    let mut best: Option<(&BurstFrame, f32)> = None;
+    for f in frames {
+        if let Err(Miss::NoBorderWinner { scores }) = &f.outcome {
+            let m = scores.iter().copied().fold(0.0f32, f32::max);
+            if best.is_none_or(|(_, b)| m >= b) {
+                best = Some((f, m));
+            }
+        }
+    }
+    if let Some((f, _)) = best {
+        let why = f.outcome.as_ref().unwrap_err().describe();
+        return BurstVerdict::Miss(format!(
+            "burst of {} grab(s) cleared nothing; closest: T+{} frame — {why}",
+            frames.len(),
+            f.offset_secs
+        ));
+    }
+    BurstVerdict::Miss(format!(
+        "burst of {} grab(s): no frame was the reward screen",
+        frames.len()
+    ))
+}
+
+/// Run the per-frame detection over a whole burst and
+/// select the outcome — the resident's one call.
+pub fn detect_burst(
+    engine: &dyn OcrEngine,
+    frames: &[(u64, GrayImage)],
+    parts: &Universe,
+) -> BurstVerdict {
+    let outcomes: Vec<BurstFrame> = frames
+        .iter()
+        .map(|(offset_secs, frame)| BurstFrame {
+            offset_secs: *offset_secs,
+            outcome: detect_pick(engine, frame, parts),
+        })
+        .collect();
+    select_burst_pick(&outcomes)
+}
+
+// ---------------------------------------------------------------------------
 // Stock credit (stage 5)
 // ---------------------------------------------------------------------------
 
@@ -498,10 +641,10 @@ impl RewardArming {
 /// The freshest frame of a live inventory-capture stream,
 /// tapped for the reward grab so an armed episode does not
 /// open a second portal stream. Frames are only retained
-/// while armed (one clone per frame during the ~14 s window),
-/// each stamped with its arrival time: if the capture session
-/// stops mid-episode, the grab must not mistake a stale frame
-/// (border not yet final) for the T+14 frame.
+/// while armed (one clone per frame during the ~14 s burst
+/// window), each stamped with its arrival time: if the
+/// capture session stops mid-episode, the burst must not
+/// mistake a stale frame for a current grab.
 #[derive(Default)]
 pub struct FrameTap {
     armed: AtomicBool,
@@ -734,6 +877,196 @@ mod tests {
             if i != 2 {
                 assert!(*s <= 0.10, "live slot {i} continuity {s:.3} above 0.10");
             }
+        }
+    }
+
+    // -- Burst selection (pass 43 amendment) -------------------
+
+    fn bf(offset_secs: u64, outcome: Result<String, Miss>) -> BurstFrame {
+        BurstFrame {
+            offset_secs,
+            outcome,
+        }
+    }
+
+    #[test]
+    fn burst_latest_clearing_frame_wins() {
+        // The pick changed mid-window: T+8 cleared on one
+        // card, T+12 on another — the LATEST clearing frame
+        // is the final pick. Non-classifying frames around
+        // them change nothing.
+        let frames = vec![
+            bf(8, Ok("Baza Prime Stock".to_owned())),
+            bf(10, Err(Miss::NotRewardScreen)),
+            bf(12, Ok("Steflos Prime Receiver".to_owned())),
+            bf(14, Err(Miss::NotRewardScreen)),
+        ];
+        assert_eq!(
+            select_burst_pick(&frames),
+            BurstVerdict::Pick {
+                offset_secs: 12,
+                name: "Steflos Prime Receiver".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn burst_early_close_keeps_the_early_pick() {
+        // Endless rotation: the screen closed right after
+        // T+8; every later grab landed elsewhere. The early
+        // clearing frame still credits (a border cannot
+        // un-happen).
+        let frames = vec![
+            bf(8, Ok("Baza Prime Stock".to_owned())),
+            bf(10, Err(Miss::NotRewardScreen)),
+            bf(12, Err(Miss::NotRewardScreen)),
+            bf(14, Err(Miss::NotRewardScreen)),
+        ];
+        assert_eq!(
+            select_burst_pick(&frames),
+            BurstVerdict::Pick {
+                offset_secs: 8,
+                name: "Baza Prime Stock".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn burst_no_border_anywhere_reports_the_best_frame() {
+        // Every classifying frame failed the border gate:
+        // the miss names the strongest attempt and its frame.
+        let frames = vec![
+            bf(8, Err(Miss::NoBorderWinner {
+                scores: [0.20, 0.05, 0.11, 0.02],
+            })),
+            bf(10, Err(Miss::NotRewardScreen)),
+            bf(12, Err(Miss::NoBorderWinner {
+                scores: [0.04, 0.31, 0.09, 0.00],
+            })),
+            bf(14, Err(Miss::NotRewardScreen)),
+        ];
+        match select_burst_pick(&frames) {
+            BurstVerdict::Miss(line) => {
+                assert!(line.contains("T+12"), "line: {line}");
+                assert!(line.contains("0.31"), "line: {line}");
+            }
+            other => panic!("expected a miss, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn burst_no_reward_screen_at_all_is_a_plain_miss() {
+        let frames = vec![
+            bf(8, Err(Miss::NotRewardScreen)),
+            bf(14, Err(Miss::NotRewardScreen)),
+        ];
+        match select_burst_pick(&frames) {
+            BurstVerdict::Miss(line) => {
+                assert!(line.contains("no frame was the reward screen"), "line: {line}");
+            }
+            other => panic!("expected a miss, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn burst_detect_late_pick() {
+        // Image level: the border only exists on the last
+        // grab (the pick landed late in the window).
+        let engine = scripted();
+        let frames = vec![
+            (8, synthetic_frame(&[], true)),
+            (10, synthetic_frame(&[], true)),
+            (14, synthetic_frame(&[2], true)),
+        ];
+        assert_eq!(
+            detect_burst(&engine, &frames, &parts_universe()),
+            BurstVerdict::Pick {
+                offset_secs: 14,
+                name: "Kompressa Prime Receiver".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn burst_detect_early_screen_close() {
+        // Image level: only the first grab is the reward
+        // screen; the rest are post-close frames (blank —
+        // the next rotation / gameplay).
+        let engine = scripted();
+        let blank = GrayImage::blank(2560, 1440, 35);
+        let frames = vec![
+            (8, synthetic_frame(&[0], true)),
+            (10, blank.clone()),
+            (12, blank.clone()),
+            (14, blank),
+        ];
+        assert_eq!(
+            detect_burst(&engine, &frames, &parts_universe()),
+            BurstVerdict::Pick {
+                offset_secs: 8,
+                name: "Dual Kamas Prime Blueprint".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn burst_late_armed_caught_by_the_first_samples() {
+        // The EE.log trigger trailed the screen by ~10 s:
+        // at arming, only ~5 s of the window remain. The
+        // FIRST samples already show the final bordered
+        // pick; everything after is the closed screen. Why
+        // the burst starts at T+0 instead of waiting.
+        let frames = vec![
+            bf(0, Ok("Steflos Prime Receiver".to_owned())),
+            bf(2, Err(Miss::NoBorderWinner {
+                scores: [0.12, 0.03, 0.44, 0.01],
+            })),
+            bf(4, Err(Miss::NotRewardScreen)),
+            bf(6, Err(Miss::NotRewardScreen)),
+        ];
+        assert_eq!(
+            select_burst_pick(&frames),
+            BurstVerdict::Pick {
+                offset_secs: 0,
+                name: "Steflos Prime Receiver".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn burst_detect_late_armed() {
+        // Image level, same shape: the bordered screen
+        // exists only in the earliest grabs.
+        let engine = scripted();
+        let blank = GrayImage::blank(2560, 1440, 35);
+        let frames = vec![
+            (0, synthetic_frame(&[3], true)),
+            (2, blank.clone()),
+            (4, blank),
+        ];
+        assert_eq!(
+            detect_burst(&engine, &frames, &parts_universe()),
+            BurstVerdict::Pick {
+                offset_secs: 0,
+                name: "Cedo Prime Stock".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn burst_detect_no_border_anywhere_misses() {
+        // Image level: reward screens throughout, no border
+        // on any — a miss, never a guess.
+        let engine = scripted();
+        let frames = vec![
+            (8, synthetic_frame(&[], true)),
+            (12, synthetic_frame(&[], true)),
+        ];
+        match detect_burst(&engine, &frames, &parts_universe()) {
+            BurstVerdict::Miss(line) => {
+                assert!(line.contains("no clear bordered card"), "line: {line}");
+            }
+            other => panic!("expected a miss, got {other:?}"),
         }
     }
 
