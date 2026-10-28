@@ -651,6 +651,23 @@ pub fn select_burst_pick(frames: &[BurstFrame]) -> BurstVerdict {
     ))
 }
 
+/// The short plain reason class for a burst miss, for the
+/// event log's `crack_miss` records (fifty-first pass). Keyed
+/// on [`select_burst_pick`]'s own phrasing: the border tier's
+/// string names the missing border, the fallback string is
+/// the no-screen tier, and the remaining tier — a bordered
+/// card was read but its name was not proven — is the
+/// fallthrough.
+pub fn miss_reason_class(why: &str) -> &'static str {
+    if why.contains("no clear bordered card") {
+        "no bordered card"
+    } else if why.contains("no frame was the reward screen") {
+        "no reward screen"
+    } else {
+        "name not proven"
+    }
+}
+
 /// Run the per-frame detection over a whole burst and
 /// select the outcome — the resident's one call.
 pub fn detect_burst(
@@ -1348,6 +1365,33 @@ mod tests {
             }
             other => panic!("expected a miss, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn miss_reason_class_names_each_burst_tier() {
+        // Pass 51: the event log's crack-miss classes, pinned
+        // against the real select_burst_pick outputs.
+        let border = vec![bf(8, Err(Miss::NoBorderWinner {
+            scores: [0.20, 0.05, 0.11, 0.02],
+        }))];
+        let BurstVerdict::Miss(why) = select_burst_pick(&border) else {
+            panic!("expected a miss");
+        };
+        assert_eq!(miss_reason_class(&why), "no bordered card");
+
+        let name = vec![bf(8, Err(Miss::NameNoMatch {
+            detail: "psm6 read \"X\" matched nothing".to_owned(),
+        }))];
+        let BurstVerdict::Miss(why) = select_burst_pick(&name) else {
+            panic!("expected a miss");
+        };
+        assert_eq!(miss_reason_class(&why), "name not proven");
+
+        let screen = vec![bf(8, Err(Miss::NotRewardScreen))];
+        let BurstVerdict::Miss(why) = select_burst_pick(&screen) else {
+            panic!("expected a miss");
+        };
+        assert_eq!(miss_reason_class(&why), "no reward screen");
     }
 
     #[test]

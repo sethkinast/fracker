@@ -23,7 +23,7 @@
 //! session start may open the plan, and only once per game session. File
 //! churn and regenerations never open; startup replay never opens.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Mutex};
@@ -680,7 +680,11 @@ async fn reward_grab(
     // is what his relic produced, never what he picked; the
     // burst still detects the pick from the screen).
     let names = crate::fetch::load_item_names(&opts.report.data_dir);
-    let roll_label = reward::roll_display_name(&roll, &names).unwrap_or(roll);
+    // Pass 51: the event log wants the roll's display name or
+    // NOTHING (never the raw path), so keep the Option beside
+    // the log line's fallback label.
+    let roll_name = reward::roll_display_name(&roll, &names);
+    let roll_label = roll_name.clone().unwrap_or(roll);
     log.record(
         "reward",
         &format!(
@@ -725,6 +729,18 @@ async fn reward_grab(
         reward_grab_own_stream(&opts, start, &log).await
     };
     if frames.is_empty() {
+        // Pass 51: an episode that produced no frames at all
+        // is still a crack with no detection for the Log tab
+        // (the specific stream failure is in capture.log).
+        let events_dir = event_log_dir(&opts);
+        crate::events::append(
+            &events_dir,
+            &crate::events::EventRecord::crack_miss(
+                crate::events::now_ts(),
+                "no frames captured".to_owned(),
+                roll_name.clone(),
+            ),
+        );
         return;
     }
     // Audit first: the grabbed frames are the evidence either way.
@@ -753,6 +769,11 @@ async fn reward_grab(
         Ok(reward::detect_burst(&engine, &frames, &data.universes.parts))
     })
     .await;
+    // Pass 51: every terminal outcome of the burst joins the
+    // event log — the credit (which also drives the toast via
+    // the regen below) and the misses, each under its short
+    // plain reason class.
+    let events_dir = event_log_dir(&opts);
     match detected {
         Ok(Ok(reward::BurstVerdict::Pick {
             offset_secs,
@@ -765,16 +786,75 @@ async fn reward_grab(
                         "credited {name} (verified count now {count}) — burst pick from the T+{offset_secs} frame"
                     ),
                 );
+                crate::events::append(
+                    &events_dir,
+                    &crate::events::EventRecord::credit(
+                        crate::events::now_ts(),
+                        name.clone(),
+                        parent_gear_for(&opts.report.data_dir, &name),
+                    ),
+                );
                 let _ = regen_tx.send(Trigger::Manual);
             }
             Err(e) => log.record("reward", &format!("credit for {name} failed: {e}")),
         },
         Ok(Ok(reward::BurstVerdict::Miss(why))) => {
-            log.record("reward", &format!("miss: {why}"))
+            log.record("reward", &format!("miss: {why}"));
+            crate::events::append(
+                &events_dir,
+                &crate::events::EventRecord::crack_miss(
+                    crate::events::now_ts(),
+                    reward::miss_reason_class(&why).to_owned(),
+                    roll_name.clone(),
+                ),
+            );
         }
-        Ok(Err(why)) => log.record("reward", &format!("miss: {why}")),
-        Err(e) => log.record("reward", &format!("miss: detection task failed: {e}")),
+        Ok(Err(why)) => {
+            log.record("reward", &format!("miss: {why}"));
+            crate::events::append(
+                &events_dir,
+                &crate::events::EventRecord::crack_miss(
+                    crate::events::now_ts(),
+                    "detection failed".to_owned(),
+                    roll_name.clone(),
+                ),
+            );
+        }
+        Err(e) => {
+            log.record("reward", &format!("miss: detection task failed: {e}"));
+            crate::events::append(
+                &events_dir,
+                &crate::events::EventRecord::crack_miss(
+                    crate::events::now_ts(),
+                    "detection failed".to_owned(),
+                    roll_name.clone(),
+                ),
+            );
+        }
     }
+}
+
+/// The event log's directory: beside `stock.json` (pass 51
+/// spec), falling back to the app data dir when the stock
+/// path has no parent.
+fn event_log_dir(opts: &ResidentOptions) -> PathBuf {
+    opts.report
+        .stock_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(crate::config::data_dir)
+}
+
+/// Parent item for a credited part, for the event record's
+/// toast icon key (pass 51). Best-effort from the same
+/// roster seed the report consumes; unresolved stays None
+/// (the toast then falls back to the gear monogram — and
+/// the Log line never needed it).
+fn parent_gear_for(data_dir: &Path, part: &str) -> Option<String> {
+    let text = std::fs::read_to_string(data_dir.join("cache/wishlist.json")).ok()?;
+    let roster = crate::model::Roster::from_json(&text).ok()?;
+    roster.parents_of(part).into_iter().next()
 }
 
 /// The standalone-stream path of the reward burst: negotiate
@@ -1529,6 +1609,33 @@ fn watch_loop(
             }
             // §4: prove a mission from its armed identity + success marker.
             if let Some(done) = missions.feed(raw, &today, &now_utc()) {
+                // Pass 51: a proven ALERT completion joins the
+                // event log (the Log tab's second kind). The
+                // label is the identity known at arm time: the
+                // event tag when the block carries one (with
+                // the node appended), else the node itself,
+                // else the internal mission name.
+                if done.info.is_alert() {
+                    let info = &done.info;
+                    let label = if !info.alert_tag.is_empty() {
+                        if info.location.is_empty() {
+                            info.alert_tag.clone()
+                        } else {
+                            format!("{} · {}", info.alert_tag, info.location)
+                        }
+                    } else if !info.location.is_empty() {
+                        info.location.clone()
+                    } else {
+                        info.name.clone()
+                    };
+                    crate::events::append(
+                        &state_dir,
+                        &crate::events::EventRecord::alert_done(
+                            crate::events::now_ts(),
+                            label,
+                        ),
+                    );
+                }
                 st.mission_completions.push(done.clone());
                 if let Ok(mut g) = completions.lock() {
                     g.push(done);
