@@ -59,7 +59,7 @@ use crate::watch::LogWatcher;
 use crate::{elog, portal, reward, screencast, server, tabs, ticks};
 
 /// What asked for a report run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Trigger {
     /// A fresh game session started: a `Logged in` line after the app
     /// was already watching (twelfth pass §2). This — and only this —
@@ -72,9 +72,11 @@ pub enum Trigger {
     MissionEnd,
     /// The tray's manual Regenerate verb.
     Manual,
-    /// The fissure reward-choice screen appeared (pass 39). NOT a
-    /// report trigger: it arms the reward burst grab.
-    RewardScreen,
+    /// Seth's relic reward was granted (pass 39; rekeyed pass 49 to
+    /// the `VoidProjections: <his id> gets reward` line). Carries the
+    /// roll's uniqueName path for the arm log line. NOT a report
+    /// trigger: it arms the reward burst grab.
+    RewardScreen(String),
     /// The reward-choice screen shut down (pass 39). NOT a report
     /// trigger: it closes the reward episode.
     RewardClosed,
@@ -277,8 +279,8 @@ pub async fn run(
     let mut capture_start: Option<tokio::task::JoinHandle<()>> = None;
     // Pass 39: reward-grab state. The tap is shared with the
     // capture worker (its frame source offers frames while an
-    // episode is armed); the arming coalesces the paired
-    // reward-screen log events into one burst per episode.
+    // episode is armed); the arming coalesces an episode's
+    // reward-grant events into one burst per episode.
     let reward_tap = Arc::new(reward::FrameTap::new());
     let mut reward_arming = reward::RewardArming::new();
     let (reward_done_tx, mut reward_done_rx) = mpsc::unbounded_channel::<()>();
@@ -331,14 +333,17 @@ pub async fn run(
                 }
                 // Pass 39: reward triggers never schedule a report.
                 // Partition them out and drive the grab arming: a
-                // shutdown closes the episode; a screen appearance
-                // arms one burst per episode (the paired "initialized"
-                // and "Got rewards" events coalesce in RewardArming).
-                let mut reward_screen = false;
+                // shutdown closes the episode; a reward grant arms
+                // one burst per episode (pass 49: the gets-reward
+                // line fires once per true screen; RewardArming
+                // still coalesces any repeats within the episode).
+                let mut reward_roll: Option<String> = None;
                 let mut reward_closed = false;
                 burst.retain(|t| match t {
-                    Trigger::RewardScreen => {
-                        reward_screen = true;
+                    Trigger::RewardScreen(roll) => {
+                        if reward_roll.is_none() {
+                            reward_roll = Some(roll.clone());
+                        }
                         false
                     }
                     Trigger::RewardClosed => {
@@ -350,19 +355,22 @@ pub async fn run(
                 if reward_closed {
                     reward_arming.on_closed();
                 }
-                if reward_screen && opts.reward_detect && reward_arming.on_screen() {
-                    reward_task = Some(spawn_reward_grab(
-                        opts.clone(),
-                        capture.is_some(),
-                        reward_tap.clone(),
-                        reward_regen_tx.clone(),
-                        capture_log.clone(),
-                        reward_done_tx.clone(),
-                    ));
+                if let Some(roll) = reward_roll {
+                    if opts.reward_detect && reward_arming.on_screen() {
+                        reward_task = Some(spawn_reward_grab(
+                            opts.clone(),
+                            capture.is_some(),
+                            roll,
+                            reward_tap.clone(),
+                            reward_regen_tx.clone(),
+                            capture_log.clone(),
+                            reward_done_tx.clone(),
+                        ));
+                    }
                 }
                 if !burst.is_empty() {
                     let session_started = burst.contains(&Trigger::SessionStart);
-                    schedule_report!(burst[0], session_started && opts.pop_on_session_start);
+                    schedule_report!(burst[0].clone(), session_started && opts.pop_on_session_start);
                 }
             }
             cmd = recv_cmd(&mut cmds) => {
@@ -643,13 +651,14 @@ impl capture::FrameSource for TapSource {
 fn spawn_reward_grab(
     opts: ResidentOptions,
     capture_live: bool,
+    roll: String,
     tap: Arc<reward::FrameTap>,
     regen_tx: mpsc::UnboundedSender<Trigger>,
     log: CaptureLog,
     done: mpsc::UnboundedSender<()>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        reward_grab(opts, capture_live, tap, regen_tx, log).await;
+        reward_grab(opts, capture_live, roll, tap, regen_tx, log).await;
         let _ = done.send(());
     })
 }
@@ -660,14 +669,23 @@ fn spawn_reward_grab(
 async fn reward_grab(
     opts: ResidentOptions,
     capture_live: bool,
+    roll: String,
     tap: Arc<reward::FrameTap>,
     regen_tx: mpsc::UnboundedSender<Trigger>,
     log: CaptureLog,
 ) {
     let start = tokio::time::Instant::now();
+    // Pass 49: the arm line names his ROLL when the item-names
+    // data resolves the grant path (diagnostic only — the roll
+    // is what his relic produced, never what he picked; the
+    // burst still detects the pick from the screen).
+    let names = crate::fetch::load_item_names(&opts.report.data_dir);
+    let roll_label = reward::roll_display_name(&roll, &names).unwrap_or(roll);
     log.record(
         "reward",
-        "armed: reward screen seen; burst grabs every ~2s from T+0 through T+14",
+        &format!(
+            "armed: reward screen seen (his roll: {roll_label}); burst grabs every ~2s from T+0 through T+14"
+        ),
     );
     let frames: Vec<(u64, crate::ocr::GrayImage)> = if capture_live {
         // Reuse the live capture stream through the tap: portal
@@ -1486,7 +1504,10 @@ fn watch_loop(
         let mut saw_login = false;
         for raw in &lines {
             let line = elog::parse_line(raw);
-            let ev = elog::classify(&line);
+            // Pass 49: classification carries Seth's account id so
+            // the reward-grant event can key on it (the id's single
+            // source is report::PROFILE_ACCOUNT_ID).
+            let ev = elog::classify_with_account(&line, report::PROFILE_ACCOUNT_ID);
             let _ = tracker.feed(ev.as_ref(), gap);
             if let Some(elog::Event::LoggedIn { name }) = &ev {
                 st.display_name = name.clone();
@@ -1495,12 +1516,13 @@ fn watch_loop(
             if ev.as_ref().map_or(false, |e| e.is_mission_end()) {
                 let _ = trigger_tx.send(Trigger::MissionEnd);
             }
-            // Pass 39: the reward-choice screen's appearance arms
-            // the burst grab; its shutdown (RelicCrack) closes the
-            // episode. Neither is a report trigger — the resident
-            // loop partitions them out of report bursts.
-            if matches!(ev, Some(elog::Event::RelicRewardScreen)) {
-                let _ = trigger_tx.send(Trigger::RewardScreen);
+            // Pass 39/49: his reward grant arms the burst grab; the
+            // screen's shutdown (RelicCrack) closes the episode.
+            // Neither is a report trigger — the resident loop
+            // partitions them out of report bursts. (The grant also
+            // fires the MissionEnd regen above via is_mission_end.)
+            if let Some(elog::Event::RelicReward { roll }) = &ev {
+                let _ = trigger_tx.send(Trigger::RewardScreen(roll.clone()));
             }
             if matches!(ev, Some(elog::Event::RelicCrack)) {
                 let _ = trigger_tx.send(Trigger::RewardClosed);
@@ -1661,10 +1683,88 @@ mod tests {
 
         use std::io::Write;
         let mut f = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
-        writeln!(f, "99.001 Script [Info]: ProjectionRewardChoice.lua: Got rewards").unwrap();
+        // Pass 49: the mission-end marker for a crack is now the
+        // gets-reward grant line (transcribed shape, EE-2.log).
+        writeln!(f, "150.530 Sys [Info]: VoidProjections: 5420fba23846322173707618 gets reward /Lotus/StoreItems/Types/Recipes/WarframeRecipes/HarrowPrimeHelmetBlueprint").unwrap();
         f.flush().unwrap();
 
         assert_eq!(recv_trigger(&mut rx), Some(Trigger::MissionEnd));
+
+        shutdown.trigger();
+        handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Pass 49 (Seth's direction): the burst arms ONLY on his
+    /// gets-reward line. The EE-2 true-screen sequence arms
+    /// exactly once (with the roll attached) and regenerates;
+    /// the survival fake-init sequence — `Relic rewards
+    /// initialized` re-firing as the relic-selection flow
+    /// closes, no grant behind it — arms nothing; a squadmate's
+    /// grant line arms nothing.
+    #[test]
+    fn reward_trigger_keys_on_his_gets_reward_line_only() {
+        let dir = tmpdir("rekey");
+        let log = dir.join("EE.log");
+        let state = dir.join("state");
+        std::fs::write(&log, "14.148 Sys [Info]: Logged in Jenterrobahne\n").unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let shutdown = Shutdown::new();
+        let status = Arc::new(Mutex::new(TrayStatus::default()));
+        let handle = spawn_watch(
+            log.clone(),
+            20,
+            state.clone(),
+            status,
+            tx,
+            shutdown.receiver(),
+            Arc::new(Mutex::new(Vec::new())),
+        );
+        let _ = collect_triggers(&mut rx, Duration::from_millis(250));
+
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+        // The fake init (Seth's survival snippet, game t=3075.684):
+        // selection votes close, the reward-choice UI re-inits,
+        // no screen follows.
+        writeln!(f, "3075.671 Script [Info]: ThemedProjectionManager.lua: We got all the votes so we can close now!").unwrap();
+        writeln!(f, "3075.684 Script [Info]: ProjectionRewardChoice.lua: Relic rewards initialized").unwrap();
+        // A squadmate's grant line: another id entirely.
+        writeln!(f, "3076.000 Sys [Info]: VoidProjections: 65a6fbd660283fc6b30c4ec3 gets reward /Lotus/StoreItems/Types/Recipes/Weapons/BurstonPrimeBlueprint").unwrap();
+        f.flush().unwrap();
+        let phantom = collect_triggers(&mut rx, Duration::from_millis(600));
+        assert!(
+            !phantom.iter().any(|t| matches!(t, Trigger::RewardScreen(_))),
+            "no arm without his grant line: {phantom:?}"
+        );
+        assert!(
+            !phantom.contains(&Trigger::MissionEnd),
+            "the fake init must not regenerate either: {phantom:?}"
+        );
+
+        // The true screen (EE-2 sequence): initialized, HIS grant,
+        // Got rewards — exactly one arm, roll attached, one regen.
+        writeln!(f, "150.472 Script [Info]: ProjectionRewardChoice.lua: Relic rewards initialized").unwrap();
+        writeln!(f, "150.530 Sys [Info]: VoidProjections: 5420fba23846322173707618 gets reward /Lotus/StoreItems/Types/Recipes/WarframeRecipes/HarrowPrimeHelmetBlueprint").unwrap();
+        writeln!(f, "150.843 Script [Info]: ProjectionRewardChoice.lua: Got rewards").unwrap();
+        f.flush().unwrap();
+        let true_screen = collect_triggers(&mut rx, Duration::from_millis(600));
+        let arms: Vec<&Trigger> = true_screen
+            .iter()
+            .filter(|t| matches!(t, Trigger::RewardScreen(_)))
+            .collect();
+        assert_eq!(arms.len(), 1, "exactly one arm per true screen: {true_screen:?}");
+        assert_eq!(
+            arms[0],
+            &Trigger::RewardScreen(
+                "/Lotus/StoreItems/Types/Recipes/WarframeRecipes/HarrowPrimeHelmetBlueprint"
+                    .to_owned()
+            )
+        );
+        assert!(
+            true_screen.contains(&Trigger::MissionEnd),
+            "the grant still regenerates the plan: {true_screen:?}"
+        );
 
         shutdown.trigger();
         handle.join().unwrap();

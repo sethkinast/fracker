@@ -2573,3 +2573,82 @@ it refines the brief where they disagree. For the next worker pass.
     gates untouched. Details: docs/forty-eighth-pass.md.
     Live verification owed: the overlay during a real
     reward window now shows the relic's own icon.
+115. **Reward trigger rekey + fewer-card reward geometries
+    (pass 49, shipped as v0.5.44).** Two live defects from
+    Seth's 2026-10-27 evening, both closed. (a) PHANTOM ARM:
+    after a true reward screen, an endless rotation's
+    relic-selection close re-fires `ProjectionRewardChoice.lua:
+    Relic rewards initialized` ALONE (game t=3075.684, no
+    grant behind it) and the old classifier — which armed on
+    either ProjectionRewardChoice line — re-armed the burst
+    with no screen present. Rekey per Seth: both
+    ProjectionRewardChoice patterns are REMOVED from the
+    classifier; a new `Event::RelicReward { roll }` is
+    produced only by `classify_with_account`, matching the
+    exact prefix `VoidProjections: <his id> gets reward `
+    (context-free `classify` delegates with an empty id and
+    can never produce it). The watch loop wires
+    `report::PROFILE_ACCOUNT_ID` — the id's single source,
+    not a second copy. `is_mission_end` is RelicReward |
+    RelicCrack, so regen still fires once per true crack
+    (~0.3 s earlier than the old Got-rewards marker).
+    `Trigger::RewardScreen` carries the roll path to the
+    grab, whose arm log line names the roll when
+    item-names resolves it (exact, StoreItems-stripped,
+    StoreItems-inserted — the plan.rs Varzia precedent;
+    unresolvable logs raw, never guessed — recipe paths do
+    not resolve against today's item-names data, verified).
+    Close/coalescing unchanged. (b) FEWER-CARD MISS: the
+    reward row stays centred, so Seth's 2026-10-27 23:56
+    3-player burst (client) scored [0, 0.192, 0, 0] at T+0 /
+    all-zero at T+14 on the 4-grid — a guaranteed miss. The
+    geometry functions now take a row origin (0.0 = 4-grid;
+    0.5/1.0/1.5 = 3/2/1 cards, row_origin = (4-n)*pitch/2);
+    the public 4-grid functions are delegating wrappers, so
+    the 4-person path is the original arithmetic unchanged.
+    detect_pick runs the 4-grid first; ONLY on a border
+    miss does it try (0.5,3), (1.0,2), (1.5,1) in order —
+    same presence rule (>=2 cards; exactly 1 for solo),
+    same border floor/margin/side-line gate, same name
+    discipline (the reader is extracted as
+    read_bordered_name; the region is its only
+    geometry-dependent input). First geometry with a
+    border winner owns the frame; no winner anywhere =
+    the 4-grid's own NoBorderWinner with 4-grid scores.
+    AMBIGUITY GUARD (found by the existing suite, not
+    inspection): the first cut consulted alternates on any
+    border miss and `ambiguous_border_credits_nothing`
+    failed — on a two-border 4-person frame the 2-card
+    geometry sees one border and "resolves" the refusal.
+    Alternates are now consulted only when NO slot on the
+    current geometry clears BORDER_FLOOR: a
+    border-strength signal without a unique winner is a
+    refusal on every geometry. Genuine fewer-card frames
+    are unaffected (4-grid scores structurally <= 0.192
+    measured). Fixture verdicts, before -> after:
+    4-person fixtures IDENTICAL (reward-screen.png winner
+    slot 0 in the 0.9s; live Steflos frame winner slot 2
+    >= 0.90, others <= 0.10; synthetic ambiguous/
+    borderless/gameplay unchanged). Trio t0: 4-grid
+    [0, 0.192, 0, 0] no winner -> centred-3 [0.996, 0,
+    0.192] winner slot 0, real-engine detect = Sevagoth
+    Prime Systems Blueprint. Trio t14: 4-grid all-zero ->
+    centred-3 [0.995, 0, 0] winner slot 0, real-engine
+    detect = Sevagoth Prime Systems Blueprint (the
+    acceptance frame; engine = tesseract 5.3.4 from the
+    user-space extraction, run via FRACKER_TESSERACT shim
+    after the sandbox apt install left no /usr/bin binary).
+    Gates: suite 410 passed / 0 failed (lib 382; golden
+    15; packaging 7; resident 5; tray_quit 1) — new:
+    elog gets-reward id matrix (his id host+client,
+    context-free None, other id None, reward-info None,
+    both ProjectionRewardChoice lines None), resident
+    watch-level fake-init vs true-sequence (exactly one
+    arm, roll attached, one regen), synthetic trio/duo/
+    solo detection, borderless-trio 4-grid-scores miss,
+    the real-frame border + OCR fixtures, roll_display_name
+    shapes; census gates untouched. Details:
+    docs/forty-ninth-pass.md. Live verification owed:
+    Seth cracks on this build (arm line names his roll,
+    no phantom after an endless rotation close) and runs
+    a 2-3 player and a solo fissure.

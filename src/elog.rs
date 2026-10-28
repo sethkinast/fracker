@@ -111,8 +111,19 @@ pub enum Event {
     MissionInfoSeen,
     /// Message contains `Game successfully connected to:`.
     LevelConnected,
-    /// `ProjectionRewardChoice.lua: Relic rewards initialized` or `...: Got rewards`.
-    RelicRewardScreen,
+    /// `VoidProjections: <account-id> gets reward <uniqueName>` for
+    /// SETH's account id only (pass 49 rekey). Carries the reward's
+    /// uniqueName path (his own relic's ROLL — never his pick, which
+    /// the log cannot see). Classified only by
+    /// [`classify_with_account`]: the context-free [`classify`] never
+    /// produces this variant, because the id is the whole signal.
+    /// The `ProjectionRewardChoice.lua` lines are NOT classified:
+    /// `Relic rewards initialized` also fires when an endless
+    /// mission's relic-selection flow closes with no reward screen
+    /// at all (Seth's log, 2026-10-27, game t=3075.684) — a phantom
+    /// arm — while the gets-reward line fires exactly once per true
+    /// screen, for his id alone, host or client.
+    RelicReward { roll: String },
     /// Message contains `DVRCAftermath`.
     RelicCrack,
     /// `ThemedProjectionManager.lua: PopulateInventoryGrid`.
@@ -125,20 +136,51 @@ pub enum Event {
 
 impl Event {
     /// True when this event marks a completed mission run (sixth pass
-    /// §4): the reward screen (`Got rewards`) or the post-crack
-    /// aftermath transmission on hub return. The live watch loop turns
-    /// these into an automatic page regeneration.
+    /// §4): his reward grant (pass 49: the gets-reward moment, ~0.3 s
+    /// before the old `Got rewards` marker — the same regeneration,
+    /// a hair earlier) or the post-crack aftermath transmission on
+    /// hub return. The live watch loop turns these into an automatic
+    /// page regeneration.
     pub fn is_mission_end(&self) -> bool {
-        matches!(self, Event::RelicRewardScreen | Event::RelicCrack)
+        matches!(self, Event::RelicReward { .. } | Event::RelicCrack)
     }
 }
 
 /// Substring classification per the §7.2 catalog.
 pub fn classify(line: &LogLine) -> Option<Event> {
-    classify_inner(line)
+    classify_inner(line, "")
 }
 
-fn classify_inner(line: &LogLine) -> Option<Event> {
+/// Classification with Seth's account id wired in (pass 49): the
+/// only route that can produce [`Event::RelicReward`], which keys
+/// on `VoidProjections: <account-id> gets reward …`. The id comes
+/// from the caller (the resident passes
+/// `report::PROFILE_ACCOUNT_ID` — the same source the profile
+/// fetch uses, never a second copy).
+pub fn classify_with_account(line: &LogLine, account_id: &str) -> Option<Event> {
+    classify_inner(line, account_id)
+}
+
+/// Parse `VoidProjections: <account-id> gets reward <path>` —
+/// Some(path) only when the id is exactly Seth's. Another player's
+/// id (or the `Host/Client got reward info from` traffic) never
+/// matches: the full id plus the literal ` gets reward ` must
+/// follow the prefix, so even an id that prefixes his cannot.
+fn gets_reward_roll(msg: &str, account_id: &str) -> Option<String> {
+    if account_id.is_empty() {
+        return None;
+    }
+    let rest = msg.strip_prefix("VoidProjections: ")?;
+    let rest = rest.strip_prefix(account_id)?;
+    let path = rest.strip_prefix(" gets reward ")?.trim();
+    if path.is_empty() {
+        None
+    } else {
+        Some(path.to_owned())
+    }
+}
+
+fn classify_inner(line: &LogLine, account_id: &str) -> Option<Event> {
     let msg = line.message.as_str();
     if line.subsystem == "Sys" && msg.starts_with("Logged in ") {
         let name = msg["Logged in ".len()..].trim().to_owned();
@@ -153,10 +195,8 @@ fn classify_inner(line: &LogLine) -> Option<Event> {
     if msg.contains("Game successfully connected to:") {
         return Some(Event::LevelConnected);
     }
-    if msg.contains("ProjectionRewardChoice.lua: Relic rewards initialized")
-        || msg.contains("ProjectionRewardChoice.lua: Got rewards")
-    {
-        return Some(Event::RelicRewardScreen);
+    if let Some(roll) = gets_reward_roll(msg, account_id) {
+        return Some(Event::RelicReward { roll });
     }
     if msg.contains("DVRCAftermath") {
         return Some(Event::RelicCrack);
@@ -660,19 +700,41 @@ mod tests {
             Some(Event::LevelConnected)
         );
         // transcribed-from-real-log: `ProjectionRewardChoice.lua: Relic
-        // rewards initialized`.
+        // rewards initialized`. Pass 49: NOT classified — the same line
+        // fires when an endless mission's relic-selection flow closes
+        // with no reward screen (the phantom arm), so it can no longer
+        // arm or regenerate anything.
         assert_eq!(
             classify(&real(
                 "Script",
                 "ProjectionRewardChoice.lua: Relic rewards initialized"
             )),
-            Some(Event::RelicRewardScreen)
+            None
+        );
+        assert_eq!(
+            classify_with_account(
+                &real(
+                    "Script",
+                    "ProjectionRewardChoice.lua: Relic rewards initialized"
+                ),
+                "5420fba23846322173707618"
+            ),
+            None
         );
         // transcribed-from-real-log: `ProjectionRewardChoice.lua: Got
-        // rewards`.
+        // rewards`. Pass 49: NOT classified either — the gets-reward
+        // line below supersedes it as the reward moment (~0.3 s earlier
+        // in the same screen's log sequence).
         assert_eq!(
             classify(&real("Script", "ProjectionRewardChoice.lua: Got rewards")),
-            Some(Event::RelicRewardScreen)
+            None
+        );
+        assert_eq!(
+            classify_with_account(
+                &real("Script", "ProjectionRewardChoice.lua: Got rewards"),
+                "5420fba23846322173707618"
+            ),
+            None
         );
         // transcribed-from-real-log: `ProjectionRewardChoice.lua:
         // Selection countdown done` — terminal countdown, no state change.
@@ -732,10 +794,65 @@ mod tests {
     }
 
     #[test]
+    fn gets_reward_arms_only_for_seths_id() {
+        // Pass 49 fixture (transcribed from EE-2.log, Seth host): the
+        // true reward screen's grant line — his id, his roll's path.
+        let his = real(
+            "Sys",
+            "VoidProjections: 5420fba23846322173707618 gets reward /Lotus/StoreItems/Types/Recipes/WarframeRecipes/HarrowPrimeHelmetBlueprint",
+        );
+        assert_eq!(
+            classify_with_account(&his, "5420fba23846322173707618"),
+            Some(Event::RelicReward {
+                roll: "/Lotus/StoreItems/Types/Recipes/WarframeRecipes/HarrowPrimeHelmetBlueprint"
+                    .to_owned()
+            })
+        );
+        // The context-free classifier never arms: the id is the signal.
+        assert_eq!(classify(&his), None);
+        // A squadmate's grant line (another id) must not arm — in
+        // Seth's log other players normally surface only as
+        // `Host/Client got reward info from <id>`, but the id check
+        // is what guarantees it either way.
+        let theirs = real(
+            "Sys",
+            "VoidProjections: 65a6fbd660283fc6b30c4ec3 gets reward /Lotus/StoreItems/Types/Recipes/Weapons/BurstonPrimeBlueprint",
+        );
+        assert_eq!(
+            classify_with_account(&theirs, "5420fba23846322173707618"),
+            None
+        );
+        // The reward-info traffic about his own id is not a grant.
+        let info = real(
+            "Sys",
+            "VoidProjections: Host got reward info from 5420fba23846322173707618",
+        );
+        assert_eq!(
+            classify_with_account(&info, "5420fba23846322173707618"),
+            None
+        );
+        // Client-side shape (Seth, 2026-10-27 23:56, confirmed live):
+        // the same line with his id when someone else hosts.
+        let client = real(
+            "Sys",
+            "VoidProjections: 5420fba23846322173707618 gets reward /Lotus/StoreItems/Types/Recipes/WarframeRecipes/SevagothPrimeSystemsBlueprint",
+        );
+        assert!(matches!(
+            classify_with_account(&client, "5420fba23846322173707618"),
+            Some(Event::RelicReward { .. })
+        ));
+    }
+
+    #[test]
     fn mission_end_events_drive_regeneration() {
         // Sixth pass §4: reward screen + post-crack aftermath are the
         // mission-end signals the watch loop turns into a regen.
-        assert!(Event::RelicRewardScreen.is_mission_end());
+        // Pass 49: the reward-screen signal is now the gets-reward
+        // grant (RelicReward), not the ProjectionRewardChoice lines.
+        assert!(Event::RelicReward {
+            roll: "/Lotus/X".to_owned()
+        }
+        .is_mission_end());
         assert!(Event::RelicCrack.is_mission_end());
         assert!(!Event::MissionInfoSeen.is_mission_end());
         assert!(!Event::LevelConnected.is_mission_end());
