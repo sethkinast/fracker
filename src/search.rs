@@ -9,15 +9,21 @@
 //!
 //! Matching (Seth, pinned): prefix match by word token, never
 //! substring. A name is tokenised into words and the token "Prime"
-//! is dropped (it discriminates nothing). The ENTIRE query is
-//! compared as one string — it is never tokenised — and a name
-//! matches iff the query is a prefix of ONE single token. So
-//! "Silva Aegis" does not match "Silva & Aegis" (no token carries
-//! it), while "Silva" and "Aegis" each do. Minimum query length
-//! is [`MIN_QUERY_CHARS`]. Ranking: closest token fit first (a
-//! token EQUAL to the query beats a longer token it prefixes —
-//! "Bo" before "Boar"), then shorter name, then alphabetical, so
-//! the single winner is deterministic.
+//! is dropped (it discriminates nothing). A query matches iff
+//! EVERY word of the query is a prefix of at least one token of
+//! the name — the single-word matcher ANDed per word, order-free
+//! (fiftieth pass, Seth: no artificial rules, the simplest
+//! implementation). So "axi a2" matches "Axi A2", "Dual Zoren"
+//! matches "Dual Zoren Prime", and — the accepted consequence —
+//! "Silva Aegis" matches "Silva & Aegis" and reversed word
+//! orders match too. A single-word query behaves exactly as it
+//! always did: a prefix of ONE token. Minimum query length is
+//! [`MIN_QUERY_CHARS`], applied to the query string as a whole
+//! (no per-word minimum). Ranking: closest token fit first (a
+//! token EQUAL to the query word beats a longer token it
+//! prefixes — "Bo" before "Boar"; for a multi-word query the
+//! fit is the SUM of the per-word fits), then shorter name,
+//! then alphabetical, so the single winner is deterministic.
 //!
 //! The index itself (every relic and prime item as a fully
 //! rendered result block) is rendered by the server once per plan
@@ -52,26 +58,39 @@ pub fn name_tokens(name: &str) -> Vec<String> {
         .collect()
 }
 
-/// Normalise a raw query for comparison: trimmed and lowercased,
-/// otherwise WHOLE — the query is never tokenised, so an inner
-/// space stays and can only fail to match (no token contains one).
+/// Normalise a raw query for comparison: trimmed and lowercased.
+/// The matcher splits the result into words; whitespace runs
+/// between words carry no meaning.
 pub fn normalise_query(raw: &str) -> String {
     raw.trim().to_lowercase()
 }
 
-/// How closely `name` fits the (already normalised) query: the
-/// smallest `token.len() - query.len()` over tokens the query
-/// prefixes — 0 when a token equals the query. `None` when the
-/// query is under the minimum length or prefixes no token.
+/// How closely `name` fits the (already normalised) query: for
+/// EACH word of the query, the smallest `token.len() -
+/// word.len()` over the name's tokens the word prefixes — 0 when
+/// a token equals the word — summed over the words. `None` when
+/// the query is under the minimum length (measured on the whole
+/// query string, spaces included) or any word prefixes no
+/// token. A single-word query reduces to the original measure.
 pub fn token_fit(name: &str, query: &str) -> Option<usize> {
     if query.chars().count() < MIN_QUERY_CHARS {
         return None;
     }
-    name_tokens(name)
-        .iter()
-        .filter(|t| t.starts_with(query))
-        .map(|t| t.len() - query.len())
-        .min()
+    let tokens = name_tokens(name);
+    let words: Vec<&str> = query.split_whitespace().collect();
+    if words.is_empty() {
+        return None;
+    }
+    let mut total = 0usize;
+    for word in words {
+        let best = tokens
+            .iter()
+            .filter(|t| t.starts_with(word))
+            .map(|t| t.len() - word.len())
+            .min()?;
+        total += best;
+    }
+    Some(total)
 }
 
 /// The deterministic rank of one matching name: closest token fit,
@@ -122,10 +141,10 @@ pub fn client_script() -> String {
 // submit and no selection: typing filters the prefetched,
 // server-rendered index LOCALLY (a keystroke never waits on the
 // network) and exactly ONE best result shows, fully expanded.
-// Matching mirrors search::best_match: the whole query must be a
-// prefix of one word token of the name ("Prime" tokens are not
-// indexed); closest token fit wins, then shorter name, then
-// alphabetical.
+// Matching mirrors search::best_match: every word of the query
+// must be a prefix of one word token of the name ("Prime" tokens
+// are not indexed); closest token fit (summed over the words)
+// wins, then shorter name, then alphabetical.
 (function () {
   var MINQ = __MIN_QUERY_CHARS__;
   var overlay = document.getElementById('search-overlay');
@@ -171,14 +190,22 @@ pub fn client_script() -> String {
     if (indexGen !== gen) { fetchIndex(); }
   }
   function fitOf(b, q) {
-    var best = null;
-    b.tokens.forEach(function (t) {
-      if (t.indexOf(q) === 0) {
-        var d = t.length - q.length;
-        if (best === null || d < best) { best = d; }
-      }
-    });
-    return best;
+    var words = q.split(/\s+/).filter(Boolean);
+    if (!words.length) { return null; }
+    var total = 0;
+    for (var i = 0; i < words.length; i++) {
+      var w = words[i];
+      var best = null;
+      b.tokens.forEach(function (t) {
+        if (t.indexOf(w) === 0) {
+          var d = t.length - w.length;
+          if (best === null || d < best) { best = d; }
+        }
+      });
+      if (best === null) { return null; }
+      total += best;
+    }
+    return total;
   }
   function winner(q) {
     if (q.length < MINQ) { return null; }
@@ -312,16 +339,52 @@ mod tests {
         assert_eq!(best_match(&names, "Boa"), Some("Boar Prime"));
     }
 
-    /// Pinned acceptance case (Seth): the query is compared whole,
-    /// never tokenised — "Silva Aegis" matches nothing even though
-    /// both words are tokens of the name; each word alone matches.
+    /// Pinned acceptance cases (Seth, fiftieth pass): a query
+    /// matches when EVERY word prefix-matches a name token —
+    /// the two-word queries that were dead under the whole-query
+    /// rule now land, including the relic era+code form.
     #[test]
-    fn multi_word_query_never_matches() {
-        let names = ["Silva & Aegis Prime"];
-        assert_eq!(best_match(&names, "Silva Aegis"), None);
+    fn multi_word_query_matches_per_word() {
+        let relics = ["Axi A2", "Meso C11", "Axi A23"];
+        assert_eq!(best_match(&relics, "axi a2"), Some("Axi A2"));
+        assert_eq!(best_match(&relics, "meso c11"), Some("Meso C11"));
+        let items = ["Dual Zoren Prime", "Bo Prime"];
+        assert_eq!(best_match(&items, "Dual Zoren"), Some("Dual Zoren Prime"));
+        assert_eq!(best_match(&items, "dual zo"), Some("Dual Zoren Prime"));
+        // One word that prefixes no token sinks the whole query.
+        assert_eq!(best_match(&relics, "axi z9"), None);
+        assert_eq!(best_match(&items, "Dual Boar"), None);
+        // Single words behave exactly as before.
+        assert_eq!(best_match(&items, "zoren"), Some("Dual Zoren Prime"));
+    }
+
+    /// Accepted consequences (Seth approved explicitly): the
+    /// per-word rule is order-free, so "Silva Aegis" now matches
+    /// "Silva & Aegis" and reversed word orders match too.
+    #[test]
+    fn multi_word_matching_is_order_free() {
+        let names = ["Silva & Aegis Prime", "Axi A2"];
+        assert_eq!(best_match(&names, "Silva Aegis"), Some("Silva & Aegis Prime"));
+        assert_eq!(best_match(&names, "Aegis Silva"), Some("Silva & Aegis Prime"));
+        assert_eq!(best_match(&names, "A2 Axi"), Some("Axi A2"));
         assert_eq!(best_match(&names, "Silva"), Some("Silva & Aegis Prime"));
         assert_eq!(best_match(&names, "Aegis"), Some("Silva & Aegis Prime"));
-        assert_eq!(best_match(&names, "sil"), Some("Silva & Aegis Prime"));
+    }
+
+    /// Multi-word ranking extends the closest-fit measure as the
+    /// SUM of the per-word fits: exact tokens beat longer tokens
+    /// they prefix, word by word.
+    #[test]
+    fn multi_word_ranking_sums_per_word_fit() {
+        let names = ["Axi A23", "Axi A2"];
+        assert_eq!(best_match(&names, "axi a2"), Some("Axi A2"),
+            "fit 0+0 beats 0+1");
+        let names = ["Meso C11", "Meso C1"];
+        assert_eq!(best_match(&names, "meso c1"), Some("Meso C1"),
+            "fit 0+0 beats 0+1");
+        let names = ["Axi A2", "Meso A2"];
+        assert_eq!(best_match(&names, "a2"), Some("Axi A2"),
+            "single-word ranking unchanged: shorter name on equal fit");
     }
 
     /// "Prime" is excluded from the token set, so it matches
@@ -411,7 +474,8 @@ mod tests {
     fn client_script_mirrors_the_matcher() {
         let js = client_script();
         assert!(js.contains(&format!("var MINQ = {MIN_QUERY_CHARS};")), "{js}");
-        assert!(js.contains("indexOf(q) === 0"), "token-prefix test: {js}");
+        assert!(js.contains("split(/\\s+/)"), "per-word split: {js}");
+        assert!(js.contains("indexOf(w) === 0"), "per-word token-prefix test: {js}");
         assert!(js.contains("'/search-index'"), "prefetch route: {js}");
         assert!(js.contains("'/unverified'"), "the ⍻ toggle path: {js}");
         assert!(js.contains("'Escape'"), "esc closes: {js}");
