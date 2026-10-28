@@ -473,6 +473,10 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     // __frackerResync the same way, so a generation push that
     // swaps in a fresh credit beacon fires the toast + chime.
     h.push_str(TOAST_JS);
+    h.push('\n');
+    // The pack chime script (fifty-third pass): same chain,
+    // keyed on the pack beacon — chime only, never a toast.
+    h.push_str(PACK_CHIME_JS);
     h.push_str("</script>\n</div>\n</body>\n</html>\n");
     h
 }
@@ -597,6 +601,66 @@ const TOAST_JS: &str = r#"
 // ---------------------------------------------------------------------------
 // Fragments (forty-first pass): the served page's swap units
 // ---------------------------------------------------------------------------
+
+/// The pack chime script (fifty-third pass). The newest
+/// pack_open rides the Log fragment as `#pack-beacon`; this
+/// script chains onto `__frackerResync` like the toast's,
+/// and also checks once at load. A pack chimes ONCE per
+/// event: seen ids persist in localStorage (its own key,
+/// capped, separate from the toast's — a pack is not a
+/// crack and the two must not suppress each other). At
+/// first sight only a pack under ~30 s old chimes — an
+/// older unseen one is marked seen silently; on a live
+/// swap an unseen beacon is by construction the pack that
+/// just landed. The chime is the shared `#credit-chime`
+/// element at the toast's softened volume (0.4); the same
+/// sticky-activation reality applies and a refusal is
+/// swallowed silently. NO toast is shown for packs.
+const PACK_CHIME_JS: &str = r#"
+(function () {
+  var SEEN_KEY = "fracker.packChimeSeen";
+  var seenList = function () {
+    try { return JSON.parse(localStorage.getItem(SEEN_KEY) || "[]"); } catch (e) { return []; }
+  };
+  var markSeen = function (id) {
+    var s = seenList();
+    if (s.indexOf(id) < 0) { s.push(id); }
+    while (s.length > 20) { s.shift(); }
+    try { localStorage.setItem(SEEN_KEY, JSON.stringify(s)); } catch (e) {}
+  };
+  var checkedOnce = false;
+  var checkBeacon = function () {
+    var first = !checkedOnce;
+    checkedOnce = true;
+    var b = document.getElementById("pack-beacon");
+    if (!b) { return; }
+    var id = b.getAttribute("data-id");
+    if (!id || seenList().indexOf(id) >= 0) { return; }
+    var age = Date.now() / 1000 - parseFloat(b.getAttribute("data-ts") || "0");
+    markSeen(id);
+    if (first && !(age < 30)) { return; }
+    var chime = document.getElementById("credit-chime");
+    if (chime) {
+      try {
+        chime.volume = 0.4;
+        chime.currentTime = 0;
+        var p = chime.play();
+        if (p && p.catch) { p.catch(function () {}); }
+      } catch (e) {}
+    }
+  };
+  var prevResync = window.__frackerResync;
+  window.__frackerResync = function () {
+    if (prevResync) { prevResync(); }
+    checkBeacon();
+  };
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", checkBeacon);
+  } else {
+    checkBeacon();
+  }
+})();
+"#;
 
 /// The page's fragment ids, in document order. The loopback server
 /// diffs these between generations and the page script swaps only
@@ -1857,7 +1921,7 @@ fn log_html(ctx: &RenderContext<'_>) -> String {
     h.push_str(&frag_open("p5"));
     h.push_str("<section class=\"panel\">\n<h2>Log</h2>\n");
     if ctx.events.is_empty() {
-        h.push_str("<p class=\"mut sm\">No events yet. Detection credits, alert completions, and missed cracks will appear here.</p>\n");
+        h.push_str("<p class=\"mut sm\">No events yet. Detection credits, alert completions, missed cracks, and pack opens will appear here.</p>\n");
     } else {
         for ev in ctx.events.iter().rev() {
             h.push_str(&format!(
@@ -1888,6 +1952,23 @@ fn log_html(ctx: &RenderContext<'_>) -> String {
             esc(credit.part.as_deref().unwrap_or("")),
             esc(&icon),
             esc(&initial.to_string()),
+            epoch,
+        ));
+    }
+    // The pack beacon (fifty-third pass): the newest
+    // pack_open rides the same fragment, keyed by its event
+    // identity, and the pack script below plays the chime
+    // for it — chime only, NO toast (Seth's criteria). It is
+    // a separate beacon from the credit one so a pack credit
+    // (a relic credit, not a part credit) never toasts.
+    if let Some(pack) = crate::events::latest_pack_open(ctx.events) {
+        let names = pack.names.clone().unwrap_or_default();
+        let epoch = chrono::DateTime::parse_from_rfc3339(&pack.ts)
+            .map(|t| t.timestamp())
+            .unwrap_or(0);
+        h.push_str(&format!(
+            "<span id=\"pack-beacon\" hidden data-id=\"{}\" data-ts=\"{}\"></span>\n",
+            esc(&format!("{}|{}", pack.ts, names.join(","))),
             epoch,
         ));
     }
@@ -2550,6 +2631,56 @@ mod tests {
         assert!(html.contains("age < 30"), "first-sight freshness window");
     }
 
+    /// Fifty-third pass: the pack pair renders in the Log,
+    /// the newest pack_open rides the fragment as the pack
+    /// beacon (keyed by the event identity), and the pack
+    /// chime script ships — with its own seen-key and no
+    /// toast machinery of its own.
+    #[test]
+    fn log_tab_renders_pack_events_with_pack_beacon() {
+        let t = crate::tuning::Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let mut ctx = empty_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
+        let events = vec![
+            crate::events::EventRecord::pack_miss(
+                "2026-10-28T05:03:00Z".into(),
+                "unresolved slot 2".into(),
+            ),
+            crate::events::EventRecord::pack_open(
+                "2026-10-28T05:04:00Z".into(),
+                vec!["Axi P10".into(), "Meso K9".into(), "Lith S19".into()],
+            ),
+        ];
+        ctx.events = &events;
+        let html = render_plan(&Plan::default(), &ctx);
+        let p5 = page(&html, "p5");
+        let open_line = "Relic pack opened — Axi P10, Meso K9, Lith S19";
+        let miss_line = "Relic pack — not proven (unresolved slot 2)";
+        let o = p5.find(open_line).expect("pack_open line");
+        let m = p5.find(miss_line).expect("pack_miss line");
+        assert!(o < m, "newest-first: the open above the miss");
+        assert!(p5.contains("id=\"pack-beacon\""), "pack beacon: {p5}");
+        assert!(
+            p5.contains("data-id=\"2026-10-28T05:04:00Z|Axi P10,Meso K9,Lith S19\""),
+            "beacon keyed by the event identity: {p5}"
+        );
+        // No credit in this log: no credit beacon, so a pack
+        // can never fire the acquisition toast.
+        assert!(
+            !p5.contains("<span id=\"credit-beacon\""),
+            "no credit beacon for packs: {p5}"
+        );
+        // The pack chime script: its own seen-key, the shared
+        // chime element, the same freshness window.
+        assert!(html.contains("fracker.packChimeSeen"), "pack seen ids persist");
+        assert!(html.contains("getElementById(\"pack-beacon\")"), "pack script reads its beacon");
+        assert!(html.contains("age < 30"), "pack first-sight freshness window");
+    }
+
     /// Fifty-first pass: a fresh install's Log tab is a sane
     /// empty state, and no credit means no beacon (the toast
     /// can never fire).
@@ -2568,6 +2699,10 @@ mod tests {
         assert!(
             !html.contains("<span id=\"credit-beacon\""),
             "no credit, no beacon element"
+        );
+        assert!(
+            !html.contains("<span id=\"pack-beacon\""),
+            "no pack_open, no pack beacon element"
         );
         assert!(html.contains("id=\"toast\""), "the shell still renders");
     }

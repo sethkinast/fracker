@@ -59,6 +59,7 @@ async fn headless_resident_reports_on_new_ee_log_without_manual_trigger() {
         serve_port: 0,
         pop_on_session_start: false,
         reward_detect: false,
+        pack_detect: false,
     };
     let shutdown = Shutdown::new();
     let sd = shutdown.clone();
@@ -112,6 +113,7 @@ async fn resident_starts_and_stops_cleanly_with_no_log_at_all() {
         serve_port: 0,
         pop_on_session_start: false,
         reward_detect: false,
+        pack_detect: false,
     };
     let shutdown = Shutdown::new();
     let sd = shutdown.clone();
@@ -140,6 +142,7 @@ async fn tray_quit_command_exits_the_resident_loop() {
         serve_port: 0,
         pop_on_session_start: false,
         reward_detect: false,
+        pack_detect: false,
     };
     let shutdown = Shutdown::new();
     let status = Arc::new(Mutex::new(TrayStatus::default()));
@@ -262,6 +265,7 @@ async fn headless_resident_strikes_log_completed_alerts_in_the_report() {
         serve_port: 0,
         pop_on_session_start: false,
         reward_detect: false,
+        pack_detect: false,
     };
     let shutdown = Shutdown::new();
     let sd = shutdown.clone();
@@ -359,6 +363,7 @@ async fn resident_serves_the_plan_over_loopback_and_persists_ticks() {
         serve_port: 0,
         pop_on_session_start: false,
         reward_detect: false,
+        pack_detect: false,
     };
     let shutdown = Shutdown::new();
     let sd = shutdown.clone();

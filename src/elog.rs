@@ -124,6 +124,14 @@ pub enum Event {
     /// arm — while the gets-reward line fires exactly once per true
     /// screen, for his id alone, host or client.
     RelicReward { roll: String },
+    /// `ThemedDetailedPurchaseDialog.lua: PopulateInfo-><path>`
+    /// whose path contains `/BoosterPacks/` (fifty-third
+    /// pass): a relic pack purchase dialog opened — the arm
+    /// signal for pack-open detection. Any pack source
+    /// classifies (syndicate, Teshin, market — Seth's scope
+    /// ruling); a PopulateInfo for anything else does not.
+    /// Carries the item path (diagnostic only).
+    PackPurchase { path: String },
     /// Message contains `DVRCAftermath`.
     RelicCrack,
     /// `ThemedProjectionManager.lua: PopulateInventoryGrid`.
@@ -197,6 +205,15 @@ fn classify_inner(line: &LogLine, account_id: &str) -> Option<Event> {
     }
     if let Some(roll) = gets_reward_roll(msg, account_id) {
         return Some(Event::RelicReward { roll });
+    }
+    if let Some(path) = msg
+        .strip_prefix("ThemedDetailedPurchaseDialog.lua: PopulateInfo->")
+        .map(str::trim)
+        .filter(|p| !p.is_empty() && p.contains("/BoosterPacks/"))
+    {
+        return Some(Event::PackPurchase {
+            path: path.to_owned(),
+        });
     }
     if msg.contains("DVRCAftermath") {
         return Some(Event::RelicCrack);
@@ -841,6 +858,48 @@ mod tests {
             classify_with_account(&client, "5420fba23846322173707618"),
             Some(Event::RelicReward { .. })
         ));
+    }
+
+    #[test]
+    fn pack_purchase_dialog_arms_on_any_booster_packs_path() {
+        // Pass 53: Seth's live shape (2026-10-28) — the
+        // syndicate relic pack's purchase dialog.
+        let syndicate = real(
+            "Script",
+            "ThemedDetailedPurchaseDialog.lua: PopulateInfo->/Lotus/StoreItems/Types/BoosterPacks/RandomSyndicateProjectionPack",
+        );
+        assert_eq!(
+            classify(&syndicate),
+            Some(Event::PackPurchase {
+                path: "/Lotus/StoreItems/Types/BoosterPacks/RandomSyndicateProjectionPack"
+                    .to_owned()
+            })
+        );
+        // Any BoosterPacks source arms (Seth's scope ruling),
+        // not just the syndicate path.
+        let other = real(
+            "Script",
+            "ThemedDetailedPurchaseDialog.lua: PopulateInfo->/Lotus/StoreItems/Types/BoosterPacks/WhateverPack",
+        );
+        assert!(matches!(
+            classify(&other),
+            Some(Event::PackPurchase { .. })
+        ));
+        // A PopulateInfo for a non-pack item never arms.
+        let booster = real(
+            "Script",
+            "ThemedDetailedPurchaseDialog.lua: PopulateInfo->/Lotus/StoreItems/Types/Boosters/AffinityBooster",
+        );
+        assert_eq!(classify(&booster), None);
+        // A BoosterPacks path on a different dialog line
+        // shape is not the arm.
+        let other_dialog = real(
+            "Script",
+            "SomeOtherDialog.lua: PopulateInfo->/Lotus/StoreItems/Types/BoosterPacks/RandomSyndicateProjectionPack",
+        );
+        assert_eq!(classify(&other_dialog), None);
+        // Never a mission-end (no regen rides the arm).
+        assert!(!Event::PackPurchase { path: "/x".into() }.is_mission_end());
     }
 
     #[test]
