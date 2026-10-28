@@ -3000,3 +3000,84 @@ it refines the brief where they disagree. For the next worker pass.
     blocks, "cached (Nm)" stamps between regens, "live"
     stamps at most every 15 minutes, and daily caps
     lagging up to 15 minutes by design.
+121. **warframestat.us in front of DE + 403/429
+    lockfile alert + UA bump (pass 55, shipped as
+    v0.5.50).** Seth's criteria of 2026-10-28. (a)
+    PROXY: worldstate resolution tries
+    `api.warframestat.us/pc` first — fresh 5-minute
+    disk cache (mtime AND payload timestamp fresh),
+    else a live attempt serving only on a fresh
+    payload timestamp (age ≤ 15 minutes, Seth's
+    starting value), else the DE path exactly as in
+    pass 54; a stale proxy cache is never served, and
+    any proxy failure (network, non-200, unparseable,
+    missing/stale timestamp) falls through without
+    writing the DE lock; worst case 12 proxy
+    requests/hour. Profile stays DE-direct on the
+    pass-54 15-minute TTL. (b) MAPPING: WFCD /pc JSON
+    is the parsed/normalized form, not DE's raw
+    shape — `from_wfcd_json` maps every consumed
+    section witnessed in a live sample captured
+    2026-10-28 and committed as
+    `fixtures/wfcd-pc-sample.json` (33 fissures incl.
+    Omnia/Requiem, storms, Steel Path; 3 alerts; 3
+    sortie variants; 3 archon missions; nightwave
+    season 18; Baro; Varzia 22 items); `sol_node`
+    stays empty (WFCD nodeKey is a display name, and
+    the matcher skips its node check when empty);
+    strict per-section bars mean a degraded payload
+    is `Err` and falls through to DE, never rendered;
+    a proxy payload passing the timestamp bar but
+    failing section validation likewise falls through
+    at the report layer with the stamp re-labelled to
+    DE. (c) LOCK: a DE 403/429 on either endpoint
+    writes `<cache_dir>/de-block.lock` (endpoint,
+    status, observed unix seconds); the DE fetch
+    functions are the single choke point — under a
+    live lock they make NO network request, serving
+    any-age cache as CacheFallback or the existing
+    failure rendering; one lock blocks BOTH endpoints;
+    a lock older than 24 hours (or corrupt) is
+    ignored AND deleted on sight; profile 409 still
+    errors outright. (d) ALERT: an inline header
+    alert (endpoint + status + observed time + what
+    it means + clear button) renders in the same
+    generation that observed the block and on every
+    later generation while the lock holds; `POST
+    /clear-de-lock` deletes the lockfile and fires a
+    Manual regen (clearing removes the block, not the
+    TTL caches); the script is inert on file://
+    pages. (e) UA: `fracker/0.5.50 (warframe session
+    planner)`, derived from `CARGO_PKG_VERSION` at
+    build time on the shared client. CORRECTIONS
+    during the pass: the archon mapping was fixed
+    from `variants` to `missions` (the sample proves
+    WFCD populates `missions` there — the gate test
+    caught the mis-mapping pre-ship), and
+    `read_de_lock` was fixed so corrupt locks are
+    actually deleted on sight as its doc comment
+    promises. GATES: WFCD fixture maps with exact
+    counts + refusal cases; stale (20-minute)
+    payload, non-200, unparseable, missing-timestamp,
+    and connection-refused proxy attempts each fall
+    through to a stubbed DE path with no lock written;
+    fresh proxy cache served with zero requests;
+    stale proxy cache never served; DE 403 and
+    profile 429 each write the lock and zero further
+    DE requests occur while held (incl. cross-
+    endpoint); 24h-old and corrupt locks ignored and
+    removed; clear route deletes + fires regen + 404
+    on second clear; 409 errors outright without a
+    lock; all five stamp states render distinctly; UA
+    carries the package version. Suite 453 passed /
+    0 failed (lib 425, +16 over v0.5.49; golden 15;
+    packaging 7; resident 5; tray_quit 1); `cargo
+    build --release --locked --offline` green
+    pre-tag, lock diff = version line only. Details:
+    docs/fifty-fifth-pass.md. Live verification owed:
+    Seth plays on this build and confirms proxy-live
+    stamps in normal play, DE stamps on proxy failure
+    or staleness, the header alert + clear button on a
+    real block (hopefully never), no further DE
+    blocks, and the installed app reporting 0.5.50
+    (superseding the pass-54 0.5.49 install check).

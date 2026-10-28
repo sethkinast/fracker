@@ -25,6 +25,14 @@ use crate::tuning::Tuning;
 // Render context
 // ---------------------------------------------------------------------------
 
+/// A live DE block lock, for the plan page header alert
+/// (fifty-fifth pass). `observed` is pre-formatted UTC text.
+pub struct DeLockAlert {
+    pub endpoint: String,
+    pub status: u16,
+    pub observed: String,
+}
+
 pub struct RenderContext<'a> {
     pub world: &'a WorldState,
     pub generated_label: String,
@@ -35,6 +43,9 @@ pub struct RenderContext<'a> {
     /// e.g. "backlog 63 primes · profile live (MR30)".
     pub targets_status: String,
     pub world_status: String,
+    /// Live DE block lock, if any (fifty-fifth pass): renders the
+    /// header alert. `None` means DE traffic is not paused.
+    pub de_lock: Option<DeLockAlert>,
     /// Weekly item id -> completion label proven by the log.
     pub weekly_done: &'a HashMap<String, String>,
     /// Plan/challenge ids the log proves complete (struck-through).
@@ -398,6 +409,10 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     }
     h.push_str("<style>\n");
     h.push_str(CSS);
+    // The DE block alert (fifty-fifth pass): loud by design — dark
+    // red panel, bright border — so a paused DE feed is visible at
+    // a glance, not buried in a status stamp.
+    h.push_str("\n.de-lock-alert{background:#5a1a1a;border:2px solid #e5484d;color:#fff;padding:8px 12px;margin:8px 0;font-weight:600}\n.de-lock-alert button{margin-left:12px}\n");
     h.push_str("\n</style>\n</head>\n");
     // The in-game day the tick store is keyed by (ninth pass §2): the plan
     // date, read by the client + the loopback server when applying ticks.
@@ -477,6 +492,9 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     // The pack chime script (fifty-third pass): same chain,
     // keyed on the pack beacon — chime only, never a toast.
     h.push_str(PACK_CHIME_JS);
+    h.push('\n');
+    // The DE block clear button (fifty-fifth pass).
+    h.push_str(DE_LOCK_JS);
     h.push_str("</script>\n</div>\n</body>\n</html>\n");
     h
 }
@@ -771,10 +789,44 @@ fn header_html(plan: &Plan, ctx: &RenderContext<'_>) -> String {
         esc(&ctx.world_status),
         esc(&ctx.targets_status),
     ));
+    // The DE block alert (fifty-fifth pass): inside the header
+    // fragment, so fragment pushes update it. It renders in the
+    // same generation that observed the block and on every later
+    // generation while the lock holds; the clear button POSTs to
+    // the resident's clear route (see DE_LOCK_JS).
+    if let Some(lock) = &ctx.de_lock {
+        h.push_str(&format!(
+            "<div class=\"de-lock-alert\" id=\"de-lock-alert\">DE requests paused: HTTP {} from {} at {} &mdash; the page is serving cache/proxy data until this clears (or 24h pass). <button type=\"button\" id=\"de-lock-clear\">Clear block</button></div>\n",
+            lock.status,
+            esc(&lock.endpoint),
+            esc(&lock.observed),
+        ));
+    }
     h.push_str(FRAG_CLOSE);
     h.push_str("</header>\n");
     h
 }
+
+/// The DE block clear button's script (fifty-fifth pass): POSTs to
+/// the resident's clear route, then hides the alert. The next
+/// regeneration re-renders the header without it (and resumes DE
+/// fetches, subject to the TTL caches). On a file:// page there is
+/// no server, so a failed POST simply leaves the alert in place.
+const DE_LOCK_JS: &str = r#"(function () {
+  var btn = document.getElementById('de-lock-clear');
+  if (!btn) { return; }
+  btn.addEventListener('click', function () {
+    try {
+      fetch('/clear-de-lock', { method: 'POST' }).then(function (r) {
+        if (r.ok) {
+          var el = document.getElementById('de-lock-alert');
+          if (el) { el.style.display = 'none'; }
+        }
+      });
+    } catch (e) {}
+  });
+})();
+"#;
 
 /// One-line status countdown for a world-state expiry, relative to the
 /// plan's own timestamp ("in 2d", "in 5h", "in 25m").
@@ -2320,6 +2372,7 @@ mod tests {
             generation: "test-generation".to_owned(),
             targets_status: "backlog 63 primes · profile live (MR30)".to_owned(),
             world_status: "fixture".to_owned(),
+            de_lock: None,
             weekly_done: weekly,
             proven_done: proven,
             mastery_rank: Some(30),
@@ -4142,5 +4195,40 @@ mod tests {
         let cats: HashMap<String, Vec<String>> = HashMap::new();
         let ctx = empty_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
         assert_eq!(search_index_html(&Plan::default(), &ctx), "");
+    }
+
+    /// The DE block alert (fifty-fifth pass): present with endpoint,
+    /// status, observed time, and the clear button when a lock holds;
+    /// absent when it does not.
+    #[test]
+    fn de_lock_alert_renders_only_while_a_lock_holds() {
+        let t = Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let mut ctx = empty_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
+        let plain = render_plan(&Plan::default(), &ctx);
+        // The CSS rule and clear script always mention the id; the
+        // alert DIV itself must be absent without a lock.
+        assert!(
+            !plain.contains("class=\"de-lock-alert\""),
+            "no lock, no alert div"
+        );
+        ctx.de_lock = Some(DeLockAlert {
+            endpoint: "profile".to_owned(),
+            status: 429,
+            observed: "2026-10-28 20:30 UTC".to_owned(),
+        });
+        let alerted = render_plan(&Plan::default(), &ctx);
+        assert!(alerted.contains("id=\"de-lock-alert\""), "alert div");
+        assert!(alerted.contains("HTTP 429 from profile"), "status + endpoint");
+        assert!(alerted.contains("2026-10-28 20:30 UTC"), "observed time");
+        assert!(alerted.contains("id=\"de-lock-clear\""), "clear button");
+        assert!(
+            alerted.contains("/clear-de-lock"),
+            "the clear script posts to the clear route"
+        );
     }
 }

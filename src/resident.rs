@@ -225,6 +225,19 @@ pub async fn run(
             }),
         ))
     };
+    // Fifty-fifth pass: the DE block clear route. The lockfile lives
+    // in the fetch cache dir (the fetch plumbing already threads
+    // it); clearing schedules the same Manual regen as the
+    // unverified toggle, so the header re-renders without the alert.
+    let de_lock_clear = {
+        let tx = trigger_tx.clone();
+        Arc::new(server::DeLockClear::new(
+            crate::fetch::de_lock_path(&opts.report.cache_dir),
+            Arc::new(move || {
+                let _ = tx.send(Trigger::Manual);
+            }),
+        ))
+    };
     let plan_server = match server::serve(
         opts.serve_port,
         opts.report.out.clone(),
@@ -232,6 +245,7 @@ pub async fn run(
         tab_path,
         tick_store.clone(),
         Some(unverified_toggle),
+        Some(de_lock_clear),
     ) {
         Ok(s) => {
             println!("resident: serving the plan at {}", s.url());

@@ -182,43 +182,123 @@ pub async fn generate(
         }
     };
 
-    // 1. World state: DE is the ONLY source (addendum #51). No fallback
-    // chain and no silent substitution: a failed fetch renders as
-    // unavailable; the disk cache may serve only as an explicitly-labeled
-    // stale view. A TTL hit (addendum #120) renders as "cached" with
-    // its age — never STALE, which stays reserved for the failure
-    // path — and the offline fixture renders as STALE, as before.
+    // 1. World state (fifty-fifth pass): warframestat.us/pc is
+    // tried first, DE second — DE is no longer the ONLY source
+    // (addendum #51 superseded for the fetch order, not for the
+    // no-silent-substitution rule). A failed fetch renders as
+    // unavailable; the disk cache may serve only as an
+    // explicitly-labeled stale view. TTL hits render as "cached"
+    // with their age — never STALE, which stays reserved for the
+    // failure path — and the offline fixture renders as STALE,
+    // as before. The stamp names the source, so proxy flakiness
+    // is visible on the page, not hidden.
     let decodes = model::Decodes::load(&cfg.data_dir)?;
-    let (world_text, world_source) = match &client {
-        Some(client) => match fetch::fetch_worldstate(client, &cfg.cache_dir).await {
-            Ok(fetched) => (
-                fetched.value,
-                match fetched.status {
-                    fetch::FetchStatus::Fresh => model::WorldstateSource::Live,
-                    fetch::FetchStatus::TtlCache { age } => {
+    let (mut world_text, mut world_source, world_origin) = match &client {
+        Some(client) => match fetch::fetch_worldstate_resolved(client, &cfg.cache_dir).await {
+            Ok(resolved) => (
+                resolved.text,
+                match (resolved.origin, resolved.status) {
+                    (fetch::WorldstateOrigin::Wfs, fetch::FetchStatus::Fresh) => {
+                        model::WorldstateSource::WfsLive
+                    }
+                    (fetch::WorldstateOrigin::Wfs, fetch::FetchStatus::TtlCache { age }) => {
+                        model::WorldstateSource::WfsCache {
+                            age_mins: age.as_secs() / 60,
+                        }
+                    }
+                    (_, fetch::FetchStatus::Fresh) => model::WorldstateSource::Live,
+                    (_, fetch::FetchStatus::TtlCache { age }) => {
                         model::WorldstateSource::TtlCache {
                             age_mins: age.as_secs() / 60,
                         }
                     }
                     _ => model::WorldstateSource::Fallback,
                 },
+                resolved.origin,
             ),
             Err(e) => {
                 endpoint_failures.push(format!("worldstate: {e}"));
-                (String::new(), model::WorldstateSource::Fallback)
+                (
+                    String::new(),
+                    model::WorldstateSource::Fallback,
+                    fetch::WorldstateOrigin::De,
+                )
             }
         },
         None => {
             let path = cfg.fixtures.join("worldstate.json");
             let text = std::fs::read_to_string(&path)
                 .map_err(|e| format!("fixture worldstate {}: {e}", path.display()))?;
-            (text, model::WorldstateSource::Fallback)
+            (
+                text,
+                model::WorldstateSource::Fallback,
+                fetch::WorldstateOrigin::De,
+            )
         }
     };
     let world = if world_text.trim().is_empty() {
         model::WorldState::default()
     } else {
-        model::WorldState::from_de_json(&world_text, &decodes)?
+        match world_origin {
+            fetch::WorldstateOrigin::Wfs => {
+                match model::WorldState::from_wfcd_json(&world_text) {
+                    Ok(w) => w,
+                    Err(e) => {
+                        // A proxy payload that passes the timestamp
+                        // bar but fails section validation is a proxy
+                        // failure, not a report failure: fall through
+                        // to DE exactly as the fetch layer does for
+                        // unparseable payloads, and re-label the
+                        // stamp to the DE source that actually served.
+                        endpoint_failures
+                            .push(format!("worldstate (WFCD parse): {e}"));
+                        let (de_text, de_source) = match &client {
+                            Some(client) => {
+                                match fetch::fetch_worldstate(client, &cfg.cache_dir).await
+                                {
+                                    Ok(fetched) => (
+                                        fetched.value,
+                                        match fetched.status {
+                                            fetch::FetchStatus::Fresh => {
+                                                model::WorldstateSource::Live
+                                            }
+                                            fetch::FetchStatus::TtlCache { age } => {
+                                                model::WorldstateSource::TtlCache {
+                                                    age_mins: age.as_secs() / 60,
+                                                }
+                                            }
+                                            _ => model::WorldstateSource::Fallback,
+                                        },
+                                    ),
+                                    Err(e2) => {
+                                        endpoint_failures
+                                            .push(format!("worldstate: {e2}"));
+                                        (
+                                            String::new(),
+                                            model::WorldstateSource::Fallback,
+                                        )
+                                    }
+                                }
+                            }
+                            None => (
+                                String::new(),
+                                model::WorldstateSource::Fallback,
+                            ),
+                        };
+                        world_text = de_text;
+                        world_source = de_source;
+                        if world_text.trim().is_empty() {
+                            model::WorldState::default()
+                        } else {
+                            model::WorldState::from_de_json(&world_text, &decodes)?
+                        }
+                    }
+                }
+            }
+            fetch::WorldstateOrigin::De => {
+                model::WorldState::from_de_json(&world_text, &decodes)?
+            }
+        }
     };
     if !world.decode_gaps.is_empty() {
         eprintln!(
@@ -409,10 +489,26 @@ pub async fn generate(
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     let events = crate::events::load(&events_dir);
+    // Fifty-fifth pass: the DE block lock, read AFTER both DE
+    // fetches so a block observed by this very generation already
+    // renders in its header alert. A pre-existing lock gated the
+    // fetches above; a fresh one is equally visible here. Reading
+    // also deletes an expired lock on sight (fetch::read_de_lock).
+    let de_lock = fetch::read_de_lock(&cfg.cache_dir, std::time::SystemTime::now()).map(|lock| {
+        let observed = chrono::DateTime::<chrono::Utc>::from(lock.observed)
+            .format("%Y-%m-%d %H:%M UTC")
+            .to_string();
+        render::DeLockAlert {
+            endpoint: lock.endpoint,
+            status: lock.status,
+            observed,
+        }
+    });
     let ctx = render::RenderContext {
         world: &world,
         generated_label: now.format("%Y-%m-%d %H:%M UTC").to_string(),
         generation: generation.clone(),
+        de_lock,
         targets_status: format!(
             "backlog {} primes · profile {}",
             backlog.primes.unmastered.len(),
