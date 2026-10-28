@@ -412,6 +412,7 @@ fn golden_page_shows_pass4_sections_and_pool_bars() {
         pack: None,
         tuning: &tuning,
         search: None,
+        events: &[],
     };
     let html = fracker::render::render_plan(&g.plan, &ctx);
     // Event section live with countdowns; gift section hidden.

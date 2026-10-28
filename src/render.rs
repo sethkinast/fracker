@@ -58,6 +58,13 @@ pub struct RenderContext<'a> {
     /// the plan's own truth. `None` in tests that do not exercise
     /// the overlay (the index renders empty).
     pub search: Option<SearchData<'a>>,
+    /// The core-event log (fifty-first pass): the resident's
+    /// recorded state changes from `events.jsonl`, oldest first.
+    /// The Log tab renders them newest-first, and the newest
+    /// credit rides the Log fragment as the acquisition
+    /// toast's beacon. Empty on a fresh install (and in tests
+    /// that do not exercise the log).
+    pub events: &'a [crate::events::EventRecord],
 }
 
 /// Everything [`search_index_html`] needs beyond the plan itself
@@ -91,16 +98,17 @@ pub enum IconMode {
     Embedded,
 }
 
-/// The four plan tabs as `(radio id, stable slug, label)`. The slug is what
+/// The five plan tabs as `(radio id, stable slug, label)`. The slug is what
 /// the loopback server records and what the real tab links carry, so the
 /// persisted selection survives regenerations and app restarts (thirteenth
 /// pass §2, addendum 46). Slugs are semantic so a future reordering of the
 /// tabs does not change what a remembered selection means.
-pub const TABS: [(&str, &str, &str); 4] = [
+pub const TABS: [(&str, &str, &str); 5] = [
     ("t1", "first-crack", "First Crack"),
     ("t2", "hunt", "Hunt"),
     ("t3", "backlog", "Backlog"),
     ("t4", "routine", "Routine"),
+    ("t5", "log", "Log"),
 ];
 
 /// The radio id for a persisted tab slug (`None` for an unknown slug).
@@ -420,6 +428,7 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     h.push_str(&hunt_html(plan, ctx));
     h.push_str(&backlog_html(plan, ctx));
     h.push_str(&routine_html(ctx));
+    h.push_str(&log_html(ctx));
 
     h.push_str("</main>\n");
 
@@ -430,6 +439,13 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     // /search-index and clones the winning block in (see
     // search_index_html and search::client_script).
     h.push_str(SEARCH_OVERLAY_SHELL);
+
+    // The acquisition toast's shell (fifty-first pass): like
+    // the overlay, outside every fragment — the credit it
+    // celebrates rides the Log fragment as a data beacon and
+    // the toast script below fills this shell in. The chime
+    // element points at the resident's cacheable route.
+    h.push_str(TOAST_SHELL);
 
     // checkbox persistence: the resident's loopback server is the store
     // of record; localStorage remains a progressive cache for file://.
@@ -445,6 +461,11 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     // __frackerResync (defined by the page script above) so a new
     // generation invalidates its prefetched index.
     h.push_str(&crate::search::client_script());
+    h.push('\n');
+    // The toast script (fifty-first pass): chains onto
+    // __frackerResync the same way, so a generation push that
+    // swaps in a fresh credit beacon fires the toast + chime.
+    h.push_str(TOAST_JS);
     h.push_str("</script>\n</div>\n</body>\n</html>\n");
     h
 }
@@ -462,6 +483,110 @@ const SEARCH_OVERLAY_SHELL: &str = r#"<div id="search-overlay" hidden>
 </div>
 "#;
 
+/// The acquisition toast's static shell (fifty-first pass,
+/// Seth's visual spec): an empty fixed card — standard blue
+/// panel ground, lighter-blue border, heavy four-sided
+/// shadow; the darker left column is the icon well, the
+/// right column the two text lines. The toast script fills
+/// it from the credit beacon in the Log fragment. The chime
+/// element is served by the resident from the cacheable
+/// /chime.mp3 route (assets/sounds/chime.mp3; Freesound
+/// #398496, CC0 — see docs/fifty-first-pass.md).
+const TOAST_SHELL: &str = r#"<div id="toast" hidden>
+<div class="ticon" id="toast-icon"></div>
+<div class="tbody"><div class="tk">Relic Cracked</div><div class="tp" id="toast-part"></div></div>
+</div>
+<audio id="credit-chime" src="/chime.mp3" preload="auto"></audio>
+"#;
+
+/// The toast script (fifty-first pass). The newest credit
+/// rides the Log fragment as `#credit-beacon` (the fragment
+/// swap is the page's only live channel); this script chains
+/// onto `__frackerResync` like the overlay's, and also checks
+/// once at load. A credit toasts ONCE: seen ids persist in
+/// localStorage (capped). At first sight, only a credit under
+/// ~30 s old toasts — an older unseen credit is marked seen
+/// silently, so re-rendering an old page can never resurrect
+/// it; on a live swap an unseen beacon is by construction
+/// the credit that just landed. Auto-dismiss ~6 s with a
+/// fade; a newer credit replaces the showing one. The chime
+/// plays with the toast at a softened volume (0.4); browsers
+/// gate audio on prior page interaction (sticky activation),
+/// so a refusal is swallowed silently.
+const TOAST_JS: &str = r#"
+(function () {
+  var SEEN_KEY = "fracker.toastSeen";
+  var seenList = function () {
+    try { return JSON.parse(localStorage.getItem(SEEN_KEY) || "[]"); } catch (e) { return []; }
+  };
+  var markSeen = function (id) {
+    var s = seenList();
+    if (s.indexOf(id) < 0) { s.push(id); }
+    while (s.length > 20) { s.shift(); }
+    try { localStorage.setItem(SEEN_KEY, JSON.stringify(s)); } catch (e) {}
+  };
+  var hideTimer = null;
+  var showToast = function (b) {
+    var t = document.getElementById("toast");
+    if (!t) { return; }
+    var icon = document.getElementById("toast-icon");
+    icon.innerHTML = "";
+    var url = b.getAttribute("data-icon");
+    if (url) {
+      var img = document.createElement("img");
+      img.src = url;
+      img.alt = "";
+      icon.appendChild(img);
+    } else {
+      var mono = document.createElement("span");
+      mono.className = "tmono";
+      mono.textContent = b.getAttribute("data-initial") || "?";
+      icon.appendChild(mono);
+    }
+    document.getElementById("toast-part").textContent = b.getAttribute("data-part") || "";
+    t.hidden = false;
+    requestAnimationFrame(function () { t.classList.add("show"); });
+    var chime = document.getElementById("credit-chime");
+    if (chime) {
+      try {
+        chime.volume = 0.4;
+        chime.currentTime = 0;
+        var p = chime.play();
+        if (p && p.catch) { p.catch(function () {}); }
+      } catch (e) {}
+    }
+    if (hideTimer) { clearTimeout(hideTimer); }
+    hideTimer = setTimeout(function () {
+      t.classList.remove("show");
+      setTimeout(function () { t.hidden = true; }, 400);
+    }, 6000);
+  };
+  var checkedOnce = false;
+  var checkBeacon = function () {
+    var first = !checkedOnce;
+    checkedOnce = true;
+    var b = document.getElementById("credit-beacon");
+    if (!b) { return; }
+    var id = b.getAttribute("data-id");
+    if (!id || seenList().indexOf(id) >= 0) { return; }
+    var age = Date.now() / 1000 - parseFloat(b.getAttribute("data-ts") || "0");
+    markSeen(id);
+    if (first && !(age < 30)) { return; }
+    showToast(b);
+  };
+  var prevResync = window.__frackerResync;
+  window.__frackerResync = function () {
+    if (prevResync) { prevResync(); }
+    checkBeacon();
+  };
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", checkBeacon);
+  } else {
+    checkBeacon();
+  }
+})();
+"#;
+
 // ---------------------------------------------------------------------------
 // Fragments (forty-first pass): the served page's swap units
 // ---------------------------------------------------------------------------
@@ -472,8 +597,8 @@ const SEARCH_OVERLAY_SHELL: &str = r#"<div id="search-overlay" hidden>
 /// container) — no navigation, so scroll, focus, the active tab,
 /// and every unchanged panel's `<img>` elements survive a
 /// regeneration. `header` is the `<header class="top">` block; the
-/// rest are the four tab pages.
-pub const FRAGMENT_IDS: [&str; 5] = ["header", "p1", "p2", "p3", "p4"];
+/// rest are the five tab pages.
+pub const FRAGMENT_IDS: [&str; 6] = ["header", "p1", "p2", "p3", "p4", "p5"];
 
 /// The opening marker a fragment's inner HTML starts after. The
 /// markers are inert HTML comments in the served page; they exist
@@ -1709,6 +1834,76 @@ fn cap_html(name: &str, remaining: u32, cap: u32) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Log (p5)
+// ---------------------------------------------------------------------------
+
+/// The Log tab (fifty-first pass, Seth's spec): the core
+/// state changes from `events.jsonl`, newest first, one line
+/// each — a local timestamp and the event in plain words.
+/// The newest credit also rides this fragment as a hidden
+/// beacon (`#credit-beacon`): the fragment swap is the page's
+/// only live channel, so the beacon is how a credit reaches
+/// an already-open page for the acquisition toast.
+fn log_html(ctx: &RenderContext<'_>) -> String {
+    let mut h = String::new();
+    h.push_str("<div class=\"page\" id=\"p5\">\n");
+    h.push_str(&frag_open("p5"));
+    h.push_str("<section class=\"panel\">\n<h2>Log</h2>\n");
+    if ctx.events.is_empty() {
+        h.push_str("<p class=\"mut sm\">No events yet. Detection credits, alert completions, and missed cracks will appear here.</p>\n");
+    } else {
+        for ev in ctx.events.iter().rev() {
+            h.push_str(&format!(
+                "<div class=\"lrow\"><span class=\"lt\">{}</span><span>{}</span></div>\n",
+                local_stamp(&ev.ts),
+                esc(&ev.line()),
+            ));
+        }
+    }
+    if let Some(credit) = crate::events::latest_credit(ctx.events) {
+        let gear = credit.gear.as_deref().unwrap_or("");
+        let icon = if gear.is_empty() {
+            String::new()
+        } else {
+            gear_icon_src(gear, ctx).unwrap_or_default()
+        };
+        let initial = gear.chars().next().unwrap_or('?');
+        let epoch = chrono::DateTime::parse_from_rfc3339(&credit.ts)
+            .map(|t| t.timestamp())
+            .unwrap_or(0);
+        h.push_str(&format!(
+            "<span id=\"credit-beacon\" hidden data-id=\"{}\" data-part=\"{}\" data-icon=\"{}\" data-initial=\"{}\" data-ts=\"{}\"></span>\n",
+            esc(&format!(
+                "{}|{}",
+                credit.ts,
+                credit.part.as_deref().unwrap_or("")
+            )),
+            esc(credit.part.as_deref().unwrap_or("")),
+            esc(&icon),
+            esc(&initial.to_string()),
+            epoch,
+        ));
+    }
+    h.push_str("</section>\n");
+    h.push_str(FRAG_CLOSE);
+    h.push_str("</div>\n");
+    h
+}
+
+/// An event's stored UTC stamp as local page time
+/// ("Oct 28 01:12"). An unparseable stamp degrades to its
+/// own date/time prefix rather than taking the page down.
+fn local_stamp(ts: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(ts) {
+        Ok(t) => t
+            .with_timezone(&chrono::Local)
+            .format("%b %d %H:%M")
+            .to_string(),
+        Err(_) => ts.get(..16).unwrap_or(ts).replace('T', " "),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Art direction (BRIEF §19, twelfth pass §1)
 // ---------------------------------------------------------------------------
 //
@@ -1834,6 +2029,23 @@ label.row{cursor:pointer}
 .srr em{font-style:normal;font-size:15px;letter-spacing:.06em}
 .srr .srneed{color:var(--amb)}
 .srr .srhave{color:var(--gold)}
+/* Log tab + acquisition toast (fifty-first pass). The reference
+   block is unedited, so the fifth tab's display rules live here
+   with the other live-state extensions. */
+#t5:checked~main #p5{display:block}
+#t5:checked~.tabs .tab[data-tab=t5]{color:var(--cy);border-color:var(--cy)}
+.lrow{display:flex;gap:14px;align-items:baseline;padding:7px 0;border-top:1px solid #1c2330;font-size:13px}
+.lrow:first-of-type{border-top:0}
+.lt{color:var(--mut);white-space:nowrap;font-variant-numeric:tabular-nums}
+#toast{position:fixed;right:50px;bottom:50px;z-index:70;display:flex;background:var(--panel);border:1px solid var(--cy);box-shadow:0 0 0 1px rgba(174,227,239,.30),0 0 44px 12px rgba(0,0,0,.78);opacity:0;pointer-events:none;transition:opacity .35s ease}
+#toast[hidden]{display:none}
+#toast.show{opacity:1}
+#toast .ticon{background:#0d1117;padding:18px;display:flex;align-items:center;justify-content:center}
+#toast .ticon img{width:128px;height:128px;object-fit:contain;display:block}
+#toast .tmono{font:700 64px Rajdhani,sans-serif;color:var(--gold)}
+#toast .tbody{padding:20px 28px 20px 24px;display:flex;flex-direction:column;justify-content:center;gap:8px}
+#toast .tk{font:600 15px Rajdhani,sans-serif;letter-spacing:.24em;text-transform:uppercase;color:var(--cy)}
+#toast .tp{font:700 27px Rajdhani,sans-serif;color:var(--tx);white-space:nowrap}
 "#;
 
 const JS: &str = r#"
@@ -2030,6 +2242,7 @@ mod tests {
             pack: None,
             tuning: t,
             search: None,
+            events: &[],
         }
     }
 
@@ -2191,7 +2404,8 @@ mod tests {
         assert_ne!(fragment_hash("x"), fragment_hash("y"));
     }
 
-    /// Twelfth pass §1: four tabs in the reference's order. Thirteenth
+    /// Twelfth pass §1: the tabs in the reference's order (the
+    /// fifth, Log, joined in the fifty-first pass). Thirteenth
     /// pass §2: each is a real `?tab=<slug>` link for server persistence.
     #[test]
     fn four_tabs_render_in_order() {
@@ -2213,7 +2427,7 @@ mod tests {
             last = pos;
         }
         // The reference's radio-driven mechanism, not a JS tab switcher.
-        for id in ["t1", "t2", "t3", "t4"] {
+        for id in ["t1", "t2", "t3", "t4", "t5"] {
             assert!(html.contains(&format!("id=\"{id}\"")), "radio {id}");
         }
         // First Crack is the default; the server re-injects the remembered
@@ -2229,6 +2443,126 @@ mod tests {
             assert_eq!(tab_id_for_slug(slug), Some(id));
         }
         assert_eq!(tab_id_for_slug("nope"), None);
+    }
+
+    /// Fifty-first pass: the Log tab renders the event store
+    /// newest-first in plain words, and the newest credit
+    /// rides the fragment as the toast beacon.
+    #[test]
+    fn log_tab_renders_events_newest_first_with_beacon() {
+        let t = crate::tuning::Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let mut icons: HashMap<String, String> = HashMap::new();
+        icons.insert("Voruna Prime".to_owned(), "voruna-prime.png".to_owned());
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let mut ctx = empty_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
+        // The store's order is oldest-first.
+        let events = vec![
+            crate::events::EventRecord::crack_miss(
+                "2026-10-28T05:00:00Z".into(),
+                "name not proven".into(),
+                Some("Meso C11".into()),
+            ),
+            crate::events::EventRecord::alert_done(
+                "2026-10-28T05:01:00Z".into(),
+                "RoadToTauEvent · SolNode175".into(),
+            ),
+            crate::events::EventRecord::credit(
+                "2026-10-28T05:02:00Z".into(),
+                "Voruna Prime Chassis Blueprint".into(),
+                Some("Voruna Prime".into()),
+            ),
+        ];
+        ctx.events = &events;
+        let html = render_plan(&Plan::default(), &ctx);
+        // The Log tab sits after Routine.
+        let routine_pos = html.find(">Routine</a>").expect("routine tab");
+        let log_pos = html.find(">Log</a>").expect("log tab");
+        assert!(log_pos > routine_pos, "Log renders after Routine");
+        let p5 = page(&html, "p5");
+        // Newest first: credit, then alert, then the miss.
+        let credit_line = "Relic cracked — Voruna Prime Chassis Blueprint";
+        let alert_line = "Alert completed — RoadToTauEvent · SolNode175";
+        let miss_line =
+            "Relic crack — no item detected (name not proven) · roll: Meso C11";
+        let c = p5.find(credit_line).expect("credit line");
+        let a = p5.find(alert_line).expect("alert line");
+        let m = p5.find(miss_line).expect("miss line");
+        assert!(c < a && a < m, "newest-first order in the Log page");
+        assert!(p5.contains("class=\"lt\""), "each line carries a timestamp");
+        // The beacon: the newest credit's identity for the toast.
+        assert!(p5.contains("id=\"credit-beacon\""), "beacon present: {p5}");
+        assert!(
+            p5.contains("data-part=\"Voruna Prime Chassis Blueprint\""),
+            "beacon part: {p5}"
+        );
+        assert!(
+            p5.contains("https://cdn.warframestat.us/img/voruna-prime.png"),
+            "beacon icon is the parent item's: {p5}"
+        );
+        let epoch = chrono::DateTime::parse_from_rfc3339("2026-10-28T05:02:00Z")
+            .unwrap()
+            .timestamp();
+        assert!(
+            p5.contains(&format!("data-ts=\"{epoch}\"")),
+            "beacon epoch: {p5}"
+        );
+        // The toast shell + chime ride the page shell, and the
+        // spec's CSS pins hold.
+        assert!(html.contains("id=\"toast\""), "toast shell");
+        assert!(html.contains("Relic Cracked"), "toast kicker line");
+        assert!(html.contains("id=\"toast-part\""), "toast part line");
+        assert!(
+            html.contains("<audio id=\"credit-chime\" src=\"/chime.mp3\""),
+            "chime element on the resident route"
+        );
+        assert!(
+            html.contains("#toast{position:fixed;right:50px;bottom:50px"),
+            "toast placement (~50px off the corner)"
+        );
+        assert!(
+            html.contains("border:1px solid var(--cy)"),
+            "the lighter-blue border (also the toast's)"
+        );
+        assert!(
+            html.contains("#toast .ticon img{width:128px;height:128px"),
+            "the 128x128 icon"
+        );
+        assert!(
+            html.contains("#t5:checked~main #p5{display:block}"),
+            "the fifth tab's display rule"
+        );
+        // Toast mechanics pins: seen-once persistence, the
+        // softened chime gain, the ~6 s dismiss, the ~30 s
+        // first-sight freshness window.
+        assert!(html.contains("fracker.toastSeen"), "seen ids persist");
+        assert!(html.contains("chime.volume = 0.4"), "softened chime gain");
+        assert!(html.contains("}, 6000);"), "auto-dismiss at ~6 s");
+        assert!(html.contains("age < 30"), "first-sight freshness window");
+    }
+
+    /// Fifty-first pass: a fresh install's Log tab is a sane
+    /// empty state, and no credit means no beacon (the toast
+    /// can never fire).
+    #[test]
+    fn log_tab_empty_state_has_no_beacon() {
+        let t = crate::tuning::Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let ctx = empty_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
+        let html = render_plan(&Plan::default(), &ctx);
+        let p5 = page(&html, "p5");
+        assert!(p5.contains("No events yet"), "empty state: {p5}");
+        assert!(
+            !html.contains("<span id=\"credit-beacon\""),
+            "no credit, no beacon element"
+        );
+        assert!(html.contains("id=\"toast\""), "the shell still renders");
     }
 
     /// Twelfth pass §1: the mock's grids land on the right pages.
@@ -3598,7 +3932,7 @@ mod tests {
         );
         let frags = extract_fragments(&html);
         let ids: Vec<&str> = frags.iter().map(|(id, _)| id.as_str()).collect();
-        assert_eq!(ids, FRAGMENT_IDS, "five fragments, in order");
+        assert_eq!(ids, FRAGMENT_IDS, "six fragments, in order");
         assert!(
             frags[0].1.contains("id=\"search-open\""),
             "the trigger icon is in the header fragment"

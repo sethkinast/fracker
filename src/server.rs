@@ -480,6 +480,13 @@ fn handle(
                 b"websocket upgrade requires Sec-WebSocket-Key",
             ),
         },
+        ("GET", "/chime.mp3") => {
+            // The acquisition toast's chime (fifty-first
+            // pass): an immutable embedded asset, so unlike
+            // every other route it is served cacheable — the
+            // browser fetches it once and keeps it.
+            respond_cached(&mut stream, "200 OK", "audio/mpeg", CHIME_MP3)
+        }
         ("GET", "/health") => respond(&mut stream, "200 OK", "text/plain", b"ok"),
         _ => respond(&mut stream, "404 Not Found", "text/plain", b"not found"),
     }
@@ -901,6 +908,31 @@ fn respond(
 ) -> std::io::Result<()> {
     let head = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes())?;
+    stream.write_all(body)?;
+    stream.flush()
+}
+
+/// The toast chime, embedded like the vendored font
+/// (fifty-first pass). Source: Freesound #398496, "wind
+/// chimes - single 04.wav" by Anthousai, CC0 (attribution
+/// not required; provenance recorded in
+/// docs/fifty-first-pass.md).
+const CHIME_MP3: &[u8] = include_bytes!("../assets/sounds/chime.mp3");
+
+/// [`respond`] with a long immutable cache lifetime, for
+/// embedded assets whose bytes can never change under a
+/// given URL (the chime is the only one).
+fn respond_cached(
+    stream: &mut TcpStream,
+    status: &str,
+    ctype: &str,
+    body: &[u8],
+) -> std::io::Result<()> {
+    let head = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: public, max-age=31536000, immutable\r\nConnection: close\r\n\r\n",
         body.len()
     );
     stream.write_all(head.as_bytes())?;
@@ -1393,6 +1425,51 @@ mod tests {
     }
 
     #[test]
+    fn serve_chime_route_is_cacheable_audio() {
+        // Pass 51: the toast chime is an embedded immutable
+        // asset — 200, audio/mpeg, the full byte count, and a
+        // long cache lifetime (every other route is no-store).
+        let dir = std::env::temp_dir().join(format!(
+            "fracker-server-chime-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let server = serve(
+            0,
+            dir.join("plan.html"),
+            TickStore::file(&dir),
+            TabStore::file(&dir),
+            Arc::new(Mutex::new(TickStore::default())),
+            None,
+        )
+        .expect("server binds");
+        // Byte-level fetch (the body is binary; http_get's
+        // read_to_string cannot carry it).
+        let mut s = TcpStream::connect(("127.0.0.1", server.port())).unwrap();
+        write!(s, "GET /chime.mp3 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").unwrap();
+        let mut raw = Vec::new();
+        s.read_to_end(&mut raw).unwrap();
+        let split = raw
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("head/body split")
+            + 4;
+        let head = String::from_utf8_lossy(&raw[..split]).into_owned();
+        assert!(head.contains("200 OK"), "{head}");
+        assert!(head.contains("audio/mpeg"), "content type: {head}");
+        assert!(
+            head.contains("Cache-Control: public, max-age=31536000, immutable"),
+            "cacheable: {head}"
+        );
+        assert!(
+            head.contains(&format!("Content-Length: {}", CHIME_MP3.len())),
+            "full asset: {head}"
+        );
+        assert_eq!(&raw[split..], CHIME_MP3, "the served bytes are the asset");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn serve_falls_back_off_a_taken_port() {
         // Hold a port, then ask the server for it: it must bind elsewhere.
         let held = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -1581,7 +1658,7 @@ mod tests {
 
     // ---- §41 fragments (forty-first pass) ----
 
-    /// A minimal rendered page: body attributes + the five fragment
+    /// A minimal rendered page: body attributes + the six fragment
     /// markers, parameterised so a test can change one section.
     fn frag_report(generation: &str, p3_note: &str) -> String {
         format!(
@@ -1595,6 +1672,8 @@ mod tests {
              <!--@frag:p3-->\nP3 {p3_note}\
              <!--/@frag-->\
              <!--@frag:p4-->\nP4\
+             <!--/@frag-->\
+             <!--@frag:p5-->\nP5\
              <!--/@frag-->\
              </body></html>"
         )

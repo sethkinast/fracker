@@ -5,6 +5,7 @@ pub mod applog;
 pub mod capture;
 pub mod config;
 pub mod elog;
+pub mod events;
 pub mod fetch;
 pub mod instance;
 pub mod lineread;

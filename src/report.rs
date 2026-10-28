@@ -384,6 +384,17 @@ pub async fn generate(
     // across generations. Item 58 publishes this token to open pages
     // once the page file is in place.
     let generation = next_generation();
+    // The core-event log (fifty-first pass): beside stock.json,
+    // read fresh on every report so the Log tab and the toast
+    // beacon carry the resident's latest state changes. A
+    // missing file (fresh install) is an empty log.
+    let events_dir = cfg
+        .stock_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let events = crate::events::load(&events_dir);
     let ctx = render::RenderContext {
         world: &world,
         generated_label: now.format("%Y-%m-%d %H:%M UTC").to_string(),
@@ -414,6 +425,7 @@ pub async fn generate(
             unverified_parts: &unverified_parts,
             relic_icons: &relic_icons,
         }),
+        events: &events,
     };
     let html = render::render_plan(&plan, &ctx);
 
