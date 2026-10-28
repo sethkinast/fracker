@@ -2792,3 +2792,68 @@ it refines the brief where they disagree. For the next worker pass.
     this build and watches for the toast + chime,
     then checks the Log after a crack, an alert
     completion, and a miss.
+
+118. **Cleanups: icon class table, coverage phrase,
+    pip titles (pass 52, shipped as v0.5.47).** Three
+    queue items Seth closed 2026-10-28. (a) ICON
+    CLASS TABLE: the pass-48 bake (3,204 projection
+    uniqueName -> textureLocation records) collapses
+    to 21 distinct textures — RelicLith/Meso/Neo/Axi
+    A–D (letter = tier: Intact D, Exceptional A,
+    Flawless B, Radiant C), RelicImmortal A–D, one
+    OmegaIsotope pickup icon; every (era, tier)
+    group in the manifest names exactly one texture.
+    New `data/cache/relic-textures.json` (455,373 ->
+    2,579 bytes): `classes[era][tier]` for the six
+    name-eras (Vanguard rows = the Axi locations,
+    Requiem rows = the Immortal ones), `pickup` for
+    the un-tiered GENERIC base items (plain "Lith
+    Relic", "Requiem Relic" — the bare "Requiem"
+    table relic keeps the pickup icon, as shipped),
+    `tierless` per-name rows for NAMED single-variant
+    relics (today only "Requiem Eterna" ->
+    RelicImmortalC). `model::relic_icon_urls` still
+    enumerates item-names bases (tier presence,
+    case-folded keys, dual-keyed Vanguard aliases
+    unchanged) but resolves via the classes: finest
+    tier the base HAS whose (era, tier) row exists,
+    else the tier-less rows; fallback now at class
+    granularity. `load_relic_textures` returns the
+    new `RelicTextureClasses` struct. EQUIVALENCE
+    GATE: the old code's output for the 800 relic
+    names was frozen pre-collapse into
+    fixtures/relic-icon-baseline.json (an independent
+    Python port of the old join reproduced it
+    bit-for-bit, 809 keys / 0 diffs);
+    `relic_icon_urls_match_the_pre_class_table_baseline`
+    asserts all 800 names keep their URLs — 800/800,
+    no exceptions, edge cases (Requiem II/III/IV
+    folding, Vanguard C1/E1/M1/P1, Eterna, bare
+    Requiem) inside the 800. The pass-48 unit gate
+    was re-shaped to class inputs, assertions
+    intact. README refresh step 3 now groups by
+    (era, tier) and requires the one-texture
+    singularity. (b) PHRASE: the one production
+    site (crack-queue row) renders `+N other
+    needed` for `+N also`; count, gating and the
+    pass-44 Need-only universe untouched; render
+    pin + quoting doc comments updated. (c) PIP
+    TITLES: shared `seg_html` emits
+    `title="<part name>"` (esc'd) on every segment;
+    landed on Backlog (the ask), Hunt cards, and
+    First Crack goal cards via the shared renderer;
+    existing exact-string pip pins updated to the
+    titled shape, new pin
+    `pip_titles_name_the_part_exactly` (Seth's
+    "Lavos Prime Neuroptics"; & escapes to &amp;).
+    Gates: suite 420 passed / 0 failed (lib 392,
+    +2 over v0.5.46 — equivalence gate + pip-title
+    pin new, class-join gate replacing the
+    manifest-join gate 1:1; golden 15; packaging 7;
+    resident 5; tray_quit 1);
+    `cargo build --release --locked --offline`
+    green pre-tag, lock diff = version line only.
+    Details: docs/fifty-second-pass.md. Live
+    verification owed: hover a Backlog pip; the
+    queue phrase in the wild; overlay relic headers
+    unchanged.
