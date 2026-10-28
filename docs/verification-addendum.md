@@ -2710,3 +2710,85 @@ it refines the brief where they disagree. For the next worker pass.
     owed: Seth types "axi a2" / "Dual Zoren", watches the
     query line on the first character, and eyeballs a
     live Need row.
+117. **Log tab, acquisition toast, chime (pass 51,
+    shipped as v0.5.46).** Three Seth queue items
+    (2026-10-28 ~00:09-00:19). (a) EVENT STORE
+    (`src/events.rs`): append-only JSON Lines at
+    `events.jsonl` in the data dir beside stock.json,
+    written by the resident at the moment of the state
+    change; the report reads it. Kinds: `credit`
+    (reward detection credited a part; carries `part`
+    + parent `gear` for the toast icon, resolved
+    best-effort from the cached roster), `alert_done`
+    (mission-tracker proof point, armed mission
+    `is_alert()`; `label` = the alert's identity as
+    known at arm time), `crack_miss` (burst resolved
+    to a miss; `reason` is a plain class — `no
+    bordered card` / `no reward screen` / `name not
+    proven` via `reward::miss_reason_class`, plus
+    `no frames captured` / `detection failed` for
+    episodes that never reached the burst; `roll`
+    carries the pass-49 resolved roll name, omitted
+    rather than a raw path when unresolved). `ts` is
+    UTC RFC 3339; unused fields are absent, never
+    null. Cap: most recent 500 records, enforced by
+    the crossing append under one mutex; malformed
+    lines skipped on load; missing file = empty log;
+    append I/O failures swallowed (sidecar
+    discipline). (b) LOG TAB: `TABS` gains
+    ("t5","log","Log") after Routine and
+    `FRAGMENT_IDS` gains `p5` — the fifth content
+    page rides the pass-41 fragment architecture;
+    entries newest-first, local stamp `%b %d %H:%M`
+    + `EventRecord::line()` plain words ("Relic
+    cracked — …", "Alert completed — …", "Relic
+    crack — no item detected (…)"); read-only; fresh
+    install shows an empty state. (c) TOAST: credits
+    only — never manual unverified marks, never the
+    other kinds. The newest credit rides the Log
+    fragment as a hidden `#credit-beacon` (identity
+    `ts|part`, part name, parent-item icon via the
+    standing `gear_icon_src` discipline, epoch);
+    shell + script live outside every fragment. Once
+    per credit: seen ids persist in localStorage
+    (`fracker.toastSeen`, cap 20); a live push toasts
+    an unseen beacon; a fresh load toasts only a
+    credit under ~30 s old and marks older unseen
+    credits seen silently. Auto-dismiss ~6 s with a
+    fade; a newer credit replaces content and
+    restarts the timer. Visual spec as Seth set it:
+    fixed bottom-right at 50 px offsets, `var(--panel)`
+    background, 1 px `var(--cy)` border, heavy
+    four-sided box-shadow (1 px accent ring + 44 px /
+    12 px black blur), darker left column (`#0d1117`,
+    18 px padding) holding the parent item's icon at
+    128x128 (monogram initial fallback when the
+    credit has no parent), right column "Relic
+    Cracked" (15 px, letter-spaced, uppercase,
+    accent) over the part name (700 27 px). (d)
+    CHIME: Freesound #398496, "wind chimes - single
+    04.wav" by Anthousai, **CC0** — copied to
+    `assets/sounds/chime.mp3` (48 kHz stereo, 4.04 s,
+    94,176 bytes), embedded via `include_bytes!`,
+    served at `GET /chime.mp3` as `audio/mpeg` with
+    `Cache-Control: public, max-age=31536000,
+    immutable` (the one cacheable route; all others
+    stay `no-store`); played with the toast at
+    `volume = 0.4`, rejection swallowed. Recorded
+    constraint: browsers gate audio on prior page
+    interaction (sticky activation) — satisfied in
+    practice by Seth's in-session typing/clicking; a
+    credit landing before a fresh page's first
+    interaction toasts silently. Gates: suite 422
+    passed / 0 failed (lib 394; golden 15; packaging
+    7; resident 5; tray_quit 1), +13 over v0.5.45 —
+    events roundtrip/schema/cap/malformed coverage,
+    all three `miss_reason_class` tiers pinned
+    through real `select_burst_pick` outputs, Log
+    render + beacon + spec-point CSS/JS pins, the
+    chime route byte-level. Census/reward gates
+    untouched. Details: docs/fifty-first-pass.md.
+    Live verification owed: Seth cracks a relic on
+    this build and watches for the toast + chime,
+    then checks the Log after a crack, an alert
+    completion, and a miss.
