@@ -48,6 +48,11 @@ grab:
   no pack-classifying frame, or at 60 s total since arm,
   whichever first (Seth: buying happens as a unit —
   unpack screens follow each Yes at sub-second gaps).
+  Session shape (Seth, 2026-10-28, after ship): a
+  purchase unit is at most 6 packs, so one arm yields at
+  most 6 reveal screens. The watch imposes no
+  screen-count limit of its own — the bound is context
+  for the 60 s cap's headroom, not a rule to enforce.
   Arm/disarm lines go to capture.log.
 - **Exactly once per screen-instance**: an instance's
   trio credits once (later agreeing reads are no-ops);
