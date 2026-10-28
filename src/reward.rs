@@ -4,8 +4,9 @@
 //! EE.log cannot name the reward Seth PICKED on the fissure
 //! reward-choice screen — it names only his own relic's roll,
 //! and the other rewards not at all (QUEUE_REVIEW.md, EE-2.log
-//! analysis). But the log timestamps the moment all rewards
-//! exist (`Event::RelicRewardScreen`), and on the choice
+//! analysis). But the log timestamps the moment his reward is
+//! granted (`Event::RelicReward`, the gets-reward line — pass
+//! 49's rekeyed trigger), and on the choice
 //! screen the selected card carries a light frame border. So:
 //! grab a short burst of frames from the already-open stream
 //! (T+8/10/12/14), classify each positively as the reward
@@ -73,6 +74,16 @@ pub const BURST_OFFSETS_SECS: [u64; 8] = [0, 2, 4, 6, 8, 10, 12, 14];
 // Card 1's frame rect was measured directly (its light border
 // is the selection marker): x 605..742, y 315..463. The row is
 // centred, pitch 141 px, cards 137 px wide with ~4 px gaps.
+//
+// Pass 49: with fewer than four squad members the row keeps
+// its card size, top, and CENTRE, so a row of n cards starts
+// (SLOTS - n) * pitch / 2 to the right of ROW_LEFT (measured
+// on Seth's 3-player burst, THREE_PERSON_REWARD_GEOMETRY.md:
+// the production 4-grid scores the bordered card 0.00 there,
+// while the same scorer at the +pitch/2 origin reads it
+// 0.995). The geometry functions take the origin as a slot-
+// unit offset; the 4-grid origin (0.0) path is the original
+// arithmetic, unchanged.
 // ---------------------------------------------------------------------------
 
 /// Left edge of card slot 0, fraction of frame width.
@@ -104,9 +115,24 @@ const BORDER_MARGIN: f32 = 0.30;
 /// (the relic layout's floor: large, clean text).
 const NAME_MIN_SCORE: f32 = 0.80;
 
-/// Pixel rect `(x, y, w, h)` of card `slot` in a `fw`x`fh` frame.
+/// Row origin for a centred row of `cards` cards, as a
+/// slot-unit offset from [`ROW_LEFT`]: each missing card
+/// shifts the row right by half a pitch (pass 49).
+fn row_origin(cards: usize) -> f32 {
+    (SLOTS - cards) as f32 * 0.5
+}
+
+/// Pixel rect `(x, y, w, h)` of card `slot` in a `fw`x`fh` frame
+/// on the full 4-card grid.
 pub fn slot_rect(fw: u32, fh: u32, slot: usize) -> (u32, u32, u32, u32) {
-    let x = ((ROW_LEFT + slot as f32 * CARD_PITCH) * fw as f32).round() as u32;
+    slot_rect_at(fw, fh, 0.0, slot)
+}
+
+/// [`slot_rect`] on a row whose origin is shifted `origin`
+/// slot-units right of [`ROW_LEFT`] (pass 49's centred
+/// fewer-card rows: 0.5 / 1.0 / 1.5 for 3 / 2 / 1 cards).
+pub fn slot_rect_at(fw: u32, fh: u32, origin: f32, slot: usize) -> (u32, u32, u32, u32) {
+    let x = ((ROW_LEFT + (origin + slot as f32) * CARD_PITCH) * fw as f32).round() as u32;
     let y = (ROW_TOP * fh as f32).round() as u32;
     let w = (CARD_W * fw as f32).round() as u32;
     let h = (CARD_H * fh as f32).round() as u32;
@@ -119,7 +145,13 @@ pub fn slot_rect(fw: u32, fh: u32, slot: usize) -> (u32, u32, u32, u32) {
 /// bottom-anchored). Measured text zone on the fixture:
 /// y 420..450 of the 315..451.5 card — fractions 0.70..1.0.
 pub fn name_band_region(fw: u32, fh: u32, slot: usize) -> [f32; 4] {
-    let (x, y, w, h) = slot_rect(fw, fh, slot);
+    name_band_region_at(fw, fh, 0.0, slot)
+}
+
+/// [`name_band_region`] on a row shifted `origin` slot-units
+/// right (pass 49).
+pub fn name_band_region_at(fw: u32, fh: u32, origin: f32, slot: usize) -> [f32; 4] {
+    let (x, y, w, h) = slot_rect_at(fw, fh, origin, slot);
     let fwf = fw as f32;
     let fhf = fh as f32;
     [
@@ -231,13 +263,23 @@ fn border_side(
 /// frame's runner-up reads 0.00; it read 0.14–0.22 under
 /// window-union alone).
 pub fn border_scores(frame: &GrayImage) -> [f32; SLOTS] {
+    border_scores_at(frame, 0.0, SLOTS)
+        .try_into()
+        .expect("the 4-grid geometry scores four slots")
+}
+
+/// Border continuity for `cards` slots on a row shifted
+/// `origin` slot-units right (pass 49). Identical scoring to
+/// [`border_scores`] — same window, same side-line gate —
+/// only the sampled rects move.
+pub fn border_scores_at(frame: &GrayImage, origin: f32, cards: usize) -> Vec<f32> {
     let (fw, fh) = (frame.width, frame.height);
-    let mut out = [0.0f32; SLOTS];
+    let mut out = vec![0.0f32; cards];
     let s = fw as f32 / 1769.0;
     let half = (3.0 * s).round() as i32;
     let offs: Vec<i32> = ((-half)..=half).collect();
-    for slot in 0..SLOTS {
-        let (x, y, w, h) = slot_rect(fw, fh, slot);
+    for slot in 0..cards {
+        let (x, y, w, h) = slot_rect_at(fw, fh, origin, slot);
         let (x0, y0) = (x as i32, y as i32);
         let (x1, y1) = (x0 + w as i32 - 1, y0 + h as i32 - 1);
         let (mut bright, mut total) = (0u32, 0u32);
@@ -263,8 +305,17 @@ pub fn border_scores(frame: &GrayImage) -> [f32; SLOTS] {
 /// the floor or the winner's margin over the runner-up is too
 /// small (ambiguity is a miss, per the design of record).
 pub fn border_winner(scores: &[f32; SLOTS]) -> Option<usize> {
+    border_winner_in(scores)
+}
+
+/// [`border_winner`] over any slot count (pass 49's
+/// fewer-card geometries score 3 / 2 / 1 slots).
+pub fn border_winner_in(scores: &[f32]) -> Option<usize> {
+    if scores.is_empty() {
+        return None;
+    }
     let mut best = 0usize;
-    for i in 1..SLOTS {
+    for i in 1..scores.len() {
         if scores[i] > scores[best] {
             best = i;
         }
@@ -296,7 +347,13 @@ const FIXTURE_AREA: f32 = 1769.0 * 996.0;
 /// Does `slot` hold a card? Structural presence: a dark
 /// panel interior plus real text in the name band.
 pub fn card_present(frame: &GrayImage, slot: usize) -> bool {
-    let (x, y, w, h) = slot_rect(frame.width, frame.height, slot);
+    card_present_at(frame, 0.0, slot)
+}
+
+/// [`card_present`] on a row shifted `origin` slot-units
+/// right (pass 49).
+pub fn card_present_at(frame: &GrayImage, origin: f32, slot: usize) -> bool {
+    let (x, y, w, h) = slot_rect_at(frame.width, frame.height, origin, slot);
     // Panel interior: inset on all sides, above the name band.
     let ix0 = x + (0.06 * w as f32) as u32;
     let iy0 = y + (0.06 * h as f32) as u32;
@@ -314,7 +371,7 @@ pub fn card_present(frame: &GrayImage, slot: usize) -> bool {
         return false;
     }
     // Name-band text: bright glyph pixels.
-    let region = name_band_region(frame.width, frame.height, slot);
+    let region = name_band_region_at(frame.width, frame.height, origin, slot);
     let bx0 = (region[0] * frame.width as f32) as u32;
     let by0 = (region[1] * frame.height as f32) as u32;
     let bx1 = ((region[2] * frame.width as f32) as u32).min(frame.width);
@@ -341,7 +398,19 @@ pub fn card_present(frame: &GrayImage, slot: usize) -> bool {
 /// carry the row; the border and name gates downstream
 /// protect the credit regardless.
 pub fn is_reward_screen(frame: &GrayImage) -> bool {
-    (0..SLOTS).filter(|&s| card_present(frame, s)).count() >= 2
+    is_reward_screen_at(frame, 0.0, SLOTS)
+}
+
+/// [`is_reward_screen`] for a centred row of `cards` cards
+/// (pass 49): at least two present cards — or the lone card
+/// itself when `cards` is 1 (a solo screen has exactly one
+/// card; requiring two would exclude it by construction).
+pub fn is_reward_screen_at(frame: &GrayImage, origin: f32, cards: usize) -> bool {
+    let need = if cards <= 1 { 1 } else { 2 };
+    (0..cards)
+        .filter(|&s| card_present_at(frame, origin, s))
+        .count()
+        >= need
 }
 
 /// Why a grab produced no credit. Every variant is a silent
@@ -350,7 +419,11 @@ pub fn is_reward_screen(frame: &GrayImage) -> bool {
 pub enum Miss {
     /// The frame did not classify as the reward screen.
     NotRewardScreen,
-    /// No card border cleared the floor / margin.
+    /// No card border cleared the floor / margin. The scores
+    /// are the 4-GRID continuities even when pass 49's
+    /// alternate geometries were also tried and missed: the
+    /// miss shape (and the burst logic reading these) is
+    /// unchanged from the 4-card design.
     NoBorderWinner { scores: [f32; SLOTS] },
     /// The bordered card's name reads matched nothing under
     /// the standard discipline — or the two reads held
@@ -377,6 +450,32 @@ impl Miss {
 /// bordered card, OCR its name, match against the roster
 /// parts universe. `Ok` carries the canonical part name to
 /// credit.
+///
+/// The 4-person path runs first and exactly as before
+/// (pass 49). Only when the 4-grid border gate misses are
+/// the centred 3-, 2-, and 1-card geometries tried, in
+/// that order, each under the identical presence, border,
+/// and name gates: a squad-size row is centred, so with
+/// fewer players the cards sit half-pitches right of the
+/// 4-grid and the 4-grid rects straddle card edges. The
+/// first geometry that yields a border winner owns the
+/// frame — its name verdict (credit or refusal) is final,
+/// exactly as a 4-grid winner's is. When no geometry
+/// yields a winner the miss is the 4-grid's own
+/// `NoBorderWinner`, scores unchanged.
+///
+/// One refusal is never overridden: when a geometry DOES
+/// see a border-strength slot (continuity at or above
+/// [`BORDER_FLOOR`]) but no unique winner, the frame is
+/// ambiguous ON THAT GEOMETRY and detection stops — a
+/// shifted geometry must not manufacture a unique winner
+/// by subsetting an ambiguous row (on a 4-person frame
+/// with two bordered cards, the 2-card geometry would see
+/// exactly one of them and "resolve" an ambiguity the
+/// design of record refuses). Genuine fewer-card frames
+/// never trip this: their 4-grid scores are structurally
+/// low (a straddled card contributes at most one gated
+/// side; Seth's real trio frames measure ≤ 0.192).
 pub fn detect_pick(
     engine: &dyn OcrEngine,
     frame: &GrayImage,
@@ -386,9 +485,39 @@ pub fn detect_pick(
         return Err(Miss::NotRewardScreen);
     }
     let scores = border_scores(frame);
-    let Some(slot) = border_winner(&scores) else {
+    if let Some(slot) = border_winner(&scores) {
+        let region = name_band_region(frame.width, frame.height, slot);
+        return read_bordered_name(engine, frame, parts, region);
+    }
+    if scores.iter().any(|s| *s >= BORDER_FLOOR) {
         return Err(Miss::NoBorderWinner { scores });
-    };
+    }
+    for cards in [3usize, 2, 1] {
+        let origin = row_origin(cards);
+        if !is_reward_screen_at(frame, origin, cards) {
+            continue;
+        }
+        let alt_scores = border_scores_at(frame, origin, cards);
+        if let Some(slot) = border_winner_in(&alt_scores) {
+            let region = name_band_region_at(frame.width, frame.height, origin, slot);
+            return read_bordered_name(engine, frame, parts, region);
+        }
+        if alt_scores.iter().any(|s| *s >= BORDER_FLOOR) {
+            return Err(Miss::NoBorderWinner { scores });
+        }
+    }
+    Err(Miss::NoBorderWinner { scores })
+}
+
+/// Read the bordered card's name band and apply the hold
+/// discipline. Shared by every geometry (pass 49): the
+/// region is the only geometry-dependent input.
+fn read_bordered_name(
+    engine: &dyn OcrEngine,
+    frame: &GrayImage,
+    parts: &Universe,
+    region: [f32; 4],
+) -> Result<String, Miss> {
     // Two reads of the bordered card's band (PSM 6 and PSM
     // 11): measured on the fixture and on synthetic screens,
     // neither mode dominates — each drops or garbles a line
@@ -397,7 +526,6 @@ pub fn detect_pick(
     // the standard discipline and no read holds a DIFFERENT
     // name; two holds that disagree are an active
     // contradiction and refuse.
-    let region = name_band_region(frame.width, frame.height, slot);
     let mut held: Vec<String> = Vec::new();
     let mut detail = String::new();
     for psm in [6, 11] {
@@ -540,6 +668,35 @@ pub fn detect_burst(
     select_burst_pick(&outcomes)
 }
 
+/// Resolve a gets-reward uniqueName path to a display name via
+/// the item-names data, for the arm log line (pass 49). Tries
+/// the path verbatim, its `StoreItems`-stripped dataset form,
+/// and the `StoreItems`-inserted form (the dataset mixes both
+/// shapes — the Varzia manifest resolution at plan.rs is the
+/// precedent). None when the data does not name it: the caller
+/// logs the raw path, never a guess. Diagnostic only — the
+/// roll is never a credit input.
+pub fn roll_display_name(
+    roll_path: &str,
+    item_names: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    if let Some(name) = item_names.get(roll_path) {
+        return Some(name.clone());
+    }
+    let stripped = roll_path.replace("/StoreItems/", "/");
+    if stripped != roll_path {
+        if let Some(name) = item_names.get(&stripped) {
+            return Some(name.clone());
+        }
+    } else if let Some(rest) = roll_path.strip_prefix("/Lotus/") {
+        let inserted = format!("/Lotus/StoreItems/{rest}");
+        if let Some(name) = item_names.get(&inserted) {
+            return Some(name.clone());
+        }
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Stock credit (stage 5)
 // ---------------------------------------------------------------------------
@@ -595,10 +752,12 @@ pub fn save_audit_frame(frame: &GrayImage, debug_dir: &Path, stamp: &str) -> Res
 // Episode arming + live-capture frame tap (resident wiring)
 // ---------------------------------------------------------------------------
 
-/// Coalescing state for reward episodes. "Relic rewards
-/// initialized" and "Got rewards" fire ~0.4 s apart for the
-/// SAME screen: one pending grab per episode, re-armed only
-/// after the grab resolves or the screen shuts down.
+/// Coalescing state for reward episodes. One pending grab
+/// per episode, re-armed only after the grab resolves or the
+/// screen shuts down. (Pass 39's paired "initialized"/"Got
+/// rewards" lines motivated this; pass 49's gets-reward
+/// trigger fires once per screen, and the coalescing remains
+/// as the guard against any repeat within an open episode.)
 #[derive(Debug, Default)]
 pub struct RewardArming {
     pending: bool,
@@ -744,10 +903,21 @@ mod tests {
     /// the real-engine test renders real names instead and
     /// passes false.
     fn synthetic_frame(bordered: &[usize], text_bars: bool) -> GrayImage {
+        synthetic_frame_at(0.0, SLOTS, bordered, text_bars)
+    }
+
+    /// [`synthetic_frame`] for a centred row of `cards` cards
+    /// at row origin `origin` (pass 49's fewer-card rows).
+    fn synthetic_frame_at(
+        origin: f32,
+        cards: usize,
+        bordered: &[usize],
+        text_bars: bool,
+    ) -> GrayImage {
         let (fw, fh) = (2560, 1440);
         let mut frame = GrayImage::blank(fw, fh, 35);
-        for slot in 0..SLOTS {
-            let (x, y, w, h) = slot_rect(fw, fh, slot);
+        for slot in 0..cards {
+            let (x, y, w, h) = slot_rect_at(fw, fh, origin, slot);
             for py in y..y + h {
                 for px in x..x + w {
                     frame.set(px, py, 55);
@@ -762,7 +932,7 @@ mod tests {
             }
         }
         for &slot in bordered {
-            let (x, y, w, h) = slot_rect(fw, fh, slot);
+            let (x, y, w, h) = slot_rect_at(fw, fh, origin, slot);
             for t in 0..4u32 {
                 for px in x..x + w {
                     frame.set(px, y + t, 255);
@@ -775,6 +945,48 @@ mod tests {
             }
         }
         frame
+    }
+
+    /// Engine scripted by (origin, slot): a band on a shifted
+    /// row returns that row's text (pass 49 geometry tests).
+    struct GeoEngine {
+        /// (origin, per-slot band text for that row's cards).
+        rows: Vec<(f32, Vec<String>)>,
+    }
+
+    impl OcrEngine for GeoEngine {
+        fn name(&self) -> &str {
+            "geo-scripted"
+        }
+        fn ocr_cell(&self, _cell: &GrayImage) -> OcrRead {
+            OcrRead::empty()
+        }
+        fn read_text(
+            &self,
+            image: &GrayImage,
+            region: [f32; 4],
+            _psm: u32,
+            _upscale: u32,
+        ) -> String {
+            for (origin, bands) in &self.rows {
+                for (slot, text) in bands.iter().enumerate() {
+                    if region == name_band_region_at(image.width, image.height, *origin, slot) {
+                        return text.clone();
+                    }
+                }
+            }
+            String::new()
+        }
+    }
+
+    fn sevagoth_universe() -> Universe {
+        Universe::from_names(&[
+            "Sevagoth Prime Systems Blueprint".to_owned(),
+            "Sevagoth Prime Blueprint".to_owned(),
+            "Sevagoth Prime Chassis Blueprint".to_owned(),
+            "Burston Prime Blueprint".to_owned(),
+            "Burston Prime Barrel".to_owned(),
+        ])
     }
 
     fn scripted() -> ScriptedEngine {
@@ -876,6 +1088,176 @@ mod tests {
         for (i, s) in scores.iter().enumerate() {
             if i != 2 {
                 assert!(*s <= 0.10, "live slot {i} continuity {s:.3} above 0.10");
+            }
+        }
+    }
+
+    // -- Fewer-card geometries (pass 49) ------------------------
+
+    #[test]
+    fn three_person_row_detects_via_the_centred_origin() {
+        // A centred trio: the bordered card straddles two
+        // 4-grid slots, so the 4-grid border gate cannot win
+        // (precondition), and detection must come from the
+        // +pitch/2 geometry under the identical gates.
+        let frame = synthetic_frame_at(row_origin(3), 3, &[0], true);
+        let scores = border_scores(&frame);
+        assert_eq!(
+            border_winner(&scores),
+            None,
+            "precondition: the 4-grid must miss the trio: {scores:?}"
+        );
+        let engine = GeoEngine {
+            rows: vec![(
+                row_origin(3),
+                vec![
+                    "Sevagoth Prime Systems Blueprint".to_owned(),
+                    "Burston Prime Barrel".to_owned(),
+                    "Burston Prime Blueprint".to_owned(),
+                ],
+            )],
+        };
+        let name = detect_pick(&engine, &frame, &sevagoth_universe())
+            .expect("the trio's bordered card must be detected");
+        assert_eq!(name, "Sevagoth Prime Systems Blueprint");
+    }
+
+    #[test]
+    fn one_and_two_person_rows_detect() {
+        // Duo (origin +1 pitch — its cards coincide with
+        // 4-grid slots 1/2, so this pins the end-to-end result
+        // rather than a specific path).
+        let duo = synthetic_frame_at(row_origin(2), 2, &[1], true);
+        let engine = GeoEngine {
+            rows: vec![
+                (
+                    row_origin(2),
+                    vec![
+                        "Burston Prime Barrel".to_owned(),
+                        "Sevagoth Prime Systems Blueprint".to_owned(),
+                    ],
+                ),
+                // The same bands as the 4-grid slots they coincide
+                // with, so whichever path reads, the text agrees.
+                (
+                    0.0,
+                    vec![
+                        String::new(),
+                        "Burston Prime Barrel".to_owned(),
+                        "Sevagoth Prime Systems Blueprint".to_owned(),
+                        String::new(),
+                    ],
+                ),
+            ],
+        };
+        assert_eq!(
+            detect_pick(&engine, &duo, &sevagoth_universe()),
+            Ok("Sevagoth Prime Systems Blueprint".to_owned())
+        );
+        // Solo (origin +1.5 pitch — the lone card straddles
+        // 4-grid slots 1/2; only the 1-card geometry aligns).
+        let solo = synthetic_frame_at(row_origin(1), 1, &[0], true);
+        let scores = border_scores(&solo);
+        assert_eq!(
+            border_winner(&scores),
+            None,
+            "precondition: the 4-grid must miss the solo card: {scores:?}"
+        );
+        let engine = GeoEngine {
+            rows: vec![(
+                row_origin(1),
+                vec!["Sevagoth Prime Systems Blueprint".to_owned()],
+            )],
+        };
+        assert_eq!(
+            detect_pick(&engine, &solo, &sevagoth_universe()),
+            Ok("Sevagoth Prime Systems Blueprint".to_owned())
+        );
+    }
+
+    #[test]
+    fn borderless_trio_misses_with_the_four_grid_scores() {
+        // No border on any card: every geometry misses, and
+        // the miss is the 4-grid's own NoBorderWinner — shape
+        // and scores unchanged (burst reporting reads these).
+        let frame = synthetic_frame_at(row_origin(3), 3, &[], true);
+        let engine = GeoEngine { rows: vec![] };
+        match detect_pick(&engine, &frame, &sevagoth_universe()) {
+            Err(Miss::NoBorderWinner { scores }) => {
+                assert_eq!(scores, border_scores(&frame));
+                assert!(
+                    scores.iter().all(|s| *s < BORDER_FLOOR),
+                    "scores: {scores:?}"
+                );
+            }
+            other => panic!("expected NoBorderWinner, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn three_person_real_frames_resolve_at_the_centred_origin() {
+        // Seth's 2026-10-27 23:56 burst (3-player, client;
+        // THREE_PERSON_REWARD_GEOMETRY.md). Before pass 49:
+        // the production 4-grid border-scores these frames
+        // [0, 0.192, 0, 0] / all-zero — a guaranteed miss.
+        // After: the centred 3-card origin reads his bordered
+        // card (slot 0, Sevagoth Prime Systems Blueprint) in
+        // the high 0.9s.
+        for rel in [
+            "../fracker-frames/three-person/reward-1793159728-t0.png",
+            "../fracker-frames/three-person/reward-1793159728-t14.png",
+        ] {
+            let Some(frame) = sibling_image(rel) else {
+                eprintln!("skip 3-person frame {rel}: absent");
+                return;
+            };
+            let scores4 = border_scores(&frame);
+            assert_eq!(
+                border_winner(&scores4),
+                None,
+                "{rel}: the 4-grid verdict must stay a miss: {scores4:?}"
+            );
+            let alt = border_scores_at(&frame, row_origin(3), 3);
+            assert_eq!(
+                border_winner_in(&alt),
+                Some(0),
+                "{rel}: trio scores: {alt:?}"
+            );
+            assert!(
+                alt[0] >= 0.90,
+                "{rel}: trio winner continuity {:.3} below 0.90",
+                alt[0]
+            );
+        }
+    }
+
+    #[test]
+    fn three_person_t14_detects_sevagoth_with_the_real_engine() {
+        // The pass-49 acceptance frames end to end: real OCR
+        // over the burst's first and last frames names his
+        // pick (his roll, pre-selected from screen-open, is
+        // the bordered card in both).
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let Some(layout) = crate::ocr::Layout::load_file(&base.join("data/capture/layouts.toml"))
+            .ok()
+            .and_then(|l| l.get("relic").cloned())
+        else {
+            return; // layouts unavailable in this environment
+        };
+        let Some(engine) = crate::ocr::TesseractCliEngine::probe(layout) else {
+            return; // no tesseract in this environment
+        };
+        for rel in [
+            "../fracker-frames/three-person/reward-1793159728-t0.png",
+            "../fracker-frames/three-person/reward-1793159728-t14.png",
+        ] {
+            let Some(frame) = sibling_image(rel) else {
+                eprintln!("skip 3-person frame {rel}: absent");
+                return;
+            };
+            match detect_pick(&engine, &frame, &sevagoth_universe()) {
+                Ok(name) => assert_eq!(name, "Sevagoth Prime Systems Blueprint", "{rel}"),
+                Err(miss) => panic!("{rel} detection missed: {}", miss.describe()),
             }
         }
     }
@@ -1103,7 +1485,7 @@ mod tests {
         assert!(arming.on_screen(), "first screen event arms");
         assert!(
             !arming.on_screen(),
-            "the paired Got-rewards event must not re-arm"
+            "a second screen event inside the episode must not re-arm"
         );
         assert!(arming.pending());
         arming.on_resolved();
@@ -1111,6 +1493,37 @@ mod tests {
         arming.on_closed();
         assert!(!arming.pending());
         assert!(arming.on_screen(), "a closed episode re-arms");
+    }
+
+    #[test]
+    fn roll_display_name_resolves_dataset_shapes() {
+        let mut names = std::collections::HashMap::new();
+        names.insert(
+            "/Lotus/Types/Recipes/WarframeRecipes/HarrowPrimeHelmetBlueprint".to_owned(),
+            "Harrow Prime Neuroptics Blueprint".to_owned(),
+        );
+        names.insert(
+            "/Lotus/Types/StoreItems/AvatarImages/ImagePriest".to_owned(),
+            "Harrow Glyph".to_owned(),
+        );
+        // The grant path is the StoreItems variant of the dataset key.
+        assert_eq!(
+            roll_display_name(
+                "/Lotus/StoreItems/Types/Recipes/WarframeRecipes/HarrowPrimeHelmetBlueprint",
+                &names
+            ),
+            Some("Harrow Prime Neuroptics Blueprint".to_owned())
+        );
+        // Verbatim hit.
+        assert_eq!(
+            roll_display_name("/Lotus/Types/StoreItems/AvatarImages/ImagePriest", &names),
+            Some("Harrow Glyph".to_owned())
+        );
+        // Unresolvable: None (the caller logs the raw path).
+        assert_eq!(
+            roll_display_name("/Lotus/Types/Recipes/Nope", &names),
+            None
+        );
     }
 
     #[test]
@@ -1208,3 +1621,4 @@ mod tests {
         ]
     }
 }
+
