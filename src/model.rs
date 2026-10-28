@@ -984,6 +984,11 @@ pub enum WorldstateSource {
     /// request. `age_mins` is the cache file's age in minutes —
     /// the number the label prints, so the staleness is visible.
     TtlCache { age_mins: u64 },
+    /// Fresh HTTP 200 from warframestat.us this run (fifty-fifth
+    /// pass: the proxy is tried before DE for worldstate).
+    WfsLive,
+    /// Served from the warframestat.us disk cache under its TTL.
+    WfsCache { age_mins: u64 },
     /// Failure fallback (disk cache of any age) or offline fixture.
     Fallback,
 }
@@ -1011,6 +1016,14 @@ pub fn worldstate_status_label(
         }
         WorldstateSource::TtlCache { age_mins } => {
             format!("worldstate cached ({age_mins}m)")
+        }
+        WorldstateSource::WfsLive
+            if age <= chrono::Duration::minutes(WORLDSTATE_STALE_AFTER_MINUTES) =>
+        {
+            format!("worldstate live via warframestat.us ({secs}s)")
+        }
+        WorldstateSource::WfsCache { age_mins } => {
+            format!("worldstate cached via warframestat.us ({age_mins}m)")
         }
         _ => format!("worldstate STALE ({}m)", age.num_minutes().max(0)),
     }
@@ -1368,6 +1381,50 @@ pub struct WorldState {
     pub decode_gaps: Vec<String>,
 }
 
+/// WFCD `/pc` top level, fifty-fifth pass. Only consumed sections
+/// are named; the rest of the proxy payload (news, cycles,
+/// invasions, ...) is ignored by design. `timestamp`, `fissures`,
+/// and `alerts` are required (no `#[serde(default)]`): a payload
+/// without them is an error for the caller, never an empty world.
+/// Inner structs are the app's own model types — they already
+/// deserialize from the WFCD shapes (camelCase renames, the
+/// `reputation` alias on NightWave standing, `active` defaulting
+/// false on VoidTrader so `is_live` falls back to the window).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WfcdWorld {
+    timestamp: String,
+    fissures: Vec<Fissure>,
+    alerts: Vec<Alert>,
+    #[serde(default)]
+    events: Vec<WorldEvent>,
+    #[serde(default)]
+    vault_trader: Option<VaultTrader>,
+    #[serde(default)]
+    nightwave: Option<NightWave>,
+    #[serde(default)]
+    sortie: Option<Sortie>,
+    #[serde(default, rename = "archonHunt")]
+    archon: Option<WfcdArchon>,
+    #[serde(default)]
+    void_trader: Option<VoidTrader>,
+    #[serde(default)]
+    void_traders: Vec<VoidTrader>,
+}
+
+/// WFCD's archon hunt shape (fifty-fifth pass): the missions live
+/// under `missions`, with `variants` empty in the witnessed sample
+/// — the reverse of the daily sortie, which populates `variants`.
+/// Both keys are read; `missions` wins when present.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WfcdArchon {
+    #[serde(default)]
+    variants: Vec<SortieVariant>,
+    #[serde(default)]
+    missions: Vec<SortieVariant>,
+}
+
 impl WorldState {
     /// Parse DE's raw worldState.php payload into the app model using the
     /// baked decode tables. Sections the app does not consume (Discord
@@ -1699,6 +1756,84 @@ impl WorldState {
 
         world.decode_gaps = gaps;
         Ok(world)
+    }
+
+    /// WFCD `/pc` payload -> WorldState (fifty-fifth pass).
+    ///
+    /// The proxy's JSON is the parsed/normalized form, NOT DE's raw
+    /// worldState.php shape, so `from_de_json` does not apply. Every
+    /// mapping below was witnessed in the committed live sample
+    /// (`fixtures/wfcd-pc-sample.json`, captured 2026-10-28); the
+    /// model structs already deserialize from the WFCD shapes, so
+    /// this is a rename-and-validate pass, not a reinterpretation.
+    ///
+    /// Deliberate differences from the DE path, each recorded so a
+    /// later diff between sources is explicable, not mysterious:
+    /// - `sol_node` stays empty. WFCD's `nodeKey` is a display
+    ///   name ("Nimus (Eris)"), NOT a SolNode key, and the
+    ///   completion matcher skips its node check when `sol_node`
+    ///   is empty — mapping the display name in would make the
+    ///   guard refuse real corroborations.
+    /// - Storm fissures carry their mission type here; DE leaves
+    ///   it empty, so timing lookups resolve for storms on this
+    ///   path (an accuracy gain, not a loss).
+    /// - `VaultTrader.character` is WFCD's ("Varzia"); DE leaves
+    ///   it empty. Nothing consumes `character`.
+    /// - `archon` comes from `archonHunt.missions` (the witnessed
+    ///   sample leaves `variants` empty there), falling back to
+    ///   `variants` when `missions` is absent — the reverse of
+    ///   the daily sortie, which populates `variants`.
+    /// - `events` map from WFCD `events`, the parser's Goals
+    ///   output — the same underlying data as DE's `Goals`.
+    /// Strictness: `timestamp`, `fissures`, and `alerts` are
+    /// required, and every fissure needs id/node/tier/expiry and
+    /// every alert needs id/expiry/mission-node — anything less is
+    /// `Err`, so the caller falls through to DE rather than
+    /// rendering degraded worldstate. Other sections tolerate
+    /// absence (empty), as the DE path does with gaps.
+    pub fn from_wfcd_json(text: &str) -> Result<Self, String> {
+        let raw: WfcdWorld = serde_json::from_str(text)
+            .map_err(|e| format!("worldstate (WFCD): {e}"))?;
+        raw.timestamp
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .map_err(|_| "worldstate (WFCD): timestamp unparsable".to_owned())?;
+        for f in &raw.fissures {
+            if f.id.is_empty() || f.node.is_empty() || f.tier.is_empty() || f.expiry.is_empty() {
+                return Err("worldstate (WFCD): fissure missing id/node/tier/expiry".to_owned());
+            }
+        }
+        for a in &raw.alerts {
+            if a.id.is_empty() || a.expiry.is_empty() || a.mission.node.is_empty() {
+                return Err("worldstate (WFCD): alert missing id/expiry/mission node".to_owned());
+            }
+        }
+        let baro = raw
+            .void_trader
+            .clone()
+            .or_else(|| raw.void_traders.first().cloned());
+        // Archon: `missions` when present (the witnessed shape),
+        // else `variants` (a capture that populates that key).
+        let archon = raw.archon.map(|a| Sortie {
+            expiry: String::new(),
+            variants: if a.missions.is_empty() {
+                a.variants
+            } else {
+                a.missions
+            },
+        });
+        Ok(WorldState {
+            timestamp: raw.timestamp,
+            fissures: raw.fissures,
+            alerts: raw.alerts,
+            events: raw.events,
+            vault_trader: raw.vault_trader,
+            nightwave: raw.nightwave,
+            sortie: raw.sortie,
+            archon,
+            baro,
+            void_traders: raw.void_traders,
+            ..Default::default()
+        })
     }
 
     /// The live void trader, if any (pass 4 Baro section): the
@@ -2879,12 +3014,121 @@ mod tests {
             worldstate_status_label(&world, stale, WorldstateSource::TtlCache { age_mins: 3 }),
             "worldstate cached (3m)"
         );
+        // Fifty-fifth pass: the proxy sources render distinctly.
+        assert_eq!(
+            worldstate_status_label(&world, now, WorldstateSource::WfsLive),
+            "worldstate live via warframestat.us (16s)"
+        );
+        assert_eq!(
+            worldstate_status_label(
+                &world,
+                now,
+                WorldstateSource::WfsCache { age_mins: 4 }
+            ),
+            "worldstate cached via warframestat.us (4m)"
+        );
+        // A proxy live stamp past the live threshold falls back to
+        // STALE, like a DE live stamp past it.
+        assert_eq!(
+            worldstate_status_label(&world, stale, WorldstateSource::WfsLive),
+            "worldstate STALE (14m)"
+        );
         // No payload at all.
         world.timestamp.clear();
         assert_eq!(
             worldstate_status_label(&world, now, WorldstateSource::Live),
             "worldstate unavailable"
         );
+    }
+
+    #[test]
+    fn wfcd_sample_maps_every_consumed_section() {
+        // Fifty-fifth pass: the committed live /pc sample
+        // (captured 2026-10-28) maps through from_wfcd_json with
+        // every consumed section witnessed — not guessed.
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(dir.join("fixtures/wfcd-pc-sample.json")).unwrap();
+        let world = WorldState::from_wfcd_json(&text).unwrap();
+        assert_eq!(world.timestamp, "2026-10-28T20:49:56.000Z");
+        // Fissures: tiers incl. Omnia/Requiem, storm + hard flags.
+        assert_eq!(world.fissures.len(), 33);
+        assert!(world.fissures.iter().any(|f| f.is_storm));
+        assert!(world.fissures.iter().any(|f| f.is_hard));
+        assert!(world.fissures.iter().any(|f| f.tier == "Omnia"));
+        assert!(world.fissures.iter().any(|f| f.tier == "Requiem"));
+        let storm = world.fissures.iter().find(|f| f.is_storm).unwrap();
+        assert!(!storm.mission_type.is_empty(), "WFCD storms carry a type");
+        // Alerts: counted payouts, tags, and — deliberately — no
+        // SolNode key (WFCD nodeKey is a display name, not one).
+        assert_eq!(world.alerts.len(), 3);
+        assert!(world
+            .alerts
+            .iter()
+            .all(|a| a.mission.sol_node.is_empty()));
+        assert!(world
+            .alerts
+            .iter()
+            .any(|a| !a.mission.counted_items().is_empty()));
+        // Sortie + archon variants (node + type; boss is not modelled).
+        let sortie = world.sortie.as_ref().unwrap();
+        assert_eq!(sortie.variants.len(), 3);
+        assert!(sortie.variants.iter().all(|v| !v.node.is_empty()));
+        let archon = world.archon.as_ref().unwrap();
+        assert_eq!(archon.variants.len(), 3);
+        // Nightwave: season, and standing from `reputation`.
+        let nw = world.nightwave.as_ref().unwrap();
+        assert_eq!(nw.season, 18);
+        assert!(!nw.active_challenges.is_empty());
+        assert!(nw.active_challenges.iter().any(|c| c.is_daily));
+        assert!(nw.active_challenges.iter().any(|c| c.standing > 0));
+        // Baro: singular + list agree; window decides liveness.
+        let baro = world.baro.as_ref().unwrap();
+        assert_eq!(baro.location, "Larunda Relay (Mercury)");
+        assert_eq!(world.void_traders.len(), 1);
+        // Vault trader: Varzia's inventory, incl. projections.
+        let vt = world.vault_trader.as_ref().unwrap();
+        assert_eq!(vt.character, "Varzia");
+        assert_eq!(vt.inventory.len(), 22);
+        assert!(vt
+            .inventory
+            .iter()
+            .any(|i| i.unique_name.contains("/Projections/")));
+        // Events map from the parser's Goals output.
+        assert_eq!(world.events.len(), 3);
+    }
+
+    #[test]
+    fn wfcd_mapping_refuses_degraded_sections() {
+        // Fifty-fifth pass: a payload that fails a consumed-section
+        // bar is Err, so the caller falls through to DE instead of
+        // rendering a degraded world — never a guessed section.
+        let base = serde_json::json!({
+            "timestamp": "2026-10-28T20:49:56.000Z",
+            "fissures": [{"id": "f1", "node": "N (E)", "missionType": "Survival",
+                "tier": "Lith", "expiry": "2026-10-28T21:00:00.000Z",
+                "isStorm": false, "isHard": false}],
+            "alerts": [],
+        });
+        assert!(WorldState::from_wfcd_json(&base.to_string()).is_ok());
+        // Missing timestamp / fissures: not a world.
+        let mut no_ts = base.clone();
+        no_ts.as_object_mut().unwrap().remove("timestamp");
+        assert!(WorldState::from_wfcd_json(&no_ts.to_string()).is_err());
+        let mut no_fiss = base.clone();
+        no_fiss.as_object_mut().unwrap().remove("fissures");
+        assert!(WorldState::from_wfcd_json(&no_fiss.to_string()).is_err());
+        // A fissure without a tier, an alert without a node: Err.
+        let mut bad_tier = base.clone();
+        bad_tier["fissures"][0].as_object_mut().unwrap().remove("tier");
+        assert!(WorldState::from_wfcd_json(&bad_tier.to_string()).is_err());
+        let mut bad_alert = base.clone();
+        bad_alert["alerts"] = serde_json::json!([{
+            "id": "a1", "activation": "2026-10-28T19:00:00.000Z",
+            "expiry": "2026-10-28T21:00:00.000Z",
+            "mission": {"description": "d", "node": "", "type": "Survival",
+                "faction": "Infested", "reward": {"countedItems": []}},
+        }]);
+        assert!(WorldState::from_wfcd_json(&bad_alert.to_string()).is_err());
     }
 
     #[test]

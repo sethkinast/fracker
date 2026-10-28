@@ -402,6 +402,7 @@ fn golden_page_shows_pass4_sections_and_pool_bars() {
         generation: "golden-generation".to_owned(),
         targets_status: "t".to_owned(),
         world_status: "w".to_owned(),
+        de_lock: None,
         weekly_done: &weekly_done,
         proven_done: &proven,
         mastery_rank: Some(snap.mastery_rank),

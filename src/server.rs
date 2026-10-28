@@ -24,6 +24,7 @@
 //!   membership in `stock.json` (thirtieth pass) — validated against
 //!   the roster parts universe, persisted through the stock writer,
 //!   and followed by a regeneration request so the plan re-renders;
+//! - `POST /clear-de-lock` deletes the DE block lockfile (fifty-fifth pass);
 //! - `GET /tab/<slug>` records the active plan tab (the tab links carry
 //!   `?tab=<slug>`, which `GET /` also honours);
 //! - `GET /ws` upgrades to a WebSocket and pushes the plan generation the
@@ -229,6 +230,27 @@ impl UnverifiedToggle {
     }
 }
 
+/// The DE block clear wiring (fifty-fifth pass): everything `POST
+/// /clear-de-lock` needs. The resident supplies it; a server
+/// without it (tests, headless tools) answers the route 404.
+/// Clearing removes the BLOCK, not the TTL caches: the next regen
+/// still serves a fresh-enough cache before hitting DE again.
+pub struct DeLockClear {
+    /// The lockfile to delete (`<cache_dir>/de-block.lock`).
+    pub path: PathBuf,
+    /// Invoked after a successful clear, so the resident regenerates
+    /// the plan and the generation push carries a header without the
+    /// alert to open pages (the resident passes a `Trigger::Manual`
+    /// send; a clear never auto-opens the page).
+    pub regen: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl DeLockClear {
+    pub fn new(path: PathBuf, regen: Arc<dyn Fn() + Send + Sync>) -> Self {
+        Self { path, regen }
+    }
+}
+
 /// Why a toggle did not happen (thirtieth pass).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToggleError {
@@ -256,7 +278,8 @@ fn roster_part_names(roster: &crate::model::Roster) -> std::collections::HashSet
 /// checkbox change is persisted (the store of record); `tabs_path` is
 /// where the active plan tab is persisted (thirteenth pass §2).
 /// `toggle` wires `POST /unverified` (thirtieth pass); `None` leaves
-/// the route answering 404.
+/// the route answering 404. `de_lock` wires `POST /clear-de-lock`
+/// (fifty-fifth pass) the same way.
 pub fn serve(
     preferred_port: u16,
     report_path: PathBuf,
@@ -264,6 +287,7 @@ pub fn serve(
     tabs_path: PathBuf,
     ticks: Arc<Mutex<TickStore>>,
     toggle: Option<Arc<UnverifiedToggle>>,
+    de_lock: Option<Arc<DeLockClear>>,
 ) -> Result<PlanServer, String> {
     let listener = bind(preferred_port)?;
     let port = listener
@@ -291,6 +315,7 @@ pub fn serve(
             frag_cache,
             stop_thread,
             toggle,
+            de_lock,
         )
     });
     Ok(PlanServer {
@@ -324,6 +349,7 @@ fn accept_loop(
     frag_cache: Arc<Mutex<FragmentCache>>,
     stop: Arc<AtomicBool>,
     toggle: Option<Arc<UnverifiedToggle>>,
+    de_lock: Option<Arc<DeLockClear>>,
 ) {
     let _ = listener.set_nonblocking(true);
     while !stop.load(Ordering::Relaxed) {
@@ -338,6 +364,7 @@ fn accept_loop(
                 let frags = frag_cache.clone();
                 let stopped = stop.clone();
                 let toggle_thread = toggle.clone();
+                let de_lock_thread = de_lock.clone();
                 std::thread::spawn(move || {
                     let _ = handle(
                         stream,
@@ -350,6 +377,7 @@ fn accept_loop(
                         &frags,
                         &stopped,
                         toggle_thread.as_ref(),
+                        de_lock_thread.as_ref(),
                     );
                 });
             }
@@ -374,6 +402,7 @@ fn handle(
     frag_cache: &Arc<Mutex<FragmentCache>>,
     stop: &Arc<AtomicBool>,
     toggle: Option<&Arc<UnverifiedToggle>>,
+    de_lock: Option<&Arc<DeLockClear>>,
 ) -> std::io::Result<()> {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
@@ -469,6 +498,16 @@ fn handle(
         ),
         ("POST", "/unverified") => {
             let (status, resp_body) = apply_unverified(toggle, &body);
+            respond(&mut stream, status, "application/json", resp_body.as_bytes())
+        }
+        ("POST", "/clear-de-lock") => {
+            let (status, resp_body) = match de_lock {
+                Some(clear) => apply_clear_de_lock(clear),
+                None => (
+                    "404 Not Found",
+                    "{\"ok\":false,\"error\":\"no lock route\"}".to_owned(),
+                ),
+            };
             respond(&mut stream, status, "application/json", resp_body.as_bytes())
         }
         ("GET", "/ws") => match ws_key.as_deref() {
@@ -799,6 +838,23 @@ fn tick_ok() -> Vec<u8> {
 /// unknown part names are a 404 with no state change, and a
 /// successful toggle persists stock.json and fires the regen hook
 /// so the ⍻ lands through the standard generation push.
+/// Apply one DE block clear (fifty-fifth pass). Deleting a
+/// missing lockfile is a 404 (the button only renders while a live
+/// lock holds, so a second clear means something else already
+/// cleared it); a successful clear fires the regen hook.
+fn apply_clear_de_lock(clear: &DeLockClear) -> (&'static str, String) {
+    match std::fs::remove_file(&clear.path) {
+        Ok(()) => {
+            (clear.regen)();
+            ("200 OK", "{\"ok\":true}".to_owned())
+        }
+        Err(_) => (
+            "404 Not Found",
+            "{\"ok\":false,\"error\":\"no lockfile\"}".to_owned(),
+        ),
+    }
+}
+
 fn apply_unverified(
     toggle: Option<&Arc<UnverifiedToggle>>,
     body: &str,
@@ -1268,6 +1324,7 @@ mod tests {
             TabStore::file(&dir),
             Arc::new(Mutex::new(TickStore::default())),
             Some(toggle),
+            None,
         )
         .expect("server binds");
         let post = |body: &str| -> String {
@@ -1339,6 +1396,7 @@ mod tests {
             TabStore::file(&dir),
             ticks,
             None,
+            None,
         )
         .expect("server binds");
         let get = |path: &str| -> String {
@@ -1383,6 +1441,7 @@ mod tests {
             ticks_path.clone(),
             TabStore::file(&dir),
             ticks.clone(),
+            None,
             None,
         )
         .expect("server binds");
@@ -1441,6 +1500,7 @@ mod tests {
             TabStore::file(&dir),
             Arc::new(Mutex::new(TickStore::default())),
             None,
+            None,
         )
         .expect("server binds");
         // Byte-level fetch (the body is binary; http_get's
@@ -1483,6 +1543,7 @@ mod tests {
             TabStore::file(&dir),
             Arc::new(Mutex::new(TickStore::default())),
             None,
+            None,
         )
         .expect("falls back");
         assert_ne!(
@@ -1499,6 +1560,18 @@ mod tests {
     fn http_get(port: u16, path: &str) -> String {
         let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
         write!(s, "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).unwrap();
+        out
+    }
+
+    fn http_post(port: u16, path: &str) -> String {
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write!(
+            s,
+            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\r\n"
+        )
+        .unwrap();
         let mut out = String::new();
         s.read_to_string(&mut out).unwrap();
         out
@@ -1552,6 +1625,7 @@ mod tests {
             tabs_path.clone(),
             Arc::new(Mutex::new(TickStore::default())),
             None,
+            None,
         )
         .expect("server binds");
 
@@ -1583,6 +1657,7 @@ mod tests {
             TickStore::file(&dir),
             tabs_path,
             Arc::new(Mutex::new(TickStore::default())),
+            None,
             None,
         )
         .expect("restart binds");
@@ -1620,6 +1695,7 @@ mod tests {
             TickStore::file(&dir),
             tabs_path.clone(),
             Arc::new(Mutex::new(TickStore::default())),
+            None,
             None,
         )
         .expect("server binds");
@@ -1780,6 +1856,7 @@ mod tests {
             TabStore::file(&dir),
             Arc::new(Mutex::new(TickStore::default())),
             None,
+            None,
         )
         .expect("server binds");
         let current = http_get(server.port(), "/fragments?gen=gen-1");
@@ -1902,6 +1979,7 @@ mod tests {
             TabStore::file(&dir),
             Arc::new(Mutex::new(TickStore::default())),
             None,
+            None,
         )
         .expect("server binds");
 
@@ -1980,6 +2058,7 @@ mod tests {
             TabStore::file(&dir),
             Arc::new(Mutex::new(TickStore::default())),
             None,
+            None,
         )
         .expect("server binds");
 
@@ -2019,10 +2098,50 @@ mod tests {
             TabStore::file(&dir),
             Arc::new(Mutex::new(TickStore::default())),
             None,
+            None,
         )
         .expect("server binds");
         let response = http_get(server.port(), "/ws");
         assert!(response.contains("400 Bad Request"), "{response}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clear_de_lock_route_deletes_lock_and_fires_regen() {
+        // Fifty-fifth pass, end to end through the route: a clear
+        // deletes the lockfile and fires the regen hook; a second
+        // clear (nothing left) is a 404 with no regen.
+        let dir = std::env::temp_dir().join(format!("fracker-clear-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let report = dir.join("plan.html");
+        std::fs::write(&report, "<!DOCTYPE html><html><body></body></html>").unwrap();
+        let lock = dir.join("de-block.lock");
+        std::fs::write(&lock, "profile\n429\n1729999999\n").unwrap();
+        let fired = Arc::new(AtomicBool::new(false));
+        let fired_t = fired.clone();
+        let clear = Arc::new(DeLockClear::new(
+            lock.clone(),
+            Arc::new(move || {
+                fired_t.store(true, Ordering::Relaxed);
+            }),
+        ));
+        let server = serve(
+            0,
+            report,
+            TickStore::file(&dir),
+            TabStore::file(&dir),
+            Arc::new(Mutex::new(TickStore::default())),
+            None,
+            Some(clear),
+        )
+        .expect("server binds");
+        let resp = http_post(server.port(), "/clear-de-lock");
+        assert!(resp.contains("200 OK"), "{resp}");
+        assert!(!lock.exists(), "the lockfile is gone after a clear");
+        assert!(fired.load(Ordering::Relaxed), "regen hook fired");
+        let resp2 = http_post(server.port(), "/clear-de-lock");
+        assert!(resp2.contains("404"), "second clear: nothing left: {resp2}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
