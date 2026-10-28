@@ -12,6 +12,7 @@ pub mod lineread;
 pub mod model;
 pub mod ocr;
 pub mod pack;
+pub mod packopen;
 pub mod plan;
 pub mod stitch;
 pub mod portal;

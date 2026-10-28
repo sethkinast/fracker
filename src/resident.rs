@@ -56,7 +56,7 @@ use crate::report::{self, ReportConfig};
 use crate::state::AppState;
 use crate::tray::{FrackerTray, TrayCommand, TrayStatus};
 use crate::watch::LogWatcher;
-use crate::{elog, portal, reward, screencast, server, tabs, ticks};
+use crate::{elog, packopen, portal, reward, screencast, server, tabs, ticks};
 
 /// What asked for a report run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +80,10 @@ pub enum Trigger {
     /// The reward-choice screen shut down (pass 39). NOT a report
     /// trigger: it closes the reward episode.
     RewardClosed,
+    /// A relic pack purchase dialog opened (pass 53). Carries
+    /// the BoosterPacks item path for the arm log line. NOT a
+    /// report trigger: it arms the pack watch.
+    PackScreen(String),
 }
 
 /// Cooperative shutdown for both the async loop and the watch thread.
@@ -135,6 +139,9 @@ pub struct ResidentOptions {
     /// Reward-pick detection on the fissure reward screen
     /// (pass 39; config `reward_detect`, default on).
     pub reward_detect: bool,
+    /// Pack-open detection on relic pack reveal screens
+    /// (pass 53; config `pack_detect`, default on).
+    pub pack_detect: bool,
 }
 
 /// A message from the Capture Inventory worker thread to the resident
@@ -285,6 +292,13 @@ pub async fn run(
     let mut reward_arming = reward::RewardArming::new();
     let (reward_done_tx, mut reward_done_rx) = mpsc::unbounded_channel::<()>();
     let mut reward_task: Option<tokio::task::JoinHandle<()>> = None;
+    // Pass 53: pack-watch state. Its own tap (offered the same
+    // capture frames as the reward tap) and one task per armed
+    // session; a second dialog line while a watch is running
+    // is ignored — the running watch is already looking.
+    let pack_tap = Arc::new(reward::FrameTap::new());
+    let (pack_done_tx, mut pack_done_rx) = mpsc::unbounded_channel::<()>();
+    let mut pack_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -339,6 +353,7 @@ pub async fn run(
                 // still coalesces any repeats within the episode).
                 let mut reward_roll: Option<String> = None;
                 let mut reward_closed = false;
+                let mut pack_path: Option<String> = None;
                 burst.retain(|t| match t {
                     Trigger::RewardScreen(roll) => {
                         if reward_roll.is_none() {
@@ -348,6 +363,12 @@ pub async fn run(
                     }
                     Trigger::RewardClosed => {
                         reward_closed = true;
+                        false
+                    }
+                    Trigger::PackScreen(path) => {
+                        if pack_path.is_none() {
+                            pack_path = Some(path.clone());
+                        }
                         false
                     }
                     _ => true,
@@ -365,6 +386,19 @@ pub async fn run(
                             reward_regen_tx.clone(),
                             capture_log.clone(),
                             reward_done_tx.clone(),
+                        ));
+                    }
+                }
+                if let Some(path) = pack_path {
+                    if opts.pack_detect && pack_task.is_none() {
+                        pack_task = Some(spawn_pack_watch(
+                            opts.clone(),
+                            capture.is_some(),
+                            path,
+                            pack_tap.clone(),
+                            reward_regen_tx.clone(),
+                            capture_log.clone(),
+                            pack_done_tx.clone(),
                         ));
                     }
                 }
@@ -409,6 +443,7 @@ pub async fn run(
                             let start_status = status.clone();
                             let start_log = capture_log.clone();
                             let start_tap = reward_tap.clone();
+                            let start_pack_tap = pack_tap.clone();
                             let result_tx = capture_start_tx.clone();
                             capture_start = Some(tokio::spawn(async move {
                                 let started = start_capture(
@@ -416,6 +451,7 @@ pub async fn run(
                                     &start_status,
                                     &start_log,
                                     start_tap,
+                                    start_pack_tap,
                                 )
                                 .await;
                                 let _ = result_tx.send(started);
@@ -468,6 +504,11 @@ pub async fn run(
                 reward_arming.on_resolved();
                 reward_task = None;
             }
+            _ = pack_done_rx.recv() => {
+                // Pass 53: the pack session ended (disarm rule);
+                // the next purchase dialog may arm a fresh watch.
+                pack_task = None;
+            }
             _ = tick.tick() => {
                 let rerun = pump_capture(&opts, &status, &tray, &mut capture, &capture_log).await;
                 if rerun {
@@ -514,6 +555,17 @@ pub async fn run(
             Err(_) => {
                 eprintln!("resident: reward grab did not abort in time (detached)");
                 app_log.record("teardown", "abort reward grab: timed out (detached)");
+            }
+        }
+    }
+    if let Some(job) = pack_task.take() {
+        app_log.record("teardown", "abort pack watch: start");
+        job.abort();
+        match tokio::time::timeout(TASK_ABORT_TIMEOUT, job).await {
+            Ok(_) => app_log.record("teardown", "abort pack watch: done"),
+            Err(_) => {
+                eprintln!("resident: pack watch did not abort in time (detached)");
+                app_log.record("teardown", "abort pack watch: timed out (detached)");
             }
         }
     }
@@ -630,6 +682,7 @@ fn spawn_open_job(
 struct TapSource {
     inner: screencast::ScreenCastSource,
     tap: Arc<reward::FrameTap>,
+    pack_tap: Arc<reward::FrameTap>,
 }
 
 impl capture::FrameSource for TapSource {
@@ -637,6 +690,8 @@ impl capture::FrameSource for TapSource {
         let frame = self.inner.next_frame()?;
         if let Some(f) = &frame {
             self.tap.offer(f);
+            // Pass 53: the pack watch taps the same stream.
+            self.pack_tap.offer(f);
         }
         Ok(frame)
     }
@@ -857,6 +912,274 @@ fn parent_gear_for(data_dir: &Path, part: &str) -> Option<String> {
     roster.parents_of(part).into_iter().next()
 }
 
+/// Spawn the one-shot pack watch (pass 53): grab frames
+/// every 1 s while the purchase session lasts, detect each
+/// reveal screen's relic trio, credit proven trios, and
+/// disarm on the session-end rules. Completion is always
+/// reported on `done` so the loop can arm a fresh watch.
+fn spawn_pack_watch(
+    opts: ResidentOptions,
+    capture_live: bool,
+    path: String,
+    tap: Arc<reward::FrameTap>,
+    regen_tx: mpsc::UnboundedSender<Trigger>,
+    log: CaptureLog,
+    done: mpsc::UnboundedSender<()>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        pack_watch(opts, capture_live, path, tap, regen_tx, log).await;
+        let _ = done.send(());
+    })
+}
+
+/// Credit one proven pack trio (pass 53): +1 Intact each
+/// into relic stock, a `pack_open` event (whose beacon
+/// plays the page's chime), a capture.log line, and a
+/// regen. A failed credit logs and emits nothing — the
+/// screen must not read as captured when it was not.
+fn pack_credit(
+    trio: &[String; 3],
+    stock_path: &Path,
+    events_dir: &Path,
+    log: &CaptureLog,
+    regen_tx: &mpsc::UnboundedSender<Trigger>,
+) {
+    match packopen::credit_relics(stock_path, trio) {
+        Ok(counts) => {
+            log.record(
+                "pack",
+                &format!(
+                    "credited {} (Intact counts now {:?})",
+                    trio.join(", "),
+                    counts
+                ),
+            );
+            crate::events::append(
+                events_dir,
+                &crate::events::EventRecord::pack_open(
+                    crate::events::now_ts(),
+                    trio.to_vec(),
+                ),
+            );
+            let _ = regen_tx.send(Trigger::Manual);
+        }
+        Err(e) => log.record(
+            "pack",
+            &format!("credit for {} failed: {e}", trio.join(", ")),
+        ),
+    }
+}
+
+/// Record one ended-unproven pack screen (pass 53): a
+/// capture.log line and a `pack_miss` event naming the
+/// unresolved slots. A proven screen owes nothing.
+fn pack_miss(ended: &packopen::EndedScreen, events_dir: &Path, log: &CaptureLog) {
+    if ended.proven {
+        return;
+    }
+    let reason = ended.unresolved_reason();
+    log.record(
+        "pack",
+        &format!("miss: pack screen left unproven ({reason})"),
+    );
+    crate::events::append(
+        events_dir,
+        &crate::events::EventRecord::pack_miss(crate::events::now_ts(), reason),
+    );
+}
+
+/// The pack watch itself (pass 53). Arms on the purchase
+/// dialog, grabs at the 1 s cadence from the live capture
+/// stream when one is running (via the tap) or from its
+/// own negotiated stream otherwise, and runs the
+/// [`packopen::PackWatch`] machine until a disarm rule
+/// fires. Every pack screen's first frame is saved under
+/// capture-debug/packs/ (and the crediting frame too when
+/// it is a later grab), so a miss is debuggable after the
+/// fact.
+async fn pack_watch(
+    opts: ResidentOptions,
+    capture_live: bool,
+    path: String,
+    tap: Arc<reward::FrameTap>,
+    regen_tx: mpsc::UnboundedSender<Trigger>,
+    log: CaptureLog,
+) {
+    log.record(
+        "pack",
+        &format!(
+            "armed: pack purchase dialog ({path}); grabs every 1s; disarm at 15s no-screen or 60s total"
+        ),
+    );
+    // Detection machinery, loaded once for the session: the
+    // relic layout drives the engine probe exactly as the
+    // reward burst's does, and the caption universe is the
+    // capture pipeline's scoped relic set.
+    let data = match CaptureData::load(&opts.report.data_dir) {
+        Ok(d) => d,
+        Err(e) => {
+            log.record("pack", &format!("disarmed: capture data load failed: {e}"));
+            return;
+        }
+    };
+    let Some(layout) = data.layouts.get("relic").cloned() else {
+        log.record("pack", "disarmed: no relic layout");
+        return;
+    };
+    let Some(engine) = crate::ocr::TesseractCliEngine::probe(layout) else {
+        log.record("pack", "disarmed: tesseract unavailable");
+        return;
+    };
+    let engine = Arc::new(engine);
+    let universe = Arc::new(data.universes.relics.clone());
+    let stock_path = opts.report.stock_path.clone();
+    let events_dir = event_log_dir(&opts);
+    let debug_dir = crate::config::data_dir().join("capture-debug");
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_else(|_| "0".to_owned());
+
+    // Frame supply. The live-capture path reuses the warm
+    // stream through the tap; the standalone path negotiates
+    // its own stream and drains it into a shared latest.
+    let own_stop = Arc::new(AtomicBool::new(false));
+    let own_latest = Arc::new(Mutex::new(None::<crate::ocr::GrayImage>));
+    let mut own_drain: Option<std::thread::JoinHandle<Option<String>>> = None;
+    if capture_live {
+        tap.arm();
+    } else {
+        if let Err(e) = screencast::preflight_pipewire() {
+            log.record("pack", &format!("disarmed: pipewire preflight: {e}"));
+            return;
+        }
+        let token = screencast::load_restore_token(&opts.state_dir);
+        let negotiated = match screencast::negotiate(token, &opts.state_dir, &log).await {
+            Ok(n) => n,
+            Err(e) => {
+                log.record(
+                    "pack",
+                    &format!("disarmed: stream negotiate ({}): {}", e.stage, e.message),
+                );
+                return;
+            }
+        };
+        let drain_stop = own_stop.clone();
+        let drain_log = log.clone();
+        let drain_latest = own_latest.clone();
+        own_drain = Some(std::thread::spawn(move || {
+            let mut source =
+                match screencast::ScreenCastSource::new(negotiated, drain_stop, drain_log) {
+                    Ok(s) => s,
+                    Err(e) => return Some(e),
+                };
+            loop {
+                match source.next_frame() {
+                    Ok(Some(f)) => {
+                        if let Ok(mut g) = drain_latest.lock() {
+                            *g = Some(f);
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => return Some(e),
+                }
+            }
+            None
+        }));
+    }
+
+    let mut watch = packopen::PackWatch::new();
+    watch.arm(std::time::Instant::now());
+    let mut instance: u32 = 0;
+    let mut in_instance = false;
+    loop {
+        tokio::time::sleep(packopen::GRAB_INTERVAL).await;
+        let frame = if capture_live {
+            tap.latest_fresh(Duration::from_secs(3))
+        } else {
+            own_latest.lock().ok().and_then(|g| g.clone())
+        };
+        if let Some(frame) = frame {
+            let now = std::time::Instant::now();
+            if !packopen::is_pack_screen(&frame) {
+                if let Some(ended) = watch.note_frame(now, false) {
+                    pack_miss(&ended, &events_dir, &log);
+                }
+                in_instance = false;
+            } else {
+                if !in_instance {
+                    instance += 1;
+                    in_instance = true;
+                    log.record(
+                        "pack",
+                        &format!("pack screen seen (instance {instance})"),
+                    );
+                    match packopen::save_pack_frame(
+                        &frame,
+                        &debug_dir,
+                        &format!("{stamp}-{instance}"),
+                    ) {
+                        Ok(p) => log.record(
+                            "pack",
+                            &format!("frame saved: {}", p.display()),
+                        ),
+                        Err(e) => {
+                            log.record("pack", &format!("audit save failed: {e}"))
+                        }
+                    }
+                }
+                let _ = watch.note_frame(now, true);
+                let detect_engine = engine.clone();
+                let detect_universe = universe.clone();
+                let detect_frame = frame.clone();
+                let read = tokio::task::spawn_blocking(move || {
+                    packopen::detect_pack(&*detect_engine, &detect_frame, &detect_universe)
+                })
+                .await
+                .ok()
+                .flatten();
+                let resolved = read
+                    .as_ref()
+                    .map(|r| r.resolved.clone())
+                    .unwrap_or([None, None, None]);
+                match watch.note_resolution(resolved) {
+                    packopen::ResolutionStep::Pending => {}
+                    packopen::ResolutionStep::ReadyToCredit(trio) => {
+                        pack_credit(&trio, &stock_path, &events_dir, &log, &regen_tx);
+                        watch.mark_proven();
+                    }
+                    packopen::ResolutionStep::Replaced { ended, ready } => {
+                        pack_miss(&ended, &events_dir, &log);
+                        if let Some(trio) = ready {
+                            pack_credit(&trio, &stock_path, &events_dir, &log, &regen_tx);
+                            watch.mark_proven();
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(reason) = watch.disarm_due(std::time::Instant::now()) {
+            if let Some(ended) = watch.finish_instance() {
+                pack_miss(&ended, &events_dir, &log);
+            }
+            log.record("pack", &format!("disarmed: {}", reason.label()));
+            break;
+        }
+    }
+
+    if capture_live {
+        tap.disarm();
+    }
+    own_stop.store(true, Ordering::Relaxed);
+    if let Some(drain) = own_drain {
+        match tokio::task::spawn_blocking(move || drain.join()).await {
+            Ok(Ok(Some(e))) => log.record("pack", &format!("stream note: {e}")),
+            Ok(Ok(None)) => {}
+            _ => log.record("pack", "stream note: stream drain did not join"),
+        }
+    }
+}
+
 /// The standalone-stream path of the reward burst: negotiate
 /// a portal stream at T+0 (so consent/startup latency is paid
 /// immediately, not at grab time), drain frames into a shared
@@ -945,6 +1268,7 @@ async fn start_capture(
     status: &Arc<Mutex<TrayStatus>>,
     log: &CaptureLog,
     tap: Arc<reward::FrameTap>,
+    pack_tap: Arc<reward::FrameTap>,
 ) -> Result<CaptureRun, screencast::NegotiateError> {
     // Item 60b: resolve every capture symbol before the portal flow
     // begins. One error names every missing name, so a live run can never
@@ -987,7 +1311,15 @@ async fn start_capture(
     let data_dir = opts.report.data_dir.clone();
     let worker_log = log.clone();
     let join = std::thread::spawn(move || {
-        capture_worker(data_dir, negotiated, stop_thread, tx, worker_log, tap)
+        capture_worker(
+            data_dir,
+            negotiated,
+            stop_thread,
+            tx,
+            worker_log,
+            tap,
+            pack_tap,
+        )
     });
     Ok(CaptureRun {
         stop,
@@ -1006,6 +1338,7 @@ fn capture_worker(
     tx: std::sync::mpsc::Sender<CaptureEvent>,
     log: CaptureLog,
     tap: Arc<reward::FrameTap>,
+    pack_tap: Arc<reward::FrameTap>,
 ) {
     let data = match CaptureData::load(&data_dir) {
         Ok(d) => d,
@@ -1036,6 +1369,7 @@ fn capture_worker(
     let mut source = TapSource {
         inner: raw_source,
         tap,
+        pack_tap,
     };
     // Item 49: "capturing" begins at the first real frame, not at connect.
     // Connecting a targetless stream used to sit idle forever, so labelling
@@ -1606,6 +1940,12 @@ fn watch_loop(
             }
             if matches!(ev, Some(elog::Event::RelicCrack)) {
                 let _ = trigger_tx.send(Trigger::RewardClosed);
+            }
+            // Pass 53: a pack purchase dialog arms the pack
+            // watch. Not a mission end — no regen rides it;
+            // the pack task regens itself on a proven credit.
+            if let Some(elog::Event::PackPurchase { path }) = &ev {
+                let _ = trigger_tx.send(Trigger::PackScreen(path.clone()));
             }
             // §4: prove a mission from its armed identity + success marker.
             if let Some(done) = missions.feed(raw, &today, &now_utc()) {

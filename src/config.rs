@@ -34,6 +34,11 @@ pub struct Config {
     /// of the latest gate-clearing frame, and credit the part
     /// to stock. Default on.
     pub reward_detect: bool,
+    /// Pack-open detection (pass 53): on a relic pack
+    /// purchase dialog, grab frames every 1 s, OCR the
+    /// reveal screens' relic captions, and credit proven
+    /// trios as Intact relics. Default on.
+    pub pack_detect: bool,
 }
 
 impl Default for Config {
@@ -46,6 +51,7 @@ impl Default for Config {
             steel_path_tiebreak: true,
             serve_port: 8791,
             reward_detect: true,
+            pack_detect: true,
         }
     }
 }
@@ -95,6 +101,9 @@ impl Config {
         }
         if let Some(v) = table.get("reward_detect").and_then(|v| v.as_bool()) {
             cfg.reward_detect = v;
+        }
+        if let Some(v) = table.get("pack_detect").and_then(|v| v.as_bool()) {
+            cfg.pack_detect = v;
         }
         Ok((cfg, ConfigSource::File))
     }

@@ -1,9 +1,12 @@
 //! The core-event log (fifty-first pass, Seth's spec): an
 //! append-only JSON Lines store, `events.jsonl` in the app
-//! data dir beside `stock.json`, recording the three state
+//! data dir beside `stock.json`, recording the state
 //! changes Seth used to dig through `capture.log` by hand to
 //! find — a reward-detection credit, a proven alert
 //! completion, and a relic crack episode whose burst missed.
+//! The fifty-third pass adds the pack pair: a proven pack
+//! reveal (`pack_open`) and a seen-but-unproven one
+//! (`pack_miss`).
 //! The resident is the single writer; the report reads the
 //! file to render the Log tab and to carry the latest credit
 //! to the page for the acquisition toast. A malformed line
@@ -26,7 +29,7 @@ pub const MAX_RECORDS: usize = 500;
 /// from the one resident process.
 static APPEND_GATE: Mutex<()> = Mutex::new(());
 
-/// The three logged state changes.
+/// The logged state changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
@@ -36,6 +39,12 @@ pub enum EventKind {
     AlertDone,
     /// A relic crack episode whose burst detected nothing.
     CrackMiss,
+    /// A relic pack reveal screen was proven and credited
+    /// (fifty-third pass).
+    PackOpen,
+    /// A pack reveal screen was seen but left unproven
+    /// (fifty-third pass).
+    PackMiss,
 }
 
 /// One `events.jsonl` record. `ts` is UTC RFC 3339 (the
@@ -65,6 +74,10 @@ pub struct EventRecord {
     /// than a raw path when it did not resolve (pass 51 spec).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub roll: Option<String>,
+    /// PackOpen: the three granted relic names, in display
+    /// order (fifty-third pass).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub names: Option<Vec<String>>,
 }
 
 impl EventRecord {
@@ -77,6 +90,7 @@ impl EventRecord {
             label: None,
             reason: None,
             roll: None,
+            names: None,
         }
     }
 
@@ -89,6 +103,7 @@ impl EventRecord {
             label: Some(label),
             reason: None,
             roll: None,
+            names: None,
         }
     }
 
@@ -101,6 +116,33 @@ impl EventRecord {
             label: None,
             reason: Some(reason),
             roll,
+            names: None,
+        }
+    }
+
+    pub fn pack_open(ts: String, names: Vec<String>) -> Self {
+        Self {
+            ts,
+            kind: EventKind::PackOpen,
+            part: None,
+            gear: None,
+            label: None,
+            reason: None,
+            roll: None,
+            names: Some(names),
+        }
+    }
+
+    pub fn pack_miss(ts: String, reason: String) -> Self {
+        Self {
+            ts,
+            kind: EventKind::PackMiss,
+            part: None,
+            gear: None,
+            label: None,
+            reason: Some(reason),
+            roll: None,
+            names: None,
         }
     }
 
@@ -126,6 +168,17 @@ impl EventRecord {
                 }
                 s
             }
+            EventKind::PackOpen => format!(
+                "Relic pack opened — {}",
+                self.names
+                    .as_deref()
+                    .map(|n| n.join(", "))
+                    .unwrap_or_else(|| "unknown relics".to_owned())
+            ),
+            EventKind::PackMiss => format!(
+                "Relic pack — not proven ({})",
+                self.reason.as_deref().unwrap_or("unresolved")
+            ),
         }
     }
 }
@@ -204,6 +257,15 @@ pub fn latest_credit(events: &[EventRecord]) -> Option<&EventRecord> {
         .find(|e| e.kind == EventKind::Credit)
 }
 
+/// The newest pack_open in the log, if any — the pack
+/// chime beacon's payload source (fifty-third pass).
+pub fn latest_pack_open(events: &[EventRecord]) -> Option<&EventRecord> {
+    events
+        .iter()
+        .rev()
+        .find(|e| e.kind == EventKind::PackOpen)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,6 +331,47 @@ mod tests {
         assert_eq!(
             latest_credit(&loaded).unwrap().part.as_deref(),
             Some("Voruna Prime Chassis Blueprint")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pack_kinds_roundtrip_and_render() {
+        let dir = tmpdir("pack");
+        append(
+            &dir,
+            &EventRecord::pack_open(
+                "2026-10-28T05:03:00Z".into(),
+                vec!["Axi P10".into(), "Meso K9".into(), "Lith S19".into()],
+            ),
+        );
+        append(
+            &dir,
+            &EventRecord::pack_miss(
+                "2026-10-28T05:04:00Z".into(),
+                "unresolved slot 2".into(),
+            ),
+        );
+        let text = std::fs::read_to_string(file(&dir)).unwrap();
+        assert!(text.contains("\"kind\":\"pack_open\""), "{text}");
+        assert!(text.contains("\"kind\":\"pack_miss\""), "{text}");
+        assert!(
+            text.contains("\"names\":[\"Axi P10\",\"Meso K9\",\"Lith S19\"]"),
+            "{text}"
+        );
+        let loaded = load(&dir);
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(
+            loaded[0].line(),
+            "Relic pack opened — Axi P10, Meso K9, Lith S19"
+        );
+        assert_eq!(
+            loaded[1].line(),
+            "Relic pack — not proven (unresolved slot 2)"
+        );
+        assert_eq!(
+            latest_pack_open(&loaded).unwrap().ts,
+            "2026-10-28T05:03:00Z"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -3089,7 +3089,7 @@ pub const RELIC_TOKEN_WITNESS_MAX: usize = 1;
 /// Extra read tokens (icon bleed, junk) testify for nothing
 /// and cost nothing; a read with fewer tokens than the
 /// candidate can never witness it.
-fn relic_name_witnessed(read: &str, candidate: &str) -> bool {
+pub fn relic_name_witnessed(read: &str, candidate: &str) -> bool {
     let cleaned = strip_tier_label(read);
     let cleaned = strip_relic_suffix(&cleaned);
     let read_toks: Vec<String> = fold(&cleaned)
