@@ -2857,3 +2857,88 @@ it refines the brief where they disagree. For the next worker pass.
     verification owed: hover a Backlog pip; the
     queue phrase in the wild; overlay relic headers
     unchanged.
+
+119. **Pack-open detection (pass 53, shipped as
+    v0.5.48).** Seth's criteria of 2026-10-28 (queue
+    note PACK_OPEN_DETECTION_QUEUE.md). Granted relics
+    are named nowhere in EE.log (content-blind), so
+    pack gains reached the planner only via a later
+    refinement capture; the reveal screen prints the
+    three granted names as captions, and this pass
+    captures them. (a) ARM: new
+    `elog::Event::PackPurchase` — a
+    `ThemedDetailedPurchaseDialog.lua: PopulateInfo->`
+    line whose path contains `/BoosterPacks/` (any
+    source, not syndicate-only); not a mission end.
+    The watch loop sends `Trigger::PackScreen`; the
+    resident spawns the one-shot watch (config
+    `pack_detect`, default on). (b) WATCH
+    (`packopen::PackWatch`, a pure machine the resident
+    drives per grab): 1 s cadence from the live capture
+    stream via a second FrameTap, else its own
+    negotiated stream; disarm at 15 continuous seconds
+    with no pack-classifying frame or 60 s total since
+    arm, whichever first; arm/disarm lines to
+    capture.log; each instance's first frame saved
+    under capture-debug/packs/. Exactly once per
+    screen-instance; instance ends on an intervening
+    non-pack frame (an identical trio in a later
+    instance credits again) or on a conflicting read
+    (a slot proven both ways — the next reveal replaced
+    the screen between grabs), which ends the old
+    instance and starts a fresh one. (c) SCREEN GATE:
+    structural conjunction at the measured geometry
+    (columns x 0.3387/0.4512/0.5637 of W, width 0.1000,
+    top 0.2583 of H): per column an era icon (bright
+    fraction >= 0.10), caption glyph density
+    (>= 0.02), a drop-table column (populated-row
+    fraction 0.06-0.45 in y 0.46-0.95), and dark
+    inter-card gaps (means < 40; fixtures <= 25,
+    reward/gameplay >= 53). CALIBRATION CORRECTION:
+    the brief's nominal caption band y 0.437-0.458
+    holds no glyphs on the fixtures (rule + diamond
+    only); the measured caption line is y 0.420-0.429
+    and the OCR band is y 0.412-0.440. (d) ADMISSION:
+    two reads (PSM 6/7, upscale 4) arbitrated like the
+    reward name gate; a read holds a name only under
+    the pass-46 discipline — score >= 0.80, margin
+    >= 0.10, the shared hold predicate, and the token
+    witness (`relic_name_witnessed`, now pub: every
+    token witnessed by a distinct read token, in
+    order, <= 1 confusable edit; the trailing "Relic"
+    is furniture). (e) ATOMIC CREDIT: all three
+    captions proven or nothing; +1 per name into
+    `relics[name].tiers[Intact]` (the capture-produced
+    key form; duplicates credit multiply), the reward
+    credit's durability discipline. (f) EVENTS +
+    CHIME: `pack_open` (names in display order; Log
+    line "Relic pack opened — A, B, C") and
+    `pack_miss` naming the unresolved slot(s), on the
+    pass-51 store and in the Log tab. The newest
+    pack_open rides the Log fragment as a hidden
+    `#pack-beacon` keyed by event identity; a
+    dedicated script (own seen-key
+    `fracker.packChimeSeen`, ~30 s first-sight
+    freshness, live arrivals) plays the shared chime
+    at 0.4. NO toast for packs, no chime on a miss;
+    a pack credit never makes a `credit` event.
+    GATES: Seth's three screenshots committed as
+    grayscale fixtures (pack-{1,2,3}.png) — all trios
+    resolve with the real engine and credit exactly
+    the ground-truth multisets as Intact (Axi P10 /
+    Meso K9 / Lith S19; Neo C11 / Lith V11 / Lith G14;
+    Axi V14 / Lith A13 / Meso V17), plus a +2
+    duplicate pin; blank + 4-player reward + both
+    3-player burst frames never classify; a mirrored
+    (unprovable) slot-2 caption yields no credit and
+    one pack_miss naming slot 2; state-machine pins
+    for the 15 s / 60 s disarms, credit-once, re-credit
+    after absence, and conflict replacement. Suite
+    431 passed / 0 failed (lib 403, +11 over v0.5.47;
+    golden 15; packaging 7; resident 5; tray_quit 1);
+    `cargo build --release --locked --offline` green
+    pre-tag, lock diff = version line only. Details:
+    docs/fifty-third-pass.md. Live verification owed:
+    Seth buys packs on this build — arm line, credit +
+    chime per held screen, Log lines, a miss (not a
+    credit) for any screen dismissed before its chime.
