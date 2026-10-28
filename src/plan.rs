@@ -338,7 +338,7 @@ pub struct Chunk {
     /// sortie/filler chunks have no single parent (None).
     pub gear: Option<String>,
     /// Structured crack facts for the twelfth-pass mock's compact crack
-    /// rows (`Systems · +2 also`, `Meso C11`, `Radiant · 10% · 400 tr`).
+    /// rows (`Systems · +2 other needed`, `Meso C11`, `Radiant · 10% · 400 tr`).
     /// None for every non-crack chunk; the human strings (`title`,
     /// `why`) stay for other consumers.
     pub crack: Option<CrackInfo>,
@@ -360,8 +360,8 @@ pub struct CrackInfo {
     pub batch: u32,
     /// Total void-trace cost for the batch (`400 tr`).
     pub traces: u32,
-    /// Other still-needed parts the same relic drops (`+2 also`;
-    /// pass 44: PartState::Need only).
+    /// Other still-needed parts the same relic drops (`+2 other
+    /// needed`; pass 44: PartState::Need only).
     pub covers: usize,
     /// The radshare verdict for this crack when sharing beats solo
     /// (pass 38, addendum #103): the full verdict line, carried so
@@ -4281,7 +4281,7 @@ mod tests {
     #[test]
     fn coverage_zero_when_every_other_reward_is_satisfied() {
         // Seth's exact live figure: the Meso C11 line read
-        // "+3 also" while every other part it drops was already
+        // "+3 also" (the pre-pass-52 wording) while every other part it drops was already
         // in hand. Need-based coverage reads +0, and the score
         // is chance x stock factor with no coverage multiplier.
         let p = coverage_fixture(false);

@@ -1796,85 +1796,176 @@ pub const PUBLIC_EXPORT_BASE: &str = "http://content.warframe.com/PublicExport";
 /// carries no texture.
 const RELIC_ICON_TIERS: [&str; 4] = ["Intact", "Exceptional", "Flawless", "Radiant"];
 
-/// Parse the baked projection-texture map
-/// (`data/cache/relic-textures.json`): projection uniqueName ->
-/// Public Export `textureLocation`, the ExportManifest subset for
-/// the projections `item-names.json` knows. Baked, never fetched
+/// The baked relic-texture CLASS table
+/// (`data/cache/relic-textures.json`, pass 52): DE ships one
+/// relic icon per (era, refinement tier) — the 3,204-record
+/// per-projection bake of pass 48 collapsed to 21 distinct
+/// textures once measured, so the bake is keyed by class
+/// instead of by projection uniqueName. Baked, never fetched
 /// at runtime (addendum #51 discipline); refresh per
 /// data/cache/README.md.
-pub fn load_relic_textures(text: &str) -> Result<HashMap<String, String>, String> {
-    serde_json::from_str(text).map_err(|e| format!("relic textures: {e}"))
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RelicTextureClasses {
+    /// Era name as it appears in relic display names ("Lith",
+    /// "Meso", "Neo", "Axi", "Vanguard", "Requiem") ->
+    /// refinement tier -> Public Export `textureLocation`.
+    /// Vanguard rows carry the Axi textures and Requiem rows
+    /// the RelicImmortal ones: those eras share an icon
+    /// family, which the manifest's own per-projection
+    /// records confirm group by group.
+    #[serde(default)]
+    pub classes: HashMap<String, HashMap<String, String>>,
+    /// The un-tiered base projection items' texture: every
+    /// era's generic projection item (the plain "Lith Relic",
+    /// "Requiem Relic", ...) shows the shared OmegaIsotope
+    /// pickup icon.
+    #[serde(default)]
+    pub pickup: Option<String>,
+    /// Tier-less NAMED relics — single-variant projections
+    /// such as "Requiem Eterna" — by case-folded base name ->
+    /// textureLocation. Unlike the generic base items these
+    /// wear a real relic icon, so they keep a per-name row.
+    #[serde(default)]
+    pub tierless: HashMap<String, String>,
+}
+
+/// Parse the baked relic-texture class table
+/// (`data/cache/relic-textures.json`). The tier-less keys
+/// fold on load, like every other relic-name key in the join.
+pub fn load_relic_textures(text: &str) -> Result<RelicTextureClasses, String> {
+    let mut parsed: RelicTextureClasses =
+        serde_json::from_str(text).map_err(|e| format!("relic textures: {e}"))?;
+    parsed.tierless = parsed
+        .tierless
+        .into_iter()
+        .map(|(name, loc)| (name.to_lowercase(), loc))
+        .collect();
+    Ok(parsed)
+}
+
+/// One base relic name's icon candidacy, collected from
+/// item-names: the era word the class lookup keys on, which
+/// refinement tiers the base actually has, and whether an
+/// un-tiered variant of the base exists.
+struct IconCandidate<'a> {
+    era: &'a str,
+    tiers: [bool; 4],
+    tierless: bool,
+}
+
+impl<'a> IconCandidate<'a> {
+    fn new(era: &'a str) -> Self {
+        IconCandidate {
+            era,
+            tiers: [false; 4],
+            tierless: false,
+        }
+    }
 }
 
 /// Build the relic icon map: relic display name -> absolute
-/// Public Export texture URL (pass 48). Keys are CASE-FOLDED base
-/// names; resolve through [`relic_icon_url`], never by raw key.
+/// Public Export texture URL (pass 48; class-table join,
+/// pass 52). Keys are CASE-FOLDED base names; resolve through
+/// [`relic_icon_url`], never by raw key.
 ///
 /// The join: `item_names` maps each projection uniqueName
-/// (`/Lotus/Types/Game/Projections/...`) to a tier-suffixed
-/// display name ("Meso C11 Intact"); stripping the tier word
-/// gives the base relic name, and `textures` gives that
-/// projection's textureLocation. Two naming quirks in the
-/// sources are normalized here, never guessed around:
-/// relic-tables roman numerals are title-case ("Requiem Ii")
-/// where item-names uses upper ("Requiem II") — the case-folded
-/// key absorbs that; and the Vanguard relics are "Axi Vanguard
-/// C1" in the tables but plain "Vanguard C1" as projections —
-/// Vanguard bases are ALSO keyed with the "Axi " prefix.
-/// A display name with no tier suffix ("Requiem Eterna Relic",
-/// a single-variant projection) keys its base minus " Relic"
-/// at the Intact slot. A relic no tier resolves a texture for
-/// is simply absent — the caller keeps its monogram.
+/// (`/Lotus/Types/Game/Projections/...`) to a display name —
+/// tier-suffixed ("Meso C11 Intact") or bare ("Requiem
+/// Eterna Relic"). A tiered base resolves through the class
+/// table at the finest tier it HAS whose (era, tier) class
+/// exists — with a complete bake that is its Intact class,
+/// the texture every one of its projections carried in the
+/// old per-item map (each (era, tier) group in the manifest
+/// names exactly one texture; the equivalence gate in the
+/// tests pins all 800 relic names to their pre-collapse
+/// URLs). An un-tiered base resolves through the tier-less
+/// rows: a named single-variant relic's own texture, else
+/// the shared pickup icon of the generic base items. Two
+/// naming quirks in the sources are normalized here, never
+/// guessed around: relic-tables roman numerals are
+/// title-case ("Requiem Ii") where item-names uses upper
+/// ("Requiem II") — the case-folded key absorbs that; and
+/// the Vanguard relics are "Axi Vanguard C1" in the tables
+/// but plain "Vanguard C1" as projections — Vanguard bases
+/// are ALSO keyed with the "Axi " prefix. A relic nothing
+/// resolves a texture for is simply absent — the caller
+/// keeps its monogram.
 pub fn relic_icon_urls(
     item_names: &HashMap<String, String>,
-    textures: &HashMap<String, String>,
+    textures: &RelicTextureClasses,
 ) -> HashMap<String, String> {
-    // Case-folded base name -> per-tier projection uniqueName.
-    let mut candidates: HashMap<String, [Option<&str>; 4]> = HashMap::new();
+    // Case-folded base name -> candidacy (see IconCandidate).
+    let mut candidates: HashMap<String, IconCandidate> = HashMap::new();
+    fn add<'a>(
+        candidates: &mut HashMap<String, IconCandidate<'a>>,
+        key: String,
+        era: &'a str,
+        rank: Option<usize>,
+    ) {
+        let cand = candidates
+            .entry(key)
+            .or_insert_with(|| IconCandidate::new(era));
+        match rank {
+            Some(rank) => cand.tiers[rank] = true,
+            None => cand.tierless = true,
+        }
+    }
     for (unique, display) in item_names {
         if !unique.contains("/Projections/") {
             continue;
         }
-        let mut parsed: Option<(&str, usize)> = None;
+        let mut parsed: Option<(&str, Option<usize>)> = None;
         for (rank, tier) in RELIC_ICON_TIERS.iter().enumerate() {
             if let Some(base) = display
                 .strip_suffix(tier)
                 .and_then(|s| s.strip_suffix(' '))
             {
-                parsed = Some((base, rank));
+                parsed = Some((base, Some(rank)));
                 break;
             }
         }
         if parsed.is_none() {
             if let Some(base) = display.strip_suffix(" Relic") {
-                parsed = Some((base, 0));
+                parsed = Some((base, None));
             }
         }
         let Some((base, rank)) = parsed else {
             continue;
         };
-        let slot = &mut candidates.entry(base.to_lowercase()).or_default()[rank];
-        if slot.is_none() {
-            *slot = Some(unique.as_str());
-        }
+        let era = base.split(' ').next().unwrap_or(base);
+        add(&mut candidates, base.to_lowercase(), era, rank);
         if base.starts_with("Vanguard") {
             let alias = format!("axi {}", base.to_lowercase());
-            let slot = &mut candidates.entry(alias).or_default()[rank];
-            if slot.is_none() {
-                *slot = Some(unique.as_str());
-            }
+            add(&mut candidates, alias, era, rank);
         }
     }
     let mut out = HashMap::new();
-    for (key, tiers) in &candidates {
-        for unique in tiers.iter().flatten() {
-            if let Some(loc) = textures.get(*unique) {
-                out.insert(
-                    key.clone(),
-                    format!("{PUBLIC_EXPORT_BASE}/{}", loc.trim_start_matches('/')),
-                );
-                break;
+    for (key, cand) in &candidates {
+        let mut loc: Option<&str> = None;
+        for (rank, tier) in RELIC_ICON_TIERS.iter().enumerate() {
+            if cand.tiers[rank] {
+                if let Some(found) = textures
+                    .classes
+                    .get(cand.era)
+                    .and_then(|row| row.get(*tier))
+                {
+                    loc = Some(found);
+                    break;
+                }
             }
+        }
+        if loc.is_none() && cand.tierless {
+            loc = textures
+                .tierless
+                .get(key)
+                .map(String::as_str)
+                .or(textures.pickup.as_deref());
+        }
+        if let Some(loc) = loc {
+            out.insert(
+                key.clone(),
+                format!("{PUBLIC_EXPORT_BASE}/{}", loc.trim_start_matches('/')),
+            );
         }
     }
     out
@@ -1958,14 +2049,15 @@ impl RelicStock {
 mod tests {
     use super::*;
 
-    /// Pass 48 gate: a known projection uniqueName resolves
-    /// through a fixture ExportManifest texture map to the
-    /// expected content-server URL — Intact preferred, coarser
-    /// tiers only as substitutes, the source naming quirks
-    /// normalized, and an unresolvable relic absent (monogram),
-    /// never a guessed URL.
+    /// Pass 48 gate, class-table shape (pass 52): a relic
+    /// resolves through the (era, tier) class table to the
+    /// expected content-server URL — the finest tier it HAS
+    /// with a class row wins, the source naming quirks are
+    /// normalized, tier-less relics take their own row, and an
+    /// unresolvable relic is absent (monogram), never a
+    /// guessed URL.
     #[test]
-    fn relic_icon_urls_resolve_through_the_manifest_join() {
+    fn relic_icon_urls_resolve_through_the_class_join() {
         let item_names: HashMap<String, String> = HashMap::from([
             // Meso C11, all four tiers (real uniqueNames).
             (
@@ -2014,42 +2106,69 @@ mod tests {
                 "Octavia Prime".to_owned(),
             ),
         ]);
-        let textures: HashMap<String, String> = HashMap::from([
-            (
-                "/Lotus/Types/Game/Projections/T2VoidProjectionCitrinePrimeABronze".to_owned(),
-                "/Lotus/Interface/Icons/Relics/RelicMesoD.png!00_fixturehash".to_owned(),
-            ),
-            (
-                "/Lotus/Types/Game/Projections/T4VoidProjectionAPlatinum".to_owned(),
-                "/Lotus/Interface/Icons/Relics/RelicAxiR.png!00_fixturehash".to_owned(),
-            ),
-            (
-                "/Lotus/Types/Game/Projections/T4VoidProjectionVanguardCBronze".to_owned(),
-                "/Lotus/Interface/Icons/Relics/RelicAxiD.png!00_fixturehash".to_owned(),
-            ),
-            (
-                "/Lotus/Types/Game/Projections/T5VoidProjectionImmortalBBronze".to_owned(),
-                "/Lotus/Interface/Icons/Relics/RelicImmortalB.png!00_fixturehash".to_owned(),
-            ),
-            (
-                "/Lotus/Types/Game/Projections/T5VoidProjectionImmortalOmniA".to_owned(),
+        // The class table, fixture locations. The Axi row
+        // deliberately lacks an Intact class, so Axi A99 —
+        // which HAS an Intact projection — must fall through
+        // to the finest tier it has whose class exists
+        // (Radiant), mirroring the per-item map's missing-
+        // texture substitute. Vanguard is its own era row
+        // carrying an Axi-family texture, as in the real bake.
+        let textures = RelicTextureClasses {
+            classes: HashMap::from([
+                (
+                    "Meso".to_owned(),
+                    HashMap::from([(
+                        "Intact".to_owned(),
+                        "/Lotus/Interface/Icons/Relics/RelicMesoD.png!00_fixturehash"
+                            .to_owned(),
+                    )]),
+                ),
+                (
+                    "Axi".to_owned(),
+                    HashMap::from([(
+                        "Radiant".to_owned(),
+                        "/Lotus/Interface/Icons/Relics/RelicAxiR.png!00_fixturehash"
+                            .to_owned(),
+                    )]),
+                ),
+                (
+                    "Vanguard".to_owned(),
+                    HashMap::from([(
+                        "Intact".to_owned(),
+                        "/Lotus/Interface/Icons/Relics/RelicAxiD.png!00_fixturehash"
+                            .to_owned(),
+                    )]),
+                ),
+                (
+                    "Requiem".to_owned(),
+                    HashMap::from([(
+                        "Intact".to_owned(),
+                        "/Lotus/Interface/Icons/Relics/RelicImmortalB.png!00_fixturehash"
+                            .to_owned(),
+                    )]),
+                ),
+            ]),
+            pickup: None,
+            tierless: HashMap::from([(
+                // As the loader leaves it: keys case-folded.
+                "requiem eterna".to_owned(),
                 "/Lotus/Interface/Icons/Relics/RelicImmortalC.png!00_fixturehash".to_owned(),
-            ),
-        ]);
+            )]),
+        };
         let icons = relic_icon_urls(&item_names, &textures);
         assert_eq!(
             relic_icon_url("Meso C11", &icons).as_deref(),
             Some(
                 "http://content.warframe.com/PublicExport/Lotus/Interface/Icons/Relics/RelicMesoD.png!00_fixturehash"
             ),
-            "the Intact projection's texture, on the content server"
+            "the Intact class texture, on the content server"
         );
         assert_eq!(
             relic_icon_url("Axi A99", &icons).as_deref(),
             Some(
                 "http://content.warframe.com/PublicExport/Lotus/Interface/Icons/Relics/RelicAxiR.png!00_fixturehash"
             ),
-            "Intact carries no texture: the Radiant substitute"
+            "the Axi row has no Intact class: the Radiant substitute"
         );
         assert_eq!(
             relic_icon_url("Axi Vanguard C1", &icons).as_deref(),
@@ -2077,6 +2196,39 @@ mod tests {
             None,
             "an unresolvable relic stays absent — monogram, never a guess"
         );
+    }
+
+    /// Pass 52 equivalence gate: against the REAL baked data,
+    /// every one of the 800 relic-table names resolves through
+    /// the class-table join to the SAME content-server URL the
+    /// pre-collapse per-item join produced — the baseline in
+    /// fixtures/relic-icon-baseline.json was generated by the
+    /// old code from the old 3,204-record bake before the
+    /// collapse. The edge cases ride along in the 800: Requiem
+    /// II/III/IV numeral folding, the dual-keyed Vanguard
+    /// bases, tier-less "Requiem Eterna", and the bare
+    /// "Requiem" whose icon is the pickup texture.
+    #[test]
+    fn relic_icon_urls_match_the_pre_class_table_baseline() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let read = |rel: &str| {
+            std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
+        };
+        let item_names: HashMap<String, String> =
+            serde_json::from_str(&read("data/cache/item-names.json")).unwrap();
+        let textures =
+            load_relic_textures(&read("data/cache/relic-textures.json")).unwrap();
+        let baseline: HashMap<String, String> =
+            serde_json::from_str(&read("fixtures/relic-icon-baseline.json")).unwrap();
+        assert_eq!(baseline.len(), 800, "the full relic-table name list");
+        let icons = relic_icon_urls(&item_names, &textures);
+        for (name, want) in &baseline {
+            assert_eq!(
+                relic_icon_url(name, &icons).as_ref(),
+                Some(want),
+                "{name} must keep its pre-collapse icon URL"
+            );
+        }
     }
 
     #[test]

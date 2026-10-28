@@ -385,15 +385,14 @@ pub fn load_item_names(
         .unwrap_or_default()
 }
 
-/// Load the baked projection-texture map
-/// (`data/cache/relic-textures.json`: projection uniqueName ->
-/// Public Export textureLocation, pass 48). Missing/unreadable
-/// = empty map: relic icons degrade to the monogram, never a
-/// guessed URL. Baked data — refreshed per data/cache/README.md,
-/// never fetched at runtime.
-pub fn load_relic_textures(
-    data_dir: &Path,
-) -> std::collections::HashMap<String, String> {
+/// Load the baked relic-texture class table
+/// (`data/cache/relic-textures.json`: (era, tier) -> Public
+/// Export textureLocation, pass 48; class-table shape,
+/// pass 52). Missing/unreadable = empty table: relic icons
+/// degrade to the monogram, never a guessed URL. Baked data
+/// — refreshed per data/cache/README.md, never fetched at
+/// runtime.
+pub fn load_relic_textures(data_dir: &Path) -> crate::model::RelicTextureClasses {
     std::fs::read_to_string(data_dir.join("cache/relic-textures.json"))
         .ok()
         .and_then(|t| crate::model::load_relic_textures(&t).ok())
