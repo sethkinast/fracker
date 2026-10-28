@@ -1169,7 +1169,7 @@ fn search_item_html(g: &crate::plan::GoalCard, ctx: &RenderContext<'_>) -> Strin
     } else if g.resurgence_live {
         h.push_str("<em class=\"bd z\">VARZIA</em>\n");
     } else {
-        h.push_str("<em class=\"bd\">UNVAULTED</em>\n");
+        h.push_str("<em class=\"bd u\">UNVAULTED</em>\n");
     }
     h.push_str(&format!("<span class=\"gc\">{}</span>\n</div>\n", seg_html(g)));
     for p in &g.parts {
@@ -1230,14 +1230,65 @@ fn search_part_row_html(g: &crate::plan::GoalCard, p: &crate::plan::PartRow) -> 
         crate::plan::PartState::Unknown => "unknown",
     };
     format!(
-        "<div class=\"r{have_class}{uv_class}\"{uv_attrs}>\n<span class=\"pn\">{}</span>\n<span class=\"srstate {}\">{}</span>\n</div>\n",
+        "<div class=\"r{have_class}{uv_class}\"{uv_attrs}>\n<span class=\"pn\">{}</span>\n<span class=\"srstate {}\">{}</span>{}\n</div>\n",
         esc(&part_label),
         part_state_class(&p.state),
         state_text,
+        search_need_detail_html(p),
         have_class = have_class,
         uv_class = uv_class,
         uv_attrs = uv_attrs,
     )
+}
+
+/// The fiftieth-pass detail line on a prime-item result's NEED
+/// rows only (Seth, queue B-5/B-6): the part's rarity and the
+/// best relic to source it from. Both are the plan's own
+/// computations, read off the row — [`crate::plan::PartRow::rarity`]
+/// (banded from the best-ranked containing relic; shown only
+/// when the part HAS a containing relic, since a sourceless
+/// part's stored rarity is a banding fallback, not data) and
+/// [`crate::plan::PartRow::deal`] (the planner's per-part best
+/// relic: lowest source tier — Owned > Unvaulted > Varzia >
+/// Unobtainable — then highest Intact chance, then name).
+/// Display rules: an Owned best relic shows its name plus the
+/// TOTAL stock across refinement tiers (`deal.owned` is
+/// `RelicStock::count`, the same total the relic result shows);
+/// an obtainable-but-unowned best (Unvaulted or Varzia tier)
+/// shows the name alone; an Unobtainable best shows nothing —
+/// and a part with no relic source at all shows nothing.
+fn search_need_detail_html(p: &crate::plan::PartRow) -> String {
+    if p.state != crate::plan::PartState::Need {
+        return String::new();
+    }
+    let mut pieces: Vec<String> = Vec::new();
+    if !p.relics.is_empty() {
+        let (class, label) = match p.rarity {
+            crate::plan::Rarity::Common => ("common", "Common"),
+            crate::plan::Rarity::Uncommon => ("uncommon", "Uncommon"),
+            crate::plan::Rarity::Rare => ("rare", "Rare"),
+        };
+        pieces.push(format!("<span class=\"{class}\">{label}</span>"));
+    }
+    if let Some(d) = &p.deal {
+        use crate::plan::SourceTier;
+        match d.source_tier {
+            SourceTier::Owned => pieces.push(format!(
+                "{} &times;{}",
+                esc(&d.relic),
+                fmt_int(d.owned.unwrap_or(0))
+            )),
+            SourceTier::Unvaulted | SourceTier::Varzia => {
+                pieces.push(esc(&d.relic));
+            }
+            SourceTier::Unobtainable => {}
+        }
+    }
+    if pieces.is_empty() {
+        String::new()
+    } else {
+        format!("\n<span class=\"srdeal\">{}</span>", pieces.join(" &middot; "))
+    }
 }
 
 /// One relic's result block: icon chip, name, vault status, his
@@ -1273,7 +1324,7 @@ fn search_relic_html(
     if r.vaulted {
         h.push_str("<em class=\"bd v\">VAULTED</em>\n");
     } else {
-        h.push_str("<em class=\"bd\">UNVAULTED</em>\n");
+        h.push_str("<em class=\"bd u\">UNVAULTED</em>\n");
     }
     let stock_label = match data.stock.count(&r.name) {
         Some(n) => format!("&times;{} in stock", fmt_int(n)),
@@ -1759,6 +1810,14 @@ label.row{cursor:pointer}
 .so-top{display:flex;align-items:baseline;gap:14px;border-bottom:2px solid var(--cy);padding-bottom:10px;margin-bottom:18px}
 .so-prompt{color:var(--cy);font-size:30px}
 #search-query{font:700 38px Rajdhani,sans-serif;letter-spacing:.04em;color:var(--tx);min-height:46px}
+/* An empty #search-query has no text run, so in the baseline-
+   aligned .so-top flex row its baseline is synthesized from its
+   bottom edge and the row jumps up when the first glyph lands
+   (fiftieth pass). The nbsp strut gives the empty state the same
+   alphabetic baseline as any glyph: the line cannot shift. */
+#search-query:empty::before{content:"\00a0"}
+.bd.u{color:#aeefce;border-color:#aeefce}
+.sr .r .srdeal{grid-column:1/-1;font-size:16px;color:var(--mut)}
 .so-hint{margin-top:16px;color:var(--mut);font-size:14px;letter-spacing:.08em;min-height:20px}
 .sr{display:none}
 .sr.on{display:block;background:var(--panel);border:1px solid var(--line);padding:20px 24px;clip-path:polygon(10px 0,100% 0,100% calc(100% - 10px),calc(100% - 10px) 100%,0 100%,0 10px)}
@@ -3337,6 +3396,179 @@ mod tests {
         );
     }
 
+    /// Gate (fiftieth pass, queue B-4/B-5/B-6): the UNVAULTED
+    /// badge on overlay results carries the mint `u` modifier
+    /// (item and relic alike; VAULTED keeps `v`), and a prime
+    /// item's Need rows show the part's rarity plus the best
+    /// relic to source it — Owned with the TOTAL count,
+    /// obtainable-but-unowned (Unvaulted / Varzia) by name
+    /// alone, Unobtainable not at all. Non-Need rows and
+    /// sourceless Need parts show nothing extra.
+    #[test]
+    fn search_index_need_rows_show_rarity_and_best_relic() {
+        use crate::plan::SourceTier;
+        let t = Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let opt = |relic: &str, tier: SourceTier| crate::plan::RelicOption {
+            relic: relic.to_owned(),
+            vaulted: false,
+            chance_intact: 11.0,
+            chance_radiant: 20.0,
+            owned: None,
+            source_tier: tier,
+        };
+        let deal = |relic: &str, tier: SourceTier, owned: Option<u32>| {
+            Some(crate::plan::PartDeal {
+                relic: relic.to_owned(),
+                vaulted: false,
+                refinement: "Intact".to_owned(),
+                chance: 11.0,
+                expected: 9.0,
+                owned,
+                radiant: None,
+                source_tier: tier,
+            })
+        };
+        let nrow = |name: &str,
+                    state: PartState,
+                    rarity: Rarity,
+                    relics: Vec<crate::plan::RelicOption>,
+                    deal: Option<crate::plan::PartDeal>| PartRow {
+            name: name.to_owned(),
+            state,
+            held: 0,
+            required: 1,
+            relics,
+            best_odds: String::new(),
+            rarity,
+            deal,
+        };
+        let entry = |name: &str, vaulted: bool| crate::model::RelicEntry {
+            name: name.to_owned(),
+            rewards: vec![srelic_reward("Forma Blueprint", 25.33)],
+            vaulted,
+            sources: HashMap::new(),
+        };
+        let relics = crate::model::RelicTables {
+            relics: HashMap::from([
+                ("Meso C11".to_owned(), entry("Meso C11", false)),
+                ("Lith S19".to_owned(), entry("Lith S19", true)),
+            ]),
+            sources: HashMap::new(),
+        };
+        let stock = crate::model::RelicStock::Unknown;
+        let part_stock: HashMap<String, u32> = HashMap::new();
+        let unverified: HashMap<String, u32> = HashMap::new();
+        let no_relic_icons: HashMap<String, String> = HashMap::new();
+        let ctx = search_ctx(
+            &world, &t, &weekly, &proven, &icons, &cats, &relics, &stock, &part_stock,
+            &unverified, &no_relic_icons,
+        );
+        let mut card = goal("Bo Prime", "Bo Prime Blade", false, false);
+        card.parts = vec![
+            // Owned best relic: name + total count.
+            nrow(
+                "Bo Prime Blade",
+                PartState::Need,
+                Rarity::Rare,
+                vec![opt("Meso C11", SourceTier::Owned)],
+                deal("Meso C11", SourceTier::Owned, Some(5)),
+            ),
+            // Unvaulted, unowned: name alone.
+            nrow(
+                "Bo Prime Handle",
+                PartState::Need,
+                Rarity::Common,
+                vec![opt("Lith S19", SourceTier::Unvaulted)],
+                deal("Lith S19", SourceTier::Unvaulted, Some(0)),
+            ),
+            // Varzia, unowned: name alone.
+            nrow(
+                "Bo Prime Ornament",
+                PartState::Need,
+                Rarity::Uncommon,
+                vec![opt("Meso V16", SourceTier::Varzia)],
+                deal("Meso V16", SourceTier::Varzia, Some(0)),
+            ),
+            // Unobtainable best: rarity shows, the relic does not.
+            nrow(
+                "Bo Prime Stock",
+                PartState::Need,
+                Rarity::Rare,
+                vec![opt("Axi Z9", SourceTier::Unobtainable)],
+                deal("Axi Z9", SourceTier::Unobtainable, Some(0)),
+            ),
+            // No relic source at all: no detail line, and the
+            // stored rarity (a banding fallback) must not print.
+            nrow("Bo Prime Grip", PartState::Need, Rarity::Rare, vec![], None),
+            // A Have row never grows the detail line.
+            nrow(
+                "Bo Prime Barrel",
+                PartState::Have,
+                Rarity::Rare,
+                vec![opt("Meso C11", SourceTier::Owned)],
+                deal("Meso C11", SourceTier::Owned, Some(5)),
+            ),
+        ];
+        let plan = Plan {
+            goals: vec![card],
+            ..Default::default()
+        };
+        let index = search_index_html(&plan, &ctx);
+        let block = sr_block(&index, "Bo Prime");
+        assert!(
+            block.contains("<em class=\"bd u\">UNVAULTED</em>"),
+            "the item's UNVAULTED badge is the mint one: {block}"
+        );
+        assert_eq!(
+            block.matches("srdeal").count(),
+            4,
+            "detail lines on exactly the four sourced Need rows: {block}"
+        );
+        assert!(
+            block.contains("Meso C11 &times;5"),
+            "Owned best relic with its total count: {block}"
+        );
+        assert_eq!(
+            block.matches("Meso C11 &times;5").count(),
+            1,
+            "the Have row's identical deal stays hidden: {block}"
+        );
+        assert!(block.contains("Lith S19"), "Unvaulted best by name: {block}");
+        assert!(
+            !block.contains("Lith S19 &times;"),
+            "no count on an unowned best relic: {block}"
+        );
+        assert!(block.contains("Meso V16"), "Varzia best by name: {block}");
+        assert!(!block.contains("Meso V16 &times;"), "{block}");
+        assert!(
+            !block.contains("Axi Z9"),
+            "an Unobtainable best relic shows nothing: {block}"
+        );
+        assert!(block.contains("<span class=\"common\">Common</span>"), "{block}");
+        assert!(block.contains("<span class=\"uncommon\">Uncommon</span>"), "{block}");
+        assert_eq!(
+            block.matches("<span class=\"rare\">Rare</span>").count(),
+            2,
+            "rarity on the two sourced Rare rows only — never the sourceless fallback: {block}"
+        );
+        // The relic results carry the same badge split.
+        let relic_block = sr_block(&index, "Meso C11");
+        assert!(
+            relic_block.contains("<em class=\"bd u\">UNVAULTED</em>"),
+            "the relic's UNVAULTED badge is the mint one: {relic_block}"
+        );
+        let vaulted_block = sr_block(&index, "Lith S19");
+        assert!(
+            vaulted_block.contains("<em class=\"bd v\">VAULTED</em>"),
+            "VAULTED keeps its treatment: {vaulted_block}"
+        );
+    }
+
     /// Gate (brief §gates): the main page still extracts its five
     /// fragments in order, the overlay shell ships with the page,
     /// and the trigger icon rides inside the header fragment.
@@ -3354,6 +3586,15 @@ mod tests {
         assert!(
             html.contains("'/search-index'"),
             "the overlay script prefetches its index"
+        );
+        assert!(
+            html.contains("#search-query:empty::before{content:\"\\00a0\"}"),
+            "the query line's empty-state strut (fiftieth pass): \
+             the empty query carries a text baseline, so the line cannot shift"
+        );
+        assert!(
+            html.contains(".bd.u{color:#aeefce;border-color:#aeefce}"),
+            "the mint UNVAULTED rule (fiftieth pass)"
         );
         let frags = extract_fragments(&html);
         let ids: Vec<&str> = frags.iter().map(|(id, _)| id.as_str()).collect();

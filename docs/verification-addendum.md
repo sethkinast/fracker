@@ -2652,3 +2652,61 @@ it refines the brief where they disagree. For the next worker pass.
     Seth cracks on this build (arm line names his roll,
     no phantom after an endless rotation close) and runs
     a 2-3 player and a solo fissure.
+116. **Overlay batch: multi-word matching, query-line
+    strut, mint UNVAULTED, Need-row rarity + best relic
+    (pass 50, shipped as v0.5.45).** Five queue items.
+    (a) MATCHING (A-3): the whole-query single-token rule
+    made any query with a space match nothing ("axi a2",
+    "Dual Zoren" both dead live). Per Seth's final rule —
+    no artificial rules, simplest implementation —
+    `token_fit` now splits the query and sums, per word,
+    the closest prefixed-token slack; a name matches iff
+    EVERY word prefixes a token. Rank key unchanged, so
+    single-word behaviour (incl. the "Bo" before "Boar"
+    pin) is the degenerate case and cannot drift; the JS
+    mirror sums identically. Pinned: "axi a2" -> Axi A2,
+    "meso c11" -> Meso C11, "Dual Zoren" -> Dual Zoren
+    Prime, one unprefixable word sinks a query, summed-fit
+    ranking (Axi A2 0+0 over Axi A23 0+1). Accepted and
+    pinned: "Silva Aegis" now matches Silva & Aegis;
+    reversed orders match. (b) QUERY-LINE SHIFT (A-4):
+    mechanism found, not result mounting — `.so-top` is
+    `align-items:baseline` flex, and an EMPTY
+    `#search-query` has no text run, so its flex baseline
+    was synthesized from its bottom margin edge; the first
+    glyph gave it a real alphabetic baseline and the
+    shared baseline (and the row) jumped up, exactly at
+    >= 1 char as reported. Fix: `#search-query:empty::
+    before{content:"\00a0"}` — the empty state carries an
+    nbsp strut in the same 38px font, so the baseline is
+    content-invariant. Pinned by a render assertion on
+    the shipped CSS. (c) MINT UNVAULTED (B-4): the accent
+    --cy #aee3ef is hsl(191.1, 67.0%, 81.0%); the mint
+    keeps S/L and swaps hue to green 150 -> #aeefce. The
+    overlay's two UNVAULTED badges (item + relic — the
+    app's only unmodified .bd badges) take a `u` modifier
+    + one extension-block rule; VAULTED/VARZIA and every
+    other colour untouched. (d) NEED-ROW DETAIL (B-5 +
+    B-6): item-result Need rows gain a `.srdeal` line from
+    the plan's own row data — rarity (`PartRow.rarity`,
+    app rarity classes; suppressed when the part has no
+    containing relic, since `rarity_of(0.0)` would print
+    a fallback "Rare") and the best relic (`PartRow.deal`:
+    tier, then Intact chance, then name — NOT
+    `best_crack_candidate`, which skips unheld relics and
+    would erase the unowned cases). Owned -> name + total
+    xN (`RelicStock::count`, cross-tier); Unvaulted/
+    Varzia unowned -> name alone; Unobtainable -> nothing;
+    Have rows and sourceless parts -> no line. Worked
+    examples pinned in the gate test (Bo Prime rows:
+    "Rare · Meso C11 ×5", "Common · Lith S19",
+    "Uncommon · Meso V16", "Rare" alone, nothing).
+    Gates: suite 409 passed / 0 failed (lib 381; golden
+    15; packaging 7; resident 5; tray_quit 1) — the lib
+    count is +3 net new tests over origin/master by
+    test-fn count (the #115 entry's branch-side figure
+    was pre-merge); census/reward gates untouched.
+    Details: docs/fiftieth-pass.md. Live verification
+    owed: Seth types "axi a2" / "Dual Zoren", watches the
+    query line on the first character, and eyeballs a
+    live Need row.
