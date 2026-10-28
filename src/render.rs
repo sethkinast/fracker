@@ -319,7 +319,11 @@ fn mi_span(gear: &str, ctx: &RenderContext<'_>, class: &str) -> String {
 }
 
 /// The mock's `.segs` component-progress pips plus its `have/total`
-/// count (the backlog-pips gap Seth named).
+/// count (the backlog-pips gap Seth named). Pass 52: every pip
+/// carries a `title` naming its part — nothing else, no state
+/// wording (the fill already shows state) — so hovering a Backlog
+/// pip says which part it is. seg_html is shared, so the titles
+/// land on every card that renders pips, not only Backlog.
 fn seg_html(g: &crate::plan::GoalCard) -> String {
     let mut h = String::new();
     h.push_str("<span class=\"segs\">");
@@ -343,7 +347,10 @@ fn seg_html(g: &crate::plan::GoalCard) -> String {
             } else {
                 part_state_class(&p.state)
             };
-            h.push_str(&format!("<i class=\"seg {class}{sub}\"></i>"));
+            h.push_str(&format!(
+                "<i class=\"seg {class}{sub}\" title=\"{}\"></i>",
+                esc(&p.name)
+            ));
         }
     }
     h.push_str("</span>");
@@ -870,7 +877,7 @@ fn crack_queue_panel(plan: &Plan, ctx: &RenderContext<'_>) -> String {
             let proven = ctx.proven_done.contains(&c.id);
             let next = if i == 0 { "<em class=nx>NEXT</em>" } else { "" };
             let extra = if ci.covers > 0 {
-                format!(" &middot; +{} also", ci.covers)
+                format!(" &middot; +{} other needed", ci.covers)
             } else {
                 String::new()
             };
@@ -2723,7 +2730,10 @@ mod tests {
         assert!(p2.contains("class=\"r have\""), "Hunt row carries the have class");
         assert!(p2.contains("✓ Handle"), "Hunt row shows the check + part name");
         let p3 = page(&html, "p3");
-        assert!(p3.contains("<i class=\"seg have\"></i>"), "Backlog Have pip fills");
+        assert!(
+            p3.contains("<i class=\"seg have\" title=\"Dual Zoren Prime Handle\"></i>"),
+            "Backlog Have pip fills, titled with its part name"
+        );
         assert!(p3.contains("<i>1/4</i>"), "have count beside the pips");
     }
 
@@ -2782,7 +2792,7 @@ mod tests {
         );
         let p3 = page(&html, "p3");
         assert!(
-            p3.contains("<i class=\"seg uvhave\"></i>"),
+            p3.contains("<i class=\"seg uvhave\" title=\"Dual Zoren Prime Handle\"></i>"),
             "Backlog unverified pip lights, dimmed from a verified pip"
         );
         assert!(p3.contains("1/4 ⍻"), "Backlog count carries the ⍻ mark");
@@ -2830,17 +2840,20 @@ mod tests {
         card.parts_total = 4;
         let segs = seg_html(&card);
         assert_eq!(
-            segs.matches("<i class=\"seg have sub\"></i>").count(),
+            segs.matches("<i class=\"seg have sub\" title=\"Quassus Prime Blade\"></i>")
+                .count(),
             1,
             "exactly one of the Blade's two segments is filled: {segs}"
         );
         assert_eq!(
-            segs.matches("<i class=\"seg need sub\"></i>").count(),
+            segs.matches("<i class=\"seg need sub\" title=\"Quassus Prime Blade\"></i>")
+                .count(),
             1,
             "the Blade's missing unit stays an unfilled segment: {segs}"
         );
         assert_eq!(
-            segs.matches("<i class=\"seg uvhave sub\"></i>").count(),
+            segs.matches("<i class=\"seg uvhave sub\" title=\"Quassus Prime Handle\"></i>")
+                .count(),
             2,
             "both asserted Handle units fill with the ⍻ treatment: {segs}"
         );
@@ -2938,8 +2951,45 @@ mod tests {
         let html = render_plan(&plan, &ctx);
         let p3 = page(&html, "p3");
         assert!(p3.contains("<span class=\"segs\">"), "pips present");
-        assert!(p3.contains("<i class=\"seg need\"></i>"), "need pip");
+        assert!(
+            p3.contains("<i class=\"seg need\" title=\"Caliban Prime Chassis Blueprint\"></i>"),
+            "need pip, titled with its part name"
+        );
         assert!(p3.contains("<i>0/4</i>"), "have/total count beside pips");
+    }
+
+    /// Pass 52: a pip's `title` is exactly its part name — Seth's
+    /// ask (2026-10-28): hovering a Backlog pip says which part
+    /// it is, so what he is missing is visible without opening
+    /// Hunt or the overlay. No state wording rides along (the
+    /// fill already shows state), and an &-bearing part name is
+    /// attribute-escaped.
+    #[test]
+    fn pip_titles_name_the_part_exactly() {
+        let row = |name: &str, state: PartState, held: u32, required: u32| PartRow {
+            name: name.to_owned(),
+            state,
+            held,
+            required,
+            relics: vec![],
+            best_odds: String::new(),
+            rarity: Rarity::Rare,
+            deal: None,
+        };
+        let mut card = goal("Lavos Prime", "Lavos Prime Neuroptics", false, false);
+        card.parts = vec![
+            row("Lavos Prime Neuroptics", PartState::Need, 0, 1),
+            row("Silva & Aegis Prime Blade", PartState::Have, 1, 1),
+        ];
+        let segs = seg_html(&card);
+        assert!(
+            segs.contains("<i class=\"seg need\" title=\"Lavos Prime Neuroptics\"></i>"),
+            "the title is the part name, exactly: {segs}"
+        );
+        assert!(
+            segs.contains("<i class=\"seg have\" title=\"Silva &amp; Aegis Prime Blade\"></i>"),
+            "an & in the part name is attribute-escaped: {segs}"
+        );
     }
 
     /// Twelfth pass §1: standing/weeklies absent from First Crack and
@@ -3294,7 +3344,7 @@ mod tests {
             !p1.contains("Radiant &middot; 10%"),
             "per-crack chance is dead weight in the queue (addendum #67)"
         );
-        assert!(p1.contains("Systems &middot; +2 also"), "short part + coverage");
+        assert!(p1.contains("Systems &middot; +2 other needed"), "short part + coverage");
         assert!(
             !p1.contains("stay for"),
             "no batch framing in the queue header (addendum #72)"
@@ -3615,18 +3665,24 @@ mod tests {
         let proven: HashSet<String> = HashSet::new();
         let icons: HashMap<String, String> = HashMap::new();
         let cats: HashMap<String, Vec<String>> = HashMap::new();
-        // The fixture join: item-names' first hop plus a fixture
-        // ExportManifest texture subset (Meso C11 Intact only).
+        // The fixture join: item-names' first hop plus a
+        // fixture class table (the Meso Intact class only).
         let item_names: HashMap<String, String> = HashMap::from([(
             "/Lotus/Types/Game/Projections/T2VoidProjectionCitrinePrimeABronze"
                 .to_owned(),
             "Meso C11 Intact".to_owned(),
         )]);
-        let textures: HashMap<String, String> = HashMap::from([(
-            "/Lotus/Types/Game/Projections/T2VoidProjectionCitrinePrimeABronze"
-                .to_owned(),
-            "/Lotus/Interface/Icons/Relics/RelicMesoD.png!00_fixturehash".to_owned(),
-        )]);
+        let textures = crate::model::RelicTextureClasses {
+            classes: HashMap::from([(
+                "Meso".to_owned(),
+                HashMap::from([(
+                    "Intact".to_owned(),
+                    "/Lotus/Interface/Icons/Relics/RelicMesoD.png!00_fixturehash"
+                        .to_owned(),
+                )]),
+            )]),
+            ..Default::default()
+        };
         let relic_icons = crate::model::relic_icon_urls(&item_names, &textures);
         let entry = |name: &str| crate::model::RelicEntry {
             name: name.to_owned(),
@@ -3699,7 +3755,7 @@ mod tests {
             srow("Bo Prime Ornament", PartState::HaveUnverified, 1),
             srow("Bo Prime Handle", PartState::Need, 0),
         ];
-        card.action.text = "Crack Meso C11 · +3 also".to_owned();
+        card.action.text = "Crack Meso C11 · +3 other needed".to_owned();
         let plan = Plan {
             goals: vec![card],
             ..Default::default()
