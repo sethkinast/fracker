@@ -973,23 +973,46 @@ fn decode_tier(key: &str, gaps: &mut Vec<String>) -> String {
 /// Payload age beyond which the stamp must say STALE (~10 minutes).
 pub const WORLDSTATE_STALE_AFTER_MINUTES: i64 = 10;
 
-/// The worldstate stamp label. `fetched_live` is true only when this run
-/// got a fresh HTTP 200 from DE; a disk-cache/fixture view is always
-/// labeled STALE even when its payload is recent (addendum #51).
+/// How the worldstate payload reached the report (addendum #120).
+/// The three states render distinctly, and a TTL hit must never
+/// render as STALE: STALE stays reserved for the failure path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorldstateSource {
+    /// Fresh HTTP 200 this run.
+    Live,
+    /// Served from the disk cache under the TTL, with no network
+    /// request. `age_mins` is the cache file's age in minutes —
+    /// the number the label prints, so the staleness is visible.
+    TtlCache { age_mins: u64 },
+    /// Failure fallback (disk cache of any age) or offline fixture.
+    Fallback,
+}
+
+/// The worldstate stamp label. A live payload is "live" while its
+/// own `Time` is recent, STALE once past the threshold; a
+/// failure/fixture view is always labeled STALE even when its
+/// payload is recent (addendum #51); a TTL hit is labeled
+/// "cached" with the cache age, never STALE (addendum #120).
 pub fn worldstate_status_label(
     world: &WorldState,
     now: chrono::DateTime<chrono::Utc>,
-    fetched_live: bool,
+    source: WorldstateSource,
 ) -> String {
     let Ok(stamp) = world.timestamp.parse::<chrono::DateTime<chrono::Utc>>() else {
         return "worldstate unavailable".to_owned();
     };
     let age = now.signed_duration_since(stamp);
     let secs = age.num_seconds().max(0);
-    if fetched_live && age <= chrono::Duration::minutes(WORLDSTATE_STALE_AFTER_MINUTES) {
-        format!("worldstate live ({secs}s)")
-    } else {
-        format!("worldstate STALE ({}m)", age.num_minutes().max(0))
+    match source {
+        WorldstateSource::Live
+            if age <= chrono::Duration::minutes(WORLDSTATE_STALE_AFTER_MINUTES) =>
+        {
+            format!("worldstate live ({secs}s)")
+        }
+        WorldstateSource::TtlCache { age_mins } => {
+            format!("worldstate cached ({age_mins}m)")
+        }
+        _ => format!("worldstate STALE ({}m)", age.num_minutes().max(0)),
     }
 }
 
@@ -2822,24 +2845,46 @@ mod tests {
     }
 
     #[test]
-    fn freshness_stamp_marks_live_stale_and_unavailable() {
+    fn freshness_stamp_marks_live_stale_cached_and_unavailable() {
         let mut world = WorldState {
             timestamp: "2026-10-19T05:16:44Z".to_owned(),
             ..Default::default()
         };
         let now: chrono::DateTime<chrono::Utc> = "2026-10-19T05:17:00Z".parse().unwrap();
-        assert_eq!(worldstate_status_label(&world, now, true), "worldstate live (16s)");
+        assert_eq!(
+            worldstate_status_label(&world, now, WorldstateSource::Live),
+            "worldstate live (16s)"
+        );
         // Same payload, nine minutes later: still live.
         let nine: chrono::DateTime<chrono::Utc> = "2026-10-19T05:25:44Z".parse().unwrap();
-        assert_eq!(worldstate_status_label(&world, nine, true), "worldstate live (540s)");
+        assert_eq!(
+            worldstate_status_label(&world, nine, WorldstateSource::Live),
+            "worldstate live (540s)"
+        );
         // Past ~10 minutes: STALE with the data's age.
         let stale: chrono::DateTime<chrono::Utc> = "2026-10-19T05:30:44Z".parse().unwrap();
-        assert_eq!(worldstate_status_label(&world, stale, true), "worldstate STALE (14m)");
-        // A cache/fixture view is never called live, even when fresh.
-        assert_eq!(worldstate_status_label(&world, now, false), "worldstate STALE (0m)");
+        assert_eq!(
+            worldstate_status_label(&world, stale, WorldstateSource::Live),
+            "worldstate STALE (14m)"
+        );
+        // A failure/fixture view is never called live, even when fresh.
+        assert_eq!(
+            worldstate_status_label(&world, now, WorldstateSource::Fallback),
+            "worldstate STALE (0m)"
+        );
+        // A TTL hit renders "cached" with the cache age — never
+        // STALE, even when the payload's own Time is past the
+        // live threshold (addendum #120).
+        assert_eq!(
+            worldstate_status_label(&world, stale, WorldstateSource::TtlCache { age_mins: 3 }),
+            "worldstate cached (3m)"
+        );
         // No payload at all.
         world.timestamp.clear();
-        assert_eq!(worldstate_status_label(&world, now, true), "worldstate unavailable");
+        assert_eq!(
+            worldstate_status_label(&world, now, WorldstateSource::Live),
+            "worldstate unavailable"
+        );
     }
 
     #[test]

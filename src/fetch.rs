@@ -1,13 +1,16 @@
 //! HTTP fetchers for the §6 sources, each with on-disk cache + TTL.
 //! All fetches fail-soft to cache. HTTP via `reqwest` (rustls).
 //!
-//! TTLs (BRIEF §6): public profile 30 min, Xuerian `/api/load` 1 h,
-//! relic/drop data 7 days, WFCD items dataset 7 days.
+//! TTLs: DE worldstate + profile 15 min (addendum #120), Xuerian
+//! `/api/load` 1 h, relic/drop data 7 days, WFCD items dataset 7 days.
 //!
-//! Worldstate has NO TTL short-circuit (addendum #51): DE's feed is the
-//! only source, and freshness is judged by the payload's own `Time` at
-//! render, never by how recently we fetched. A failed fetch may serve the
-//! disk cache, but the report labels that view STALE.
+//! Worldstate formerly had NO TTL short-circuit (addendum #51): DE's
+//! feed is the only source, and freshness was judged by the payload's
+//! own `Time` at render, never by how recently we fetched. That rule
+//! is superseded for the fetch itself by the 15-minute disk-cache TTL
+//! (addendum #120): a TTL hit still renders its true age, and a
+//! failed fetch may serve the disk cache, but the report labels that
+//! view STALE — STALE stays reserved for the failure path.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -26,6 +29,15 @@ pub const WFCD_ITEMS_URL: &str = "https://api.warframestat.us/items";
 
 pub const TTL_XUERIAN: Duration = Duration::from_secs(60 * 60);
 pub const TTL_STATIC_DATA: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// DE endpoints (addendum #120): Seth's IP was rate-limit-blocked
+/// after his heaviest-ever mission day with the resident running,
+/// and the forum consensus is these endpoints are heavily
+/// rate-limited. 15 minutes bounds DE traffic to 4 requests per
+/// endpoint per hour regardless of regen count, down from 2 per
+/// regen unbounded. Standing / focus remaining may now be up to
+/// 15 minutes stale (accepted by Seth); the report dates a cached
+/// snapshot by its true age, so nothing hides the staleness.
+pub const TTL_DE: Duration = Duration::from_secs(15 * 60);
 
 // ---------------------------------------------------------------------------
 // Status
@@ -37,6 +49,12 @@ pub const TTL_STATIC_DATA: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 pub enum FetchStatus {
     /// Live response, cache refreshed.
     Fresh,
+    /// Served from the disk cache under the TTL (addendum #120),
+    /// with NO network request. Distinct from CacheFallback: this
+    /// is a healthy hit, not a failure, so its label carries the
+    /// cache age in minutes rather than an error reason — and the
+    /// worldstate label renders it as "cached", never STALE.
+    TtlCache { age: Duration },
     /// Network failed; serving the on-disk cache.
     CacheFallback { reason: String },
     /// No token / no cache: serving the committed seed data.
@@ -47,6 +65,9 @@ impl FetchStatus {
     pub fn label(&self) -> String {
         match self {
             FetchStatus::Fresh => "live".to_owned(),
+            FetchStatus::TtlCache { age } => {
+                format!("cached ({}m)", age.as_secs() / 60)
+            }
             FetchStatus::CacheFallback { reason } => {
                 format!("cached ({reason})")
             }
@@ -97,6 +118,39 @@ fn write_cache(cache_dir: &Path, name: &str, body: &str) {
     }
 }
 
+/// A TTL cache hit (addendum #120): the cache file is younger than
+/// `ttl` at `now` AND its contents pass `validate`. Returns the text
+/// and its age. Anything else — missing, stale, future-mtime,
+/// unreadable, unparseable — is None, and the caller falls through
+/// to a live fetch. A corrupt cache is never served as a TTL hit;
+/// on the failure path the caller may still serve it raw, exactly
+/// as before, but that is CacheFallback, not this.
+fn ttl_hit(
+    path: &Path,
+    ttl: Duration,
+    now: SystemTime,
+    validate: impl Fn(&str) -> bool,
+) -> Option<(String, Duration)> {
+    let mtime = std::fs::metadata(path).ok()?.modified().ok()?;
+    let age = now.duration_since(mtime).ok()?;
+    if age >= ttl {
+        return None;
+    }
+    let text = read_cache(path)?;
+    if !validate(&text) {
+        return None;
+    }
+    Some((text, age))
+}
+
+/// A worldstate payload is TTL-worthy iff it is valid JSON carrying
+/// a `Time` — the same bar the live path applies before caching.
+fn valid_worldstate(text: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(text)
+        .map(|v| v.get("Time").is_some())
+        .unwrap_or(false)
+}
+
 pub fn client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .user_agent("fracker/0.1 (warframe session planner)")
@@ -110,14 +164,31 @@ pub fn client() -> Result<reqwest::Client, String> {
 // ---------------------------------------------------------------------------
 
 /// Fetch DE's raw worldstate payload. Returns the body (the caller parses
-/// it with the baked decodes) and its fetch status. There is no TTL
-/// short-circuit: every report asks DE, and payload freshness is judged
-/// later from the body's `Time`. A network failure may fall back to the
-/// on-disk cache, which the caller must label STALE.
+/// it with the baked decodes) and its fetch status. A disk cache
+/// younger than TTL_DE that parses (valid JSON with a `Time`) is
+/// served with NO network request (addendum #120); otherwise the
+/// report asks DE live, and payload freshness is judged later from
+/// the body's `Time` for the live branch. A network failure may fall
+/// back to the disk cache, which the caller must label STALE.
 pub async fn fetch_worldstate(
     client: &reqwest::Client,
     cache_dir: &Path,
 ) -> Result<Fetched<String>, String> {
+    fetch_worldstate_at(client, cache_dir, SystemTime::now()).await
+}
+
+async fn fetch_worldstate_at(
+    client: &reqwest::Client,
+    cache_dir: &Path,
+    now: SystemTime,
+) -> Result<Fetched<String>, String> {
+    let path = cache_file(cache_dir, "worldstate.json");
+    if let Some((text, age)) = ttl_hit(&path, TTL_DE, now, valid_worldstate) {
+        return Ok(Fetched {
+            value: text,
+            status: FetchStatus::TtlCache { age },
+        });
+    }
     match client.get(WORLD_STATE_URL).send().await {
         Ok(resp) => {
             let resp = resp
@@ -237,15 +308,40 @@ pub async fn fetch_profile(
     cache_dir: &Path,
     account_id: &str,
 ) -> Result<Fetched<ProfileSnapshot>, String> {
+    fetch_profile_at(client, cache_dir, account_id, SystemTime::now()).await
+}
+
+async fn fetch_profile_at(
+    client: &reqwest::Client,
+    cache_dir: &Path,
+    account_id: &str,
+    now: SystemTime,
+) -> Result<Fetched<ProfileSnapshot>, String> {
     let name = format!("profile-{account_id}.json");
     let path = cache_file(cache_dir, &name);
     let url = format!("{PROFILE_URL}?playerId={account_id}");
-    // Addendum #71: no app-side TTL. DE's endpoint already caches
-    // (~5 min per its own Cache-Control); a second 30-minute cache
-    // here only ever served pre-reset numbers after the 00:00 UTC
-    // reset. The disk file is the failure fallback, nothing more —
-    // and the report layer dates it by its mtime, so the reset rule
-    // sees its true age.
+    // Addendum #71 formerly kept this TTL-free: DE's endpoint already
+    // caches (~5 min per its own Cache-Control), and a second
+    // 30-minute cache only ever served pre-reset numbers after the
+    // 00:00 UTC reset. Addendum #120 supersedes it with a 15-minute
+    // TTL: a parseable cache younger than TTL_DE is served with no
+    // network request, so standing / focus remaining may be up to
+    // 15 minutes stale (accepted by Seth). The TTL check runs
+    // before any network call, so it cannot mask a 409 or any other
+    // error that was never observed; a live 409 still errors
+    // outright below. The disk file remains the failure fallback,
+    // and the report layer dates a cached snapshot by its true age.
+    if let Some((text, age)) = ttl_hit(&path, TTL_DE, now, |t| parse_profile(t).is_ok()) {
+        // The hit was validated, so this parse cannot fail; unwrap
+        // safety is by construction, not by hope — but keep the
+        // fall-through honest: an unexpected failure drops to live.
+        if let Ok(snap) = parse_profile(&text) {
+            return Ok(Fetched {
+                value: snap,
+                status: FetchStatus::TtlCache { age },
+            });
+        }
+    }
     match fetch_profile_live(client, &url).await {
         Ok(text) => match parse_profile(&text) {
             Ok(snap) => {
@@ -662,6 +758,179 @@ mod tests {
         assert!(is_fresh(now, ttl, now));
         assert!(!is_fresh(now - ttl - Duration::from_secs(1), ttl, now));
         assert!(!is_fresh(now + Duration::from_secs(60), ttl, now));
+    }
+
+    // --- Addendum #120: DE TTL gates -------------------------------------
+    //
+    // Harness: a client whose every request fails fast (dead proxy).
+    // Any test asserting a TtlCache status with this client proves
+    // the TTL branch ran, because a bypassed TTL could only produce
+    // CacheFallback here — never Fresh, never TtlCache. No test below
+    // touches the real DE endpoints.
+
+    fn dead_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:9").expect("dead proxy parses"))
+            .timeout(Duration::from_secs(5))
+            .build()
+            .expect("dead client builds")
+    }
+
+    fn de_test_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("fracker-de-ttl-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    const WS_TEXT: &str = r#"{"Time": "2026-10-28T15:00:00Z", "Fissures": []}"#;
+    const PROFILE_TEXT: &str = r#"{"Results": [{"DisplayName": "T",
+        "AccountId": {"$oid": "ttltest"}, "PlayerLevel": 30,
+        "LoadOutInventory": {"XPInfo": [{"ItemType": "/Lotus/Powersuits/Excalibur", "XP": 1000}]},
+        "DailyAffiliation": 7823, "DailyFocus": 357977}]}"#;
+
+    #[tokio::test]
+    async fn de_ttl_hit_serves_fresh_cache_without_network() {
+        let dir = de_test_dir("hit");
+        std::fs::write(dir.join("worldstate.json"), WS_TEXT).unwrap();
+        std::fs::write(dir.join("profile-ttltest.json"), PROFILE_TEXT).unwrap();
+        let c = dead_client();
+        let now = SystemTime::now();
+        let ws = fetch_worldstate_at(&c, &dir, now).await.unwrap();
+        assert_eq!(ws.value, WS_TEXT);
+        assert!(
+            matches!(ws.status, FetchStatus::TtlCache { .. }),
+            "fresh worldstate cache must TTL-hit, got {:?}",
+            ws.status
+        );
+        let prof = fetch_profile_at(&c, &dir, "ttltest", now).await.unwrap();
+        assert!(
+            matches!(prof.status, FetchStatus::TtlCache { .. }),
+            "fresh profile cache must TTL-hit, got {:?}",
+            prof.status
+        );
+        assert_eq!(prof.status.label(), "cached (0m)");
+        assert_eq!(prof.value.display_name, "T");
+        assert_eq!(prof.value.daily.affiliation_remaining, 7823);
+        assert_eq!(prof.value.daily.focus_remaining, 357_977);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn de_ttl_stale_cache_is_refetched_and_failure_falls_back() {
+        let dir = de_test_dir("stale");
+        std::fs::write(dir.join("worldstate.json"), WS_TEXT).unwrap();
+        std::fs::write(dir.join("profile-ttltest.json"), PROFILE_TEXT).unwrap();
+        let c = dead_client();
+        // 20 minutes past the write: past the 15-minute TTL.
+        let now = SystemTime::now() + Duration::from_secs(20 * 60);
+        let ws = fetch_worldstate_at(&c, &dir, now).await.unwrap();
+        assert!(
+            !matches!(ws.status, FetchStatus::TtlCache { .. }),
+            "stale worldstate cache must NOT TTL-hit, got {:?}",
+            ws.status
+        );
+        // Live failed (dead proxy), so the old cache serves as the
+        // failure fallback — the pre-existing behaviour, unchanged.
+        assert!(matches!(ws.status, FetchStatus::CacheFallback { .. }));
+        assert_eq!(ws.value, WS_TEXT);
+        let prof = fetch_profile_at(&c, &dir, "ttltest", now).await.unwrap();
+        assert!(
+            matches!(prof.status, FetchStatus::CacheFallback { .. }),
+            "stale profile cache + failed live must fall back, got {:?}",
+            prof.status
+        );
+        assert_eq!(prof.value.daily.affiliation_remaining, 7823);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn de_ttl_corrupt_cache_falls_through_to_live() {
+        let dir = de_test_dir("corrupt");
+        std::fs::write(dir.join("worldstate.json"), "not json{{{").unwrap();
+        std::fs::write(dir.join("profile-ttltest.json"), "not json{{{").unwrap();
+        let c = dead_client();
+        let now = SystemTime::now();
+        // Corrupt cache, fresh mtime: never a TTL hit. Live fails
+        // (dead proxy), so worldstate serves the raw cache as the
+        // failure fallback while the profile errors on parse —
+        // both exactly the pre-existing failure behaviour.
+        let ws = fetch_worldstate_at(&c, &dir, now).await.unwrap();
+        assert!(
+            matches!(ws.status, FetchStatus::CacheFallback { .. }),
+            "corrupt worldstate cache must fall through, got {:?}",
+            ws.status
+        );
+        assert!(fetch_profile_at(&c, &dir, "ttltest", now).await.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn de_ttl_hit_profile_caps_match_live_parse() {
+        let dir = de_test_dir("caps");
+        std::fs::write(dir.join("profile-ttltest.json"), PROFILE_TEXT).unwrap();
+        let live = parse_profile(PROFILE_TEXT).unwrap();
+        let path = dir.join("profile-ttltest.json");
+        let (text, _) = ttl_hit(&path, TTL_DE, SystemTime::now(), |t| {
+            parse_profile(t).is_ok()
+        })
+        .expect("fresh valid profile cache hits");
+        let cached = parse_profile(&text).unwrap();
+        assert_eq!(
+            cached.daily.affiliation_remaining, live.daily.affiliation_remaining,
+            "a TTL-hit snapshot carries the same daily caps as live"
+        );
+        assert_eq!(
+            cached.daily.focus_remaining, live.daily.focus_remaining,
+            "a TTL-hit snapshot carries the same daily caps as live"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ttl_hit_decision_boundaries() {
+        let dir = de_test_dir("bounds");
+        let path = dir.join("worldstate.json");
+        std::fs::write(&path, WS_TEXT).unwrap();
+        let now = SystemTime::now();
+        assert!(ttl_hit(&path, TTL_DE, now, valid_worldstate).is_some());
+        assert!(ttl_hit(&path, TTL_DE, now + Duration::from_secs(20 * 60), valid_worldstate)
+            .is_none());
+        assert!(ttl_hit(&path, TTL_DE, now, |_| false).is_none());
+        // A cache mtime in the future relative to `now` is not fresh.
+        assert!(ttl_hit(&path, TTL_DE, now - Duration::from_secs(60 * 60), valid_worldstate)
+            .is_none());
+        assert!(ttl_hit(&dir.join("missing.json"), TTL_DE, now, |_| true).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ttl_cache_label_renders_minutes_distinct_from_fallback() {
+        assert_eq!(
+            FetchStatus::TtlCache {
+                age: Duration::from_secs(3 * 60 + 20)
+            }
+            .label(),
+            "cached (3m)"
+        );
+        assert_eq!(
+            FetchStatus::TtlCache {
+                age: Duration::from_secs(90)
+            }
+            .label(),
+            "cached (1m)"
+        );
+        // Failure labelling is unchanged and cannot collide with the
+        // TTL form: it carries the error reason, not an age.
+        assert_eq!(
+            FetchStatus::CacheFallback {
+                reason: "boom".to_owned()
+            }
+            .label(),
+            "cached (boom)"
+        );
+        assert_eq!(FetchStatus::Fresh.label(), "live");
     }
 
     #[test]

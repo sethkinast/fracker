@@ -2942,3 +2942,61 @@ it refines the brief where they disagree. For the next worker pass.
     Seth buys packs on this build — arm line, credit +
     chime per held screen, Log lines, a miss (not a
     credit) for any screen dismissed before its chime.
+120. **DE 15-minute TTL caches (pass 54, shipped as
+    v0.5.49).** Seth's decision of 2026-10-28: his IP
+    was rate-limit-blocked from DE's servers after his
+    heaviest-ever mission day with the resident running,
+    and the forum consensus is these endpoints are
+    heavily rate-limited. (a) TTL: both
+    api.warframe.com endpoints — worldState.php and
+    getProfileViewingData.php — gain a 15-minute
+    disk-cache TTL via a shared `ttl_hit` helper: the
+    cache file must be younger than the TTL AND pass
+    the endpoint's validity bar (worldstate: valid JSON
+    with a `Time`; profile: parses as a snapshot), or
+    the call falls through to live. Worst case becomes
+    4 requests per endpoint per hour regardless of regen
+    count, down from 2 per regen unbounded. Xuerian
+    (1 h) and WFCD (7 d) TTLs and all regen triggers are
+    untouched; addenda #51 (worldstate no-TTL) and #71
+    (profile TTL-free) are superseded for the fetch
+    itself, with the history kept in comments. (b)
+    LABELS: new `FetchStatus::TtlCache { age }`
+    renders "cached (Nm)"; the worldstate stamp gained
+    a `WorldstateSource` enum (Live / TtlCache /
+    Fallback) replacing the `fetched_live` bool, so a
+    TTL hit renders "worldstate cached (Nm)" and never
+    STALE, while STALE stays reserved for the failure
+    path and the offline fixture view; the profile
+    status needs no new plumbing (report already renders
+    `status.label()` into "profile <status>"). (c)
+    SAFETY: the TTL check runs before any network call,
+    so it cannot mask an error never observed; a live
+    profile 409 still errors outright; a corrupt cache
+    is never served as a TTL hit (falls through to live,
+    then the pre-existing failure behaviour); standing /
+    focus remaining may now be up to 15 minutes stale,
+    accepted by Seth, with the cached label dating the
+    snapshot by its true age. GATES: TTL-hit with NO
+    http request for both endpoints (dead-proxy client:
+    a bypassed TTL could only yield CacheFallback);
+    20-minute-old cache refetched, never TTL-hit;
+    fresh-mtime corrupt cache falls through (worldstate
+    CacheFallback with raw cache, profile parse error);
+    live failure still serves an old cache as
+    CacheFallback and the fixture view still renders
+    STALE; live / cached / STALE render distinctly for
+    worldstate including a TTL hit over a payload past
+    the live threshold; TTL-hit daily caps equal the
+    same snapshot parsed live; pure decision boundaries
+    (fresh+valid hits; stale, invalid, future-mtime,
+    missing all miss). Suite 437 passed / 0 failed (lib
+    409, +6 over v0.5.48; golden 15; packaging 7;
+    resident 5; tray_quit 1); `cargo build --release
+    --locked --offline` green pre-tag, lock diff =
+    version line only. Details:
+    docs/fifty-fourth-pass.md. Live verification owed:
+    Seth plays on this build and confirms no further DE
+    blocks, "cached (Nm)" stamps between regens, "live"
+    stamps at most every 15 minutes, and daily caps
+    lagging up to 15 minutes by design.

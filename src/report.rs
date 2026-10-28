@@ -185,21 +185,34 @@ pub async fn generate(
     // 1. World state: DE is the ONLY source (addendum #51). No fallback
     // chain and no silent substitution: a failed fetch renders as
     // unavailable; the disk cache may serve only as an explicitly-labeled
-    // stale view. `fetched_live` is true only for a fresh HTTP 200.
+    // stale view. A TTL hit (addendum #120) renders as "cached" with
+    // its age — never STALE, which stays reserved for the failure
+    // path — and the offline fixture renders as STALE, as before.
     let decodes = model::Decodes::load(&cfg.data_dir)?;
-    let (world_text, fetched_live) = match &client {
+    let (world_text, world_source) = match &client {
         Some(client) => match fetch::fetch_worldstate(client, &cfg.cache_dir).await {
-            Ok(fetched) => (fetched.value, fetched.status.is_live()),
+            Ok(fetched) => (
+                fetched.value,
+                match fetched.status {
+                    fetch::FetchStatus::Fresh => model::WorldstateSource::Live,
+                    fetch::FetchStatus::TtlCache { age } => {
+                        model::WorldstateSource::TtlCache {
+                            age_mins: age.as_secs() / 60,
+                        }
+                    }
+                    _ => model::WorldstateSource::Fallback,
+                },
+            ),
             Err(e) => {
                 endpoint_failures.push(format!("worldstate: {e}"));
-                (String::new(), false)
+                (String::new(), model::WorldstateSource::Fallback)
             }
         },
         None => {
             let path = cfg.fixtures.join("worldstate.json");
             let text = std::fs::read_to_string(&path)
                 .map_err(|e| format!("fixture worldstate {}: {e}", path.display()))?;
-            (text, false)
+            (text, model::WorldstateSource::Fallback)
         }
     };
     let world = if world_text.trim().is_empty() {
@@ -219,8 +232,9 @@ pub async fn generate(
         .parse::<DateTime<Utc>>()
         .unwrap_or_else(|_| Utc::now());
     // Freshness is judged by the payload's own Time against the render
-    // clock, not by the fetch time.
-    let world_status = model::worldstate_status_label(&world, Utc::now(), fetched_live);
+    // clock, not by the fetch time — except for a TTL hit, whose
+    // label carries the cache age instead (addendum #120).
+    let world_status = model::worldstate_status_label(&world, Utc::now(), world_source);
 
     // 2. Reconciled backlog (profile-derived primes), exclusions applied.
     let backlog_path = data_file("backlog.json");
