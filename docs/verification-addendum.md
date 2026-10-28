@@ -2779,9 +2779,9 @@ it refines the brief where they disagree. For the next worker pass.
     interaction (sticky activation) — satisfied in
     practice by Seth's in-session typing/clicking; a
     credit landing before a fresh page's first
-    interaction toasts silently. Gates: suite 422
-    passed / 0 failed (lib 394; golden 15; packaging
-    7; resident 5; tray_quit 1), +13 over v0.5.45 —
+    interaction toasts silently. Gates: suite 418
+    passed / 0 failed (lib 390; golden 15; packaging
+    7; resident 5; tray_quit 1), +9 over v0.5.45 —
     events roundtrip/schema/cap/malformed coverage,
     all three `miss_reason_class` tiers pinned
     through real `select_burst_pick` outputs, Log

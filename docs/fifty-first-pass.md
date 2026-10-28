@@ -156,8 +156,8 @@ toast silently.
 
 ## Gates
 
-Suite: 422 passed / 0 failed (lib 394; golden 15; packaging
-7; resident 5; tray_quit 1) — +13 tests over v0.5.45. New coverage: the events module (roundtrip +
+Suite: 418 passed / 0 failed (lib 390; golden 15; packaging
+7; resident 5; tray_quit 1) — +9 tests over v0.5.45. New coverage: the events module (roundtrip +
 schema shape — kind snake_case, no null fields; roll-carrying
 miss line; malformed-line skipping incl. an unknown kind; the
 500-record cap keeping the newest tail; missing file = empty);
