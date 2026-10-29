@@ -68,7 +68,12 @@ pub enum Trigger {
     /// A new EE.log appeared / rotated (addendum #37): regenerate, but
     /// never auto-open (twelfth pass §2).
     FileChanged,
-    /// A mission-end event during the session.
+    /// A proven mission completion: the MissionLog success marker
+    /// (GiveMissionRewards success / Mission Succeeded) for an
+    /// armed mission (fifty-sixth pass). This — and only this —
+    /// is the mission-end regen; the crack-screen lines
+    /// (RelicReward, RelicCrack) are arming/closing signals,
+    /// never report triggers.
     MissionEnd,
     /// The tray's manual Regenerate verb.
     Manual,
@@ -1941,14 +1946,14 @@ fn watch_loop(
                 st.display_name = name.clone();
                 saw_login = true;
             }
-            if ev.as_ref().map_or(false, |e| e.is_mission_end()) {
-                let _ = trigger_tx.send(Trigger::MissionEnd);
-            }
-            // Pass 39/49: his reward grant arms the burst grab; the
-            // screen's shutdown (RelicCrack) closes the episode.
-            // Neither is a report trigger — the resident loop
-            // partitions them out of report bursts. (The grant also
-            // fires the MissionEnd regen above via is_mission_end.)
+            // Pass 56: the crack-screen events are arming/closing
+            // signals only, never report triggers. His reward grant
+            // arms the burst grab; the screen's shutdown
+            // (RelicCrack) closes the episode. A mission-end regen
+            // comes ONLY from a proven completion below (the
+            // MissionLog success marker) — the crack screen fires
+            // before the mission is proven complete, so
+            // regenerating on it double-requests the same run.
             if let Some(elog::Event::RelicReward { roll }) = &ev {
                 let _ = trigger_tx.send(Trigger::RewardScreen(roll.clone()));
             }
@@ -2120,9 +2125,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Pass 56: the gets-reward grant arms the burst but
+    /// produces NO report run. It used to fire MissionEnd (pass
+    /// 49); the mission-end regen now comes only from a proven
+    /// completion (see `proven_completion_marker_still_regenerates`
+    /// below), so the grant's only watch-loop output is the
+    /// RewardScreen arm.
     #[test]
-    fn mission_end_event_triggers_a_regeneration() {
-        let dir = tmpdir("mission");
+    fn gets_reward_line_produces_no_report_run() {
+        let dir = tmpdir("nograntregen");
         let log = dir.join("EE.log");
         let state = dir.join("state");
         // Pre-existing file at app start is startup replay (§2): the
@@ -2136,20 +2147,156 @@ mod tests {
         let shutdown = Shutdown::new();
         let status = Arc::new(Mutex::new(TrayStatus::default()));
         let handle = spawn_watch(log.clone(), 20, state.clone(), status, tx, shutdown.receiver(), Arc::new(Mutex::new(Vec::new())));
-        let startup = collect_triggers(&mut rx, Duration::from_millis(250));
-        assert!(
-            !startup.contains(&Trigger::SessionStart),
-            "startup replay never opens the plan: {startup:?}"
-        );
+        let _ = collect_triggers(&mut rx, Duration::from_millis(250));
 
         use std::io::Write;
         let mut f = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
-        // Pass 49: the mission-end marker for a crack is now the
-        // gets-reward grant line (transcribed shape, EE-2.log).
+        // Pass 49: the mission-end marker for a crack USED to be
+        // the gets-reward grant line (transcribed shape, EE-2.log).
         writeln!(f, "150.530 Sys [Info]: VoidProjections: 5420fba23846322173707618 gets reward /Lotus/StoreItems/Types/Recipes/WarframeRecipes/HarrowPrimeHelmetBlueprint").unwrap();
         f.flush().unwrap();
 
-        assert_eq!(recv_trigger(&mut rx), Some(Trigger::MissionEnd));
+        let triggers = collect_triggers(&mut rx, Duration::from_millis(600));
+        assert!(
+            triggers.contains(&Trigger::RewardScreen(
+                "/Lotus/StoreItems/Types/Recipes/WarframeRecipes/HarrowPrimeHelmetBlueprint"
+                    .to_owned()
+            )),
+            "the grant still arms the burst: {triggers:?}"
+        );
+        assert!(
+            !triggers.contains(&Trigger::MissionEnd),
+            "the grant must not regenerate the plan: {triggers:?}"
+        );
+
+        shutdown.trigger();
+        handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Pass 56: the DVRCAftermath close line closes the episode
+    /// but produces NO report run, same split as the grant above.
+    #[test]
+    fn dvrcaftermath_line_produces_no_report_run() {
+        let dir = tmpdir("nocrackregen");
+        let log = dir.join("EE.log");
+        let state = dir.join("state");
+        std::fs::write(&log, "14.148 Sys [Info]: Logged in Jenterrobahne\n").unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let shutdown = Shutdown::new();
+        let status = Arc::new(Mutex::new(TrayStatus::default()));
+        let handle = spawn_watch(log.clone(), 20, state.clone(), status, tx, shutdown.receiver(), Arc::new(Mutex::new(Vec::new())));
+        let _ = collect_triggers(&mut rx, Duration::from_millis(250));
+
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+        writeln!(f, "150.900 Game [Info]: DVRCAftermath transmission").unwrap();
+        f.flush().unwrap();
+
+        let triggers = collect_triggers(&mut rx, Duration::from_millis(600));
+        assert!(
+            triggers.contains(&Trigger::RewardClosed),
+            "the aftermath line still closes the episode: {triggers:?}"
+        );
+        assert!(
+            !triggers.contains(&Trigger::MissionEnd),
+            "the aftermath line must not regenerate the plan: {triggers:?}"
+        );
+
+        shutdown.trigger();
+        handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Pass 56: the proven-completion marker is the ONLY
+    /// mission-end regen left. An armed mission (MissionInfo
+    /// block) confirmed by its EndOfMatch success marker still
+    /// produces exactly one report run.
+    #[test]
+    fn proven_completion_marker_still_regenerates() {
+        let dir = tmpdir("proven");
+        let log = dir.join("EE.log");
+        let state = dir.join("state");
+        std::fs::write(&log, "14.148 Sys [Info]: Logged in Jenterrobahne\n").unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let shutdown = Shutdown::new();
+        let status = Arc::new(Mutex::new(TrayStatus::default()));
+        let handle = spawn_watch(log.clone(), 20, state.clone(), status, tx, shutdown.receiver(), Arc::new(Mutex::new(Vec::new())));
+        let _ = collect_triggers(&mut rx, Duration::from_millis(250));
+
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+        // Ninth pass §4 shape: loading line, multi-line
+        // MissionInfo JSON, then the success marker.
+        writeln!(f, "48.805 Sys [Info]: Client loaded {{\"name\":\"SolNode175_Alert\"}} with MissionInfo:").unwrap();
+        writeln!(f, "{{").unwrap();
+        writeln!(f, "    \"missionType\" : \"MT_HIVE\",").unwrap();
+        writeln!(f, "    \"faction\" : \"FC_INFESTATION\",").unwrap();
+        writeln!(f, "    \"location\" : \"SolNode175\",").unwrap();
+        writeln!(f, "    \"alertId\" : \"6ad0d7360dfe89c5d82290a2\",").unwrap();
+        writeln!(f, "    \"alertTag\" : \"RoadToTauEvent\"").unwrap();
+        writeln!(f, "}}").unwrap();
+        writeln!(f, "251.004 Script [Info]: EndOfMatch.lua: Mission Succeeded").unwrap();
+        f.flush().unwrap();
+
+        let triggers = collect_triggers(&mut rx, Duration::from_millis(600));
+        assert_eq!(
+            triggers.iter().filter(|t| **t == Trigger::MissionEnd).count(),
+            1,
+            "one proven completion, one regen: {triggers:?}"
+        );
+
+        shutdown.trigger();
+        handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Pass 56: no dedupe window exists anywhere in this split,
+    /// so genuine missions ending apart still produce one run
+    /// each. Two armed missions, each confirmed by its own
+    /// success marker in a separate watch tick, yield exactly
+    /// two MissionEnd triggers — one per completion, never
+    /// coalesced, never dropped.
+    #[test]
+    fn genuine_missions_apart_produce_one_run_each() {
+        let dir = tmpdir("twomissions");
+        let log = dir.join("EE.log");
+        let state = dir.join("state");
+        std::fs::write(&log, "14.148 Sys [Info]: Logged in Jenterrobahne\n").unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let shutdown = Shutdown::new();
+        let status = Arc::new(Mutex::new(TrayStatus::default()));
+        let handle = spawn_watch(log.clone(), 20, state.clone(), status, tx, shutdown.receiver(), Arc::new(Mutex::new(Vec::new())));
+        let _ = collect_triggers(&mut rx, Duration::from_millis(250));
+
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+        let arm = |f: &mut std::fs::File, name: &str, node: &str| {
+            writeln!(f, "48.805 Sys [Info]: Client loaded {{\"name\":\"{name}\"}} with MissionInfo:").unwrap();
+            writeln!(f, "{{").unwrap();
+            writeln!(f, "    \"missionType\" : \"MT_EXTERMINATION\",").unwrap();
+            writeln!(f, "    \"location\" : \"{node}\"").unwrap();
+            writeln!(f, "}}").unwrap();
+        };
+        arm(&mut f, "SolNode175", "SolNode175");
+        writeln!(f, "251.004 Script [Info]: EndOfMatch.lua: Mission Succeeded").unwrap();
+        f.flush().unwrap();
+        let first = collect_triggers(&mut rx, Duration::from_millis(600));
+        assert_eq!(
+            first.iter().filter(|t| **t == Trigger::MissionEnd).count(),
+            1,
+            "first completion, one regen: {first:?}"
+        );
+
+        arm(&mut f, "SolNode172", "SolNode172");
+        writeln!(f, "352.004 Script [Info]: EndOfMatch.lua: EndOfMatch.lua: GiveMissionRewards. success=true").unwrap();
+        f.flush().unwrap();
+        let second = collect_triggers(&mut rx, Duration::from_millis(600));
+        assert_eq!(
+            second.iter().filter(|t| **t == Trigger::MissionEnd).count(),
+            1,
+            "second completion, one more regen: {second:?}"
+        );
 
         shutdown.trigger();
         handle.join().unwrap();
@@ -2158,11 +2305,11 @@ mod tests {
 
     /// Pass 49 (Seth's direction): the burst arms ONLY on his
     /// gets-reward line. The EE-2 true-screen sequence arms
-    /// exactly once (with the roll attached) and regenerates;
-    /// the survival fake-init sequence — `Relic rewards
-    /// initialized` re-firing as the relic-selection flow
-    /// closes, no grant behind it — arms nothing; a squadmate's
-    /// grant line arms nothing.
+    /// exactly once (with the roll attached) and — pass 56 — no
+    /// longer regenerates; the survival fake-init sequence —
+    /// `Relic rewards initialized` re-firing as the relic-selection
+    /// flow closes, no grant behind it — arms nothing; a
+    /// squadmate's grant line arms nothing.
     #[test]
     fn reward_trigger_keys_on_his_gets_reward_line_only() {
         let dir = tmpdir("rekey");
@@ -2204,7 +2351,9 @@ mod tests {
         );
 
         // The true screen (EE-2 sequence): initialized, HIS grant,
-        // Got rewards — exactly one arm, roll attached, one regen.
+        // Got rewards — exactly one arm, roll attached, and (pass
+        // 56) NO regen: the grant arms the burst only; the regen
+        // waits for the proven-completion marker.
         writeln!(f, "150.472 Script [Info]: ProjectionRewardChoice.lua: Relic rewards initialized").unwrap();
         writeln!(f, "150.530 Sys [Info]: VoidProjections: 5420fba23846322173707618 gets reward /Lotus/StoreItems/Types/Recipes/WarframeRecipes/HarrowPrimeHelmetBlueprint").unwrap();
         writeln!(f, "150.843 Script [Info]: ProjectionRewardChoice.lua: Got rewards").unwrap();
@@ -2223,8 +2372,8 @@ mod tests {
             )
         );
         assert!(
-            true_screen.contains(&Trigger::MissionEnd),
-            "the grant still regenerates the plan: {true_screen:?}"
+            !true_screen.contains(&Trigger::MissionEnd),
+            "the grant arms but no longer regenerates: {true_screen:?}"
         );
 
         shutdown.trigger();
