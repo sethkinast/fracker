@@ -142,18 +142,6 @@ pub enum Event {
     HostMigration,
 }
 
-impl Event {
-    /// True when this event marks a completed mission run (sixth pass
-    /// §4): his reward grant (pass 49: the gets-reward moment, ~0.3 s
-    /// before the old `Got rewards` marker — the same regeneration,
-    /// a hair earlier) or the post-crack aftermath transmission on
-    /// hub return. The live watch loop turns these into an automatic
-    /// page regeneration.
-    pub fn is_mission_end(&self) -> bool {
-        matches!(self, Event::RelicReward { .. } | Event::RelicCrack)
-    }
-}
-
 /// Substring classification per the §7.2 catalog.
 pub fn classify(line: &LogLine) -> Option<Event> {
     classify_inner(line, "")
@@ -898,25 +886,44 @@ mod tests {
             "SomeOtherDialog.lua: PopulateInfo->/Lotus/StoreItems/Types/BoosterPacks/RandomSyndicateProjectionPack",
         );
         assert_eq!(classify(&other_dialog), None);
-        // Never a mission-end (no regen rides the arm).
-        assert!(!Event::PackPurchase { path: "/x".into() }.is_mission_end());
+        // A pack dialog arm is not a report trigger either (pass 53:
+        // no regen rides the arm — the pack task regens itself on
+        // a proven credit). The watch loop sends no MissionEnd for
+        // it; that behavior is covered by the resident watch tests.
     }
 
+    /// Pass 56: the crack-screen events still classify — the
+    /// grant arms the burst, the aftermath closes the episode —
+    /// but neither is a report trigger anymore. The mission-end
+    /// regen comes only from a proven completion (the MissionLog
+    /// success marker); the watch-loop tests in resident.rs prove
+    /// the no-regen side of that split.
     #[test]
-    fn mission_end_events_drive_regeneration() {
-        // Sixth pass §4: reward screen + post-crack aftermath are the
-        // mission-end signals the watch loop turns into a regen.
-        // Pass 49: the reward-screen signal is now the gets-reward
-        // grant (RelicReward), not the ProjectionRewardChoice lines.
-        assert!(Event::RelicReward {
-            roll: "/Lotus/X".to_owned()
-        }
-        .is_mission_end());
-        assert!(Event::RelicCrack.is_mission_end());
-        assert!(!Event::MissionInfoSeen.is_mission_end());
-        assert!(!Event::LevelConnected.is_mission_end());
-        assert!(!Event::HostMigration.is_mission_end());
-        assert!(!Event::LoggedIn { name: "S".into() }.is_mission_end());
+    fn crack_screen_events_still_classify() {
+        // Sixth pass §4 / pass 49: the reward-screen signal is the
+        // gets-reward grant (RelicReward), not the
+        // ProjectionRewardChoice lines.
+        assert_eq!(
+            classify_with_account(
+                &real(
+                    "Sys",
+                    "VoidProjections: 5420fba23846322173707618 gets reward /Lotus/X"
+                ),
+                "5420fba23846322173707618"
+            ),
+            Some(Event::RelicReward {
+                roll: "/Lotus/X".to_owned()
+            })
+        );
+        assert_eq!(
+            classify(&real("Game", "DVRCAftermath transmission")),
+            Some(Event::RelicCrack)
+        );
+        assert_eq!(classify(&real("Sys", "with MissionInfo: x")), Some(Event::MissionInfoSeen));
+        assert_eq!(
+            classify(&real("Sys", "Game successfully connected to: x")),
+            Some(Event::LevelConnected)
+        );
     }
 
     #[test]

@@ -160,6 +160,60 @@ async fn tray_quit_command_exits_the_resident_loop() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// Pass 56: the Manual trigger still produces a report run.
+/// The credit path (reward_grab sends Trigger::Manual after a
+/// credit) and the tray Regenerate verb share this trigger:
+/// both flow through the resident loop's report scheduling,
+/// which this pass leaves untouched. Driving it via the tray
+/// command proves the loop side at integration scale; the
+/// credit send site itself is unchanged code.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_trigger_still_produces_a_report_run() {
+    let base = scrape_dir("manual");
+    let out = base.join("out/plan.html");
+    let opts = ResidentOptions {
+        report: offline_report_config(&base),
+        log_path: base.join("log/EE.log"),
+        state_dir: base.join("state"),
+        watch_interval_ms: 25,
+        serve_port: 0,
+        pop_on_session_start: false,
+        reward_detect: false,
+        pack_detect: false,
+    };
+    let shutdown = Shutdown::new();
+    let sd = shutdown.clone();
+    let status = Arc::new(Mutex::new(TrayStatus::default()));
+    let (cmds_tx, cmds_rx) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(async move {
+        fracker::resident::run(opts, sd, None, status, Some(cmds_rx)).await
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!out.exists(), "no report before any trigger");
+
+    // The tray Regenerate verb schedules the same Manual regen
+    // the post-credit path sends.
+    cmds_tx
+        .send(fracker::tray::TrayCommand::Regenerate)
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !out.exists() {
+        if Instant::now() > deadline {
+            shutdown.trigger();
+            let _ = task.await;
+            panic!("Manual trigger did not produce a report run");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let html = std::fs::read_to_string(&out).unwrap();
+    assert!(html.contains("<html"), "a real HTML page was written");
+
+    shutdown.trigger();
+    task.await.expect("resident task did not panic").expect("clean exit");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// DE-shaped worldstate whose alert ids/locations match the fixture log's
 /// `alertId`/`location`s, plus one alert the log never mentions (proving
 /// the strike is only ever a positive log match). Expiries sit after the

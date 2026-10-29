@@ -3081,3 +3081,64 @@ it refines the brief where they disagree. For the next worker pass.
     real block (hopefully never), no further DE
     blocks, and the installed app reporting 0.5.50
     (superseding the pass-54 0.5.49 install check).
+122. **Ditch the crack-screen MissionEnd triggers
+    (pass 56, shipped as v0.5.51).** Seth's criteria
+    of 2026-10-28, superseding the 5-second dedupe
+    draft (NOT built). (a) REMOVAL: the watch loop no
+    longer sends `Trigger::MissionEnd` for RelicReward
+    (his gets-reward grant line) or RelicCrack (the
+    DVRCAftermath close line); `Event::is_mission_end`
+    is deleted with the send (no other caller). The
+    ONLY mission-end regen left is the proven
+    completion: `MissionLog` resolving on
+    GiveMissionRewards success=true / EndOfMatch.lua
+    Mission Succeeded for an armed mission, which
+    still pushes the completion (plus the alert event)
+    and still sends MissionEnd. (b) UNTOUCHED: the
+    grant still sends `RewardScreen` (burst arming, one
+    grab per episode via `RewardArming`), the close
+    line still sends `RewardClosed` (`on_closed`
+    resolves the episode), the credit still sends
+    `Trigger::Manual` (same loop scheduling as the
+    tray Regenerate verb), FileChanged, SessionStart,
+    and all completion bookkeeping. (c) REGEN STORY
+    per crack: success marker → mission-end update
+    (completions, fissure state); credit Manual →
+    stock update after the burst resolves. No third
+    run: the pre-pass grant/aftermath regens fired
+    before the mission was proven complete — the
+    double-requesting Seth walked through. (d) EDGE:
+    resident started mid-mission never arms, so the
+    success marker drops and the mission-end run never
+    fires — but the grant still arms the burst (it keys
+    on his account id alone) and the credit Manual
+    still updates stock, so nothing is lost. (e) NOT
+    BUILT: no dedupe window, no incremental/delta
+    planner, no profile long-TTL direction. GATES:
+    gets-reward line arms exactly once with zero
+    MissionEnd; DVRCAftermath line closes exactly once
+    with zero MissionEnd; armed block + success marker
+    yields exactly one MissionEnd; two missions armed
+    and confirmed in separate ticks yield exactly two
+    MissionEnd (one per completion, never coalesced);
+    the Manual trigger (via the tray Regenerate verb,
+    the credit path's shared trigger) produces a real
+    report run; fake-init and squadmate-grant lines
+    still arm nothing; `RewardArming` one-grab-per-
+    episode + close-re-arm unchanged; both
+    crack-screen events still classify. Suite 457
+    passed / 0 failed (lib 428, +3 over v0.5.50;
+    golden 15; packaging 7; resident 6, +1; tray_quit
+    1); `cargo build --release --locked --offline`
+    green pre-tag, lock diff = version line only
+    (a `generate-lockfile` schannel 0.1.29 → 0.1.30
+    re-resolution was reverted by hand). Details:
+    docs/fifty-sixth-pass.md. Live verification owed:
+    Seth plays on this build and confirms a crack
+    produces exactly the two expected page updates
+    (mission-end update, then stock update on credit)
+    with no earlier flicker on the reward screen, a
+    mid-mission-started resident still updates stock
+    after a crack's credit, and the installed app
+    reporting 0.5.51 (superseding the 0.5.50 install
+    check).
