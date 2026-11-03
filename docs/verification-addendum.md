@@ -3142,3 +3142,46 @@ it refines the brief where they disagree. For the next worker pass.
     after a crack's credit, and the installed app
     reporting 0.5.51 (superseding the 0.5.50 install
     check).
+123. **Fifty-seventh pass: cache-write-failure hold (fetch
+    failsafe).** Any worldstate, profile, or proxy cache
+    write failure — temp write or rename — latches an
+    in-memory hold for the life of the process (keyed per
+    cache dir; production uses one dir, so process-wide in
+    practice): no further DE live fetches, stale cache /
+    STALE rendering exactly as the lock-gate path renders
+    it. On latch, one `de-block.lock` write is attempted
+    through the same write path (endpoint names the
+    trigger, status 0 — a latch lock is not an HTTP
+    block): it lands only when the failure is
+    file-specific, and when it lands it protects restarts
+    and raises the existing header alert. A lock-write
+    failure itself latches the hold. The latch queues one
+    line that the resident report job records into
+    `resident.log` under area `fetch` — stdout alone is
+    invisible from the desktop tray, which was the worst
+    part of the old silent failure. Restart clears the
+    hold (accepted residual: rapid restarts fetch once
+    each before re-latching; nothing in-process can tell
+    a legit cold start from restart abuse). Failure
+    modes this closes: an unwritable cache dir (which
+    used to silently uncap live fetching, since the TTL
+    gates only work when a good payload lands on disk),
+    a lock-write failure (which used to silently leave
+    the next generation uncapped after a 403/429), and
+    the uncapped-fetch consequence of any write failure
+    regardless of payload situation. Honest boundary:
+    the hold does NOT itself detect persistently invalid
+    payloads — the live 200-without-`Time` worldstate
+    path and the profile parse-fail path cache nothing,
+    so they latch nothing; a persistently invalid
+    payload only stops fetching once it coincides with
+    a write failure, or via the pre-existing 403/429
+    lock. Also NOT built, per the brief: no failure
+    backoff for transient outages, no cross-restart
+    hold persistence, no hold on proxy attempts (proxy
+    keeps its own budget; only the DE fall-through is
+    held), no profile long-TTL direction. Clearing the
+    tray lock does NOT clear the hold; only a restart
+    does. Details: docs/fifty-seventh-pass.md. Live
+    verification owed: Seth confirms the installed app
+    reporting 0.5.52.

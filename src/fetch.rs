@@ -12,7 +12,9 @@
 //! failed fetch may serve the disk cache, but the report labels that
 //! view STALE — STALE stays reserved for the failure path.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 use crate::model::{OwnedEquipment, RelicTables, Roster, Targets};
@@ -119,15 +121,23 @@ fn read_cache(path: &Path) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
-fn write_cache(cache_dir: &Path, name: &str, body: &str) {
-    if std::fs::create_dir_all(cache_dir).is_err() {
-        return;
-    }
+/// Cache write that reports failure (fifty-seventh pass). The old
+/// `write_cache` swallowed every failure — a broken cache dir then
+/// silently uncapped live fetching, because the TTL gates above
+/// only work when a good payload actually lands on disk. Every
+/// caller now sees the error; the in-scope callers (worldstate,
+/// profile, proxy, lock) latch the fetch hold on it, while the
+/// out-of-scope static-data callers deliberately ignore it
+/// (`let _ =`), exactly as before.
+fn try_write_cache(cache_dir: &Path, name: &str, body: &str) -> Result<(), String> {
+    std::fs::create_dir_all(cache_dir)
+        .map_err(|e| format!("create cache dir {}: {e}", cache_dir.display()))?;
     let path = cache_file(cache_dir, name);
     let tmp = path.with_extension("tmp");
-    if std::fs::write(&tmp, body).is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
-    }
+    std::fs::write(&tmp, body).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &path)
+        .map_err(|e| format!("rename {} -> {}: {e}", tmp.display(), path.display()))?;
+    Ok(())
 }
 
 /// A TTL cache hit (addendum #120): the cache file is younger than
@@ -204,13 +214,18 @@ pub fn de_lock_path(cache_dir: &Path) -> PathBuf {
     cache_file(cache_dir, DE_LOCK_NAME)
 }
 
-pub fn write_de_lock(cache_dir: &Path, endpoint: &str, status: u16, now: SystemTime) {
+pub fn write_de_lock(
+    cache_dir: &Path,
+    endpoint: &str,
+    status: u16,
+    now: SystemTime,
+) -> Result<(), String> {
     let secs = now
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let body = format!("{endpoint}\n{status}\n{secs}\n");
-    write_cache(cache_dir, DE_LOCK_NAME, &body);
+    try_write_cache(cache_dir, DE_LOCK_NAME, &body)
 }
 
 /// Read a live lockfile, if any. A lock older than 24h, or one whose
@@ -256,6 +271,87 @@ pub fn clear_de_lock(cache_dir: &Path) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// DE fetch hold (fifty-seventh pass: cache-write-failure failsafe)
+// ---------------------------------------------------------------------------
+
+/// In-memory hold, keyed per cache dir. Production uses exactly one
+/// cache dir, so this is process-wide in practice; keying it per dir
+/// (rather than one global flag) keeps tests isolated in a shared
+/// test process, where a global latch from one test would poison
+/// another test's live-fetch assertions. The map lives for the
+/// process only: a restart clears the hold (accepted residual risk
+/// for rapid restarts — nothing in-process can distinguish a legit
+/// cold start from restart abuse).
+struct FetchHold {
+    /// Log lines waiting for the resident to record into
+    /// `resident.log` (fetch.rs owns no logger; the report job
+    /// drains these after each generation — see
+    /// `take_fetch_hold_log` and resident.rs `spawn_report_job`).
+    /// Stdout alone is invisible from the desktop tray, so the
+    /// line must land in the file, not just on a console.
+    pending_log: Vec<String>,
+}
+
+static FETCH_HOLDS: std::sync::LazyLock<Mutex<HashMap<PathBuf, FetchHold>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// True once a cache-write (or lock-write) failure has latched the
+/// hold for this cache dir. Checked before any DE live fetch.
+pub fn fetch_hold_latched(cache_dir: &Path) -> bool {
+    FETCH_HOLDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains_key(cache_dir)
+}
+
+/// Drain the pending hold log lines for this cache dir (empties the
+/// queue). The resident records each line into `resident.log`.
+pub fn take_fetch_hold_log(cache_dir: &Path) -> Vec<String> {
+    let mut holds = FETCH_HOLDS.lock().unwrap_or_else(|e| e.into_inner());
+    holds
+        .get_mut(cache_dir)
+        .map(|hold| std::mem::take(&mut hold.pending_log))
+        .unwrap_or_default()
+}
+
+/// Latch the hold for this cache dir, exactly once per process
+/// lifetime: later failures for the same dir change nothing and
+/// attempt no further lock write. On latch, one `de-block.lock`
+/// write is attempted through the same write path — it only lands
+/// when the failure is file-specific rather than directory-wide,
+/// but when it lands it protects restarts too and raises the
+/// existing header alert. A lock-write failure during that attempt
+/// is already covered: the hold is latched regardless, and the
+/// outcome is recorded in the pending log line. The lock's status
+/// is 0 — not an HTTP block, so no HTTP status exists to record;
+/// the endpoint names the trigger ("worldstate", "profile",
+/// "proxy", or "lock").
+fn latch_fetch_hold(cache_dir: &Path, reason: String, lock_endpoint: &str, now: SystemTime) {
+    {
+        let mut holds = FETCH_HOLDS.lock().unwrap_or_else(|e| e.into_inner());
+        if holds.contains_key(cache_dir) {
+            return;
+        }
+        holds.insert(
+            cache_dir.to_path_buf(),
+            FetchHold {
+                pending_log: Vec::new(),
+            },
+        );
+    }
+    let lock_outcome = match write_de_lock(cache_dir, lock_endpoint, 0, now) {
+        Ok(()) => "de-block.lock written".to_owned(),
+        Err(e) => format!("de-block.lock write also failed ({e})"),
+    };
+    let mut holds = FETCH_HOLDS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(hold) = holds.get_mut(cache_dir) {
+        hold.pending_log.push(format!(
+            "DE fetch hold latched: {reason}; {lock_outcome}"
+        ));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // World state
 // ---------------------------------------------------------------------------
 
@@ -296,13 +392,29 @@ async fn fetch_worldstate_de_at(
     // nothing looks live, and the header alert (read separately by
     // report.rs) explains why. Any-age disk cache serves; without
     // one this errors exactly as the unreachable path does.
-    if read_de_lock(cache_dir, now).is_some() {
-        let cached = read_cache(&path)
-            .ok_or_else(|| "worldstate paused (lockfile), no cache".to_owned())?;
+    // Fifty-seventh pass: the in-memory fetch hold gates exactly
+    // like the lock, with its own reason — a held fetch makes no
+    // network request and serves any-age cache as CacheFallback,
+    // so the page renders STALE exactly as it does under the lock.
+    let held_reason = if fetch_hold_latched(cache_dir) {
+        Some("DE requests paused (fetch hold)")
+    } else if read_de_lock(cache_dir, now).is_some() {
+        Some("DE requests paused (lockfile)")
+    } else {
+        None
+    };
+    if let Some(reason) = held_reason {
+        let cached = read_cache(&path).ok_or_else(|| {
+            if reason.contains("fetch hold") {
+                "worldstate paused (fetch hold), no cache".to_owned()
+            } else {
+                "worldstate paused (lockfile), no cache".to_owned()
+            }
+        })?;
         return Ok(Fetched {
             value: cached,
             status: FetchStatus::CacheFallback {
-                reason: "DE requests paused (lockfile)".to_owned(),
+                reason: reason.to_owned(),
             },
         });
     }
@@ -322,7 +434,17 @@ async fn fetch_worldstate_de_at(
             if status == reqwest::StatusCode::FORBIDDEN
                 || status == reqwest::StatusCode::TOO_MANY_REQUESTS
             {
-                write_de_lock(cache_dir, "worldstate", status.as_u16(), now);
+                // Fifty-seventh pass: a lock-write failure itself
+                // latches the hold — the block must not silently
+                // uncap the next generation.
+                if let Err(e) = write_de_lock(cache_dir, "worldstate", status.as_u16(), now) {
+                    latch_fetch_hold(
+                        cache_dir,
+                        format!("de-block.lock write failed ({e})"),
+                        "lock",
+                        now,
+                    );
+                }
                 let cached = read_cache(&path).ok_or_else(|| {
                     format!("worldstate blocked (HTTP {status}), no cache")
                 })?;
@@ -344,7 +466,18 @@ async fn fetch_worldstate_de_at(
             if v.get("Time").is_none() {
                 return Err("worldstate (DE payload): missing Time".to_owned());
             }
-            write_cache(cache_dir, "worldstate.json", &text);
+            // Fifty-seventh pass: a failed cache write latches the
+            // hold — this generation still serves its live payload,
+            // but no further DE live fetch happens from this
+            // process while the cache cannot persist it.
+            if let Err(e) = try_write_cache(cache_dir, "worldstate.json", &text) {
+                latch_fetch_hold(
+                    cache_dir,
+                    format!("worldstate cache write failed ({e})"),
+                    "worldstate",
+                    now,
+                );
+            }
             Ok(Fetched {
                 value: text,
                 status: FetchStatus::Fresh,
@@ -486,7 +619,17 @@ async fn fetch_worldstate_resolved_at_with_urls(
         Err(_) => None,
     };
     if let Some(text) = wfs_live {
-        write_cache(cache_dir, "worldstate-wfs.json", &text);
+        // Fifty-seventh pass: a proxy cache-write failure latches
+        // the DE hold (the proxy budget is separate, so proxy
+        // attempts continue unchanged — only DE live fetches stop).
+        if let Err(e) = try_write_cache(cache_dir, "worldstate-wfs.json", &text) {
+            latch_fetch_hold(
+                cache_dir,
+                format!("proxy cache write failed ({e})"),
+                "proxy",
+                now,
+            );
+        }
         return Ok(ResolvedWorldstate {
             text,
             origin: WorldstateOrigin::Wfs,
@@ -623,6 +766,15 @@ async fn fetch_profile_url_at(
     // Fifty-fifth pass: same lock gate as worldstate — no DE network
     // traffic while a live lock holds; any-age cache serves, else
     // the existing failure path (report.rs profile_fallback).
+    // Fifty-seventh pass: the fetch hold gates identically, with
+    // its own reason — no request, CacheFallback from any-age
+    // cache, else the same parse/no-cache error as the lock path.
+    if fetch_hold_latched(cache_dir) {
+        return profile_cache_fallback(
+            &path,
+            "DE requests paused (fetch hold)".to_owned(),
+        );
+    }
     if read_de_lock(cache_dir, now).is_some() {
         return profile_cache_fallback(
             &path,
@@ -654,7 +806,16 @@ async fn fetch_profile_url_at(
     match fetch_profile_live(client, &url).await {
         Ok(text) => match parse_profile(&text) {
             Ok(snap) => {
-                write_cache(cache_dir, &name, &text);
+                // Fifty-seventh pass: same latch as worldstate —
+                // this generation still serves its live snapshot.
+                if let Err(e) = try_write_cache(cache_dir, &name, &text) {
+                    latch_fetch_hold(
+                        cache_dir,
+                        format!("profile cache write failed ({e})"),
+                        "profile",
+                        now,
+                    );
+                }
                 Ok(Fetched {
                     value: snap,
                     status: FetchStatus::Fresh,
@@ -665,7 +826,16 @@ async fn fetch_profile_url_at(
         Err(LiveFail::Definitive(e)) => Err(e),
         Err(LiveFail::Blocked(status)) => {
             // Fifty-fifth pass: a DE block locks BOTH endpoints.
-            write_de_lock(cache_dir, "profile", status, now);
+            // Fifty-seventh pass: a lock-write failure latches the
+            // hold, as in the worldstate 403/429 path.
+            if let Err(e) = write_de_lock(cache_dir, "profile", status, now) {
+                latch_fetch_hold(
+                    cache_dir,
+                    format!("de-block.lock write failed ({e})"),
+                    "lock",
+                    now,
+                );
+            }
             profile_cache_fallback(
                 &path,
                 format!("DE HTTP {status} (requests paused)"),
@@ -872,7 +1042,10 @@ pub async fn fetch_xuerian_targets(
             let text = resp.text().await.map_err(|e| format!("xuerian: {e}"))?;
             match Targets::from_json(&text) {
                 Ok(t) if !t.wants.is_empty() => {
-                    write_cache(cache_dir, "xuerian.json", &text);
+                    // Out of scope for the fifty-seventh pass hold:
+                    // Xuerian is not DE traffic, so its write
+                    // failure stays silent exactly as before.
+                    let _ = try_write_cache(cache_dir, "xuerian.json", &text);
                     Ok(Fetched {
                         value: t,
                         status: FetchStatus::Fresh,
@@ -944,7 +1117,9 @@ pub async fn fetch_relic_tables(
     // and never re-seeds a "Vanguard" era (addendum #66).
     let baked = crate::model::bake_relic_tables(&text)?;
     if baked != text {
-        write_cache(cache_dir, "relictables.json", &baked);
+        // Out of scope for the fifty-seventh pass hold (static
+        // data, not DE traffic): failure stays silent as before.
+        let _ = try_write_cache(cache_dir, "relictables.json", &baked);
     }
     Ok(Fetched {
         value: RelicTables::from_json(&baked)?,
@@ -983,7 +1158,9 @@ async fn fetch_static(
         Ok(resp) => {
             let resp = resp.error_for_status().map_err(|e| format!("{name}: {e}"))?;
             let text = resp.text().await.map_err(|e| format!("{name}: {e}"))?;
-            write_cache(cache_dir, name, &text);
+            // Out of scope for the fifty-seventh pass hold (static
+            // data, not DE traffic): failure stays silent as before.
+            let _ = try_write_cache(cache_dir, name, &text);
             Ok((text, FetchStatus::Fresh))
         }
         Err(e) => {
@@ -1489,7 +1666,7 @@ mod tests {
     async fn wfs_fresh_cache_served_with_zero_requests() {
         let dir = de_test_dir("wfs-cache");
         let now = SystemTime::now();
-        write_cache(&dir, "worldstate-wfs.json", &wfs_payload_with_timestamp(&rfc3339(now)));
+        try_write_cache(&dir, "worldstate-wfs.json", &wfs_payload_with_timestamp(&rfc3339(now))).expect("test cache write");
         let stub = StubServer::start(500, "boom");
         // Fetch with a fresh clock reading: a `now` captured before
         // the cache write predates the file's mtime, and a
@@ -1657,11 +1834,11 @@ mod tests {
         // passes and the PAYLOAD staleness is what rejects the hit.
         let dir = de_test_dir("wfs-stale-cache");
         let now = SystemTime::now();
-        write_cache(
+        try_write_cache(
             &dir,
             "worldstate-wfs.json",
             &wfs_payload_with_timestamp(&rfc3339(now - Duration::from_secs(20 * 60))),
-        );
+        ).expect("test cache write");
         let wfs = StubServer::start(500, "proxy down");
         let de = StubServer::start(200, WS_TEXT);
         let resolved = fetch_worldstate_resolved_at_with_urls(
@@ -1681,7 +1858,7 @@ mod tests {
     async fn de_403_writes_lock_and_blocks_further_requests() {
         let dir = de_test_dir("de-403");
         let now = SystemTime::now();
-        write_cache(&dir, "worldstate.json", WS_TEXT);
+        try_write_cache(&dir, "worldstate.json", WS_TEXT).expect("test cache write");
         let de = StubServer::start(403, "blocked");
         let fetched = fetch_worldstate_de_at(&stub_client(), &dir, now, &de.url)
             .await
@@ -1711,8 +1888,8 @@ mod tests {
     async fn profile_429_locks_both_endpoints() {
         let dir = de_test_dir("profile-429");
         let now = SystemTime::now();
-        write_cache(&dir, "profile-locktest.json", PROFILE_TEXT);
-        write_cache(&dir, "worldstate.json", WS_TEXT);
+        try_write_cache(&dir, "profile-locktest.json", PROFILE_TEXT).expect("test cache write");
+        try_write_cache(&dir, "worldstate.json", WS_TEXT).expect("test cache write");
         let prof = StubServer::start(429, "slow down");
         let fetched = fetch_profile_url_at(&stub_client(), &dir, "locktest", now, &prof.url)
             .await
@@ -1742,7 +1919,7 @@ mod tests {
         // A 25-hour-old lock is ignored as if absent AND deleted.
         let dir = de_test_dir("lock-expiry");
         let now = SystemTime::now();
-        write_de_lock(&dir, "worldstate", 403, now - Duration::from_secs(25 * 3600));
+        write_de_lock(&dir, "worldstate", 403, now - Duration::from_secs(25 * 3600)).expect("test lock write");
         let de = StubServer::start(200, WS_TEXT);
         let fetched = fetch_worldstate_de_at(&stub_client(), &dir, now, &de.url)
             .await
@@ -1764,7 +1941,7 @@ mod tests {
     #[test]
     fn clear_de_lock_removes_file() {
         let dir = de_test_dir("lock-clear");
-        write_de_lock(&dir, "profile", 429, SystemTime::now());
+        write_de_lock(&dir, "profile", 429, SystemTime::now()).expect("test lock write");
         assert!(clear_de_lock(&dir));
         assert!(!de_lock_path(&dir).exists());
         assert!(!clear_de_lock(&dir), "second clear reports nothing to do");
@@ -1783,5 +1960,314 @@ mod tests {
             read_de_lock(&dir, now).is_none(),
             "a 409 is not a block and must not lock"
         );
+    }
+
+    // --- Fifty-seventh pass: cache-write-failure hold ------------------
+    //
+    // Write failure is forced robustly (tests may run as root, where
+    // chmod read-only dirs still allow writes): either the cache
+    // dir IS a regular file (create_dir_all fails — directory-wide
+    // failure) or the cache tmp path is pre-created as a directory
+    // (the tmp write fails — file-specific failure, so the latch's
+    // lock attempt still lands). No test below touches the real DE
+    // endpoints; stub hit counts prove zero network requests on
+    // the held path.
+
+    #[tokio::test]
+    async fn hold_worldstate_write_failure_latches_and_serves_stale() {
+        let dir = de_test_dir("hold-ws-tmpdir");
+        // Stale cache (fetched with a clock 20 minutes ahead, past
+        // the 15-minute TTL) plus a blocked tmp path: the live
+        // write fails, but the stale cache stays readable.
+        std::fs::write(dir.join("worldstate.json"), WS_TEXT).unwrap();
+        std::fs::create_dir_all(dir.join("worldstate.tmp")).unwrap();
+        let now = SystemTime::now() + Duration::from_secs(20 * 60);
+        let de = StubServer::start(200, WS_TEXT);
+        let first = fetch_worldstate_de_at(&stub_client(), &dir, now, &de.url)
+            .await
+            .unwrap();
+        // This generation still serves its live payload.
+        assert!(matches!(first.status, FetchStatus::Fresh));
+        assert_eq!(de.hits(), 1);
+        assert!(
+            fetch_hold_latched(&dir),
+            "a failed worldstate cache write must latch the hold"
+        );
+        // File-specific failure: the latch's lock attempt lands.
+        let lock = read_de_lock(&dir, now).expect("latch must attempt the lock");
+        assert_eq!(lock.endpoint, "worldstate");
+        assert_eq!(lock.status, 0, "a latch lock is not an HTTP block");
+        let log = take_fetch_hold_log(&dir);
+        assert_eq!(log.len(), 1, "one latch, one log line: {log:?}");
+        assert!(
+            log[0].contains("worldstate cache write failed"),
+            "log names the failure: {}",
+            log[0]
+        );
+        assert!(
+            log[0].contains("de-block.lock written"),
+            "log records the lock landing: {}",
+            log[0]
+        );
+        assert!(
+            take_fetch_hold_log(&dir).is_empty(),
+            "draining empties the queue"
+        );
+        // Held: zero further requests, stale cache as CacheFallback.
+        let de2 = StubServer::start(200, WS_TEXT);
+        let held = fetch_worldstate_de_at(&stub_client(), &dir, now, &de2.url)
+            .await
+            .unwrap();
+        assert_eq!(de2.hits(), 0, "a held fetch makes no request");
+        assert!(matches!(
+            held.status,
+            FetchStatus::CacheFallback { ref reason }
+            if reason.contains("fetch hold")
+        ));
+        assert_eq!(held.value, WS_TEXT);
+        // One lock attempt per latch: deleting the landed lock and
+        // fetching again must NOT re-attempt it.
+        std::fs::remove_file(de_lock_path(&dir)).unwrap();
+        let de3 = StubServer::start(200, WS_TEXT);
+        let held2 = fetch_worldstate_de_at(&stub_client(), &dir, now, &de3.url)
+            .await
+            .unwrap();
+        assert_eq!(de3.hits(), 0);
+        assert!(matches!(held2.status, FetchStatus::CacheFallback { .. }));
+        assert!(
+            !de_lock_path(&dir).exists(),
+            "no second lock attempt on a subsequent held fetch"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn hold_directory_wide_failure_latches_without_lock() {
+        // The cache dir is a regular file: create_dir_all fails, so
+        // every cache and lock write fails — the hold is the only
+        // protection, and no lock can land.
+        let parent = de_test_dir("hold-dirfile");
+        let dir = parent.join("cachefile");
+        std::fs::write(&dir, b"x").unwrap();
+        let now = SystemTime::now();
+        let de = StubServer::start(200, WS_TEXT);
+        let first = fetch_worldstate_de_at(&stub_client(), &dir, now, &de.url)
+            .await
+            .unwrap();
+        assert!(matches!(first.status, FetchStatus::Fresh));
+        assert_eq!(de.hits(), 1);
+        assert!(fetch_hold_latched(&dir), "dir-wide failure must latch");
+        assert!(
+            !de_lock_path(&dir).exists(),
+            "no lock can land when the dir itself is broken"
+        );
+        let log = take_fetch_hold_log(&dir);
+        assert_eq!(log.len(), 1);
+        assert!(log[0].contains("worldstate cache write failed"), "{}", log[0]);
+        assert!(
+            log[0].contains("de-block.lock write also failed"),
+            "the failed lock attempt is recorded, not hidden: {}",
+            log[0]
+        );
+        // Held with no readable cache: the same error today's
+        // lock-gate path produces, and still zero requests.
+        let de2 = StubServer::start(200, WS_TEXT);
+        let err = fetch_worldstate_de_at(&stub_client(), &dir, now, &de2.url)
+            .await
+            .unwrap_err();
+        assert_eq!(de2.hits(), 0);
+        assert!(err.contains("fetch hold"), "held error names the hold: {err}");
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[tokio::test]
+    async fn hold_lock_write_failure_latches() {
+        // A 403 whose lock write fails (cache dir is a file) must
+        // latch the hold, not silently leave the next generation
+        // uncapped.
+        let parent = de_test_dir("hold-lockfile");
+        let dir = parent.join("cachefile");
+        std::fs::write(&dir, b"x").unwrap();
+        let now = SystemTime::now();
+        let de = StubServer::start(403, "blocked");
+        let err = fetch_worldstate_de_at(&stub_client(), &dir, now, &de.url)
+            .await
+            .unwrap_err();
+        assert!(err.contains("blocked"), "403 with no cache errors: {err}");
+        assert!(
+            fetch_hold_latched(&dir),
+            "a failed lock write must latch the hold"
+        );
+        let log = take_fetch_hold_log(&dir);
+        assert_eq!(log.len(), 1);
+        assert!(log[0].contains("de-block.lock write failed"), "{}", log[0]);
+        let de2 = StubServer::start(200, WS_TEXT);
+        let err2 = fetch_worldstate_de_at(&stub_client(), &dir, now, &de2.url)
+            .await
+            .unwrap_err();
+        assert_eq!(de2.hits(), 0, "a held fetch makes no request");
+        assert!(err2.contains("fetch hold"), "{err2}");
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[tokio::test]
+    async fn hold_profile_write_failure_blocks_both_endpoints() {
+        let dir = de_test_dir("hold-profile-tmpdir");
+        std::fs::write(dir.join("profile-holdtest.json"), PROFILE_TEXT).unwrap();
+        std::fs::write(dir.join("worldstate.json"), WS_TEXT).unwrap();
+        std::fs::create_dir_all(dir.join("profile-holdtest.tmp")).unwrap();
+        let now = SystemTime::now() + Duration::from_secs(20 * 60);
+        let prof = StubServer::start(200, PROFILE_TEXT);
+        let first = fetch_profile_url_at(&stub_client(), &dir, "holdtest", now, &prof.url)
+            .await
+            .unwrap();
+        assert!(matches!(first.status, FetchStatus::Fresh));
+        assert_eq!(prof.hits(), 1);
+        assert!(fetch_hold_latched(&dir), "profile write failure must latch");
+        let lock = read_de_lock(&dir, now).expect("latch lock lands");
+        assert_eq!(lock.endpoint, "profile");
+        // One hold blocks BOTH DE endpoints: worldstate and profile
+        // alike make zero requests and serve stale cache.
+        let de = StubServer::start(200, WS_TEXT);
+        let held_ws = fetch_worldstate_de_at(&stub_client(), &dir, now, &de.url)
+            .await
+            .unwrap();
+        assert_eq!(de.hits(), 0);
+        assert!(matches!(
+            held_ws.status,
+            FetchStatus::CacheFallback { ref reason }
+            if reason.contains("fetch hold")
+        ));
+        assert_eq!(held_ws.value, WS_TEXT);
+        let prof2 = StubServer::start(200, PROFILE_TEXT);
+        let held_prof =
+            fetch_profile_url_at(&stub_client(), &dir, "holdtest", now, &prof2.url)
+                .await
+                .unwrap();
+        assert_eq!(prof2.hits(), 0);
+        assert!(matches!(
+            held_prof.status,
+            FetchStatus::CacheFallback { ref reason }
+            if reason.contains("fetch hold")
+        ));
+        assert_eq!(held_prof.value.display_name, "T");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn hold_proxy_write_failure_latches_de_but_proxy_continues() {
+        let dir = de_test_dir("hold-proxy-tmpdir");
+        std::fs::write(dir.join("worldstate.json"), WS_TEXT).unwrap();
+        std::fs::create_dir_all(dir.join("worldstate-wfs.tmp")).unwrap();
+        // The fetch clock must match the proxy payload timestamp:
+        // a clock 20 minutes ahead would trip the 15-minute
+        // payload-freshness bar and never reach the cache write.
+        let now = SystemTime::now();
+        let wfs =
+            StubServer::start(200, &wfs_payload_with_timestamp(&rfc3339(now)));
+        let resolved = fetch_worldstate_resolved_at_with_urls(
+            &stub_client(),
+            &dir,
+            now,
+            &wfs.url,
+            "http://127.0.0.1:9/de",
+        )
+        .await
+        .unwrap();
+        assert!(matches!(resolved.status, FetchStatus::Fresh));
+        assert_eq!(resolved.origin, WorldstateOrigin::Wfs);
+        assert_eq!(wfs.hits(), 1);
+        assert!(
+            fetch_hold_latched(&dir),
+            "a proxy cache-write failure must latch the DE hold"
+        );
+        let lock = read_de_lock(&dir, now).expect("latch lock lands");
+        assert_eq!(lock.endpoint, "proxy");
+        // Next generation: the proxy is still attempted (different
+        // host, different budget), but the DE fall-through is held.
+        let wfs2 = StubServer::start(500, "proxy down");
+        let de = StubServer::start(200, WS_TEXT);
+        let resolved2 = fetch_worldstate_resolved_at_with_urls(
+            &stub_client(),
+            &dir,
+            now,
+            &wfs2.url,
+            &de.url,
+        )
+        .await
+        .unwrap();
+        assert_eq!(wfs2.hits(), 1, "proxy attempts continue unchanged");
+        assert_eq!(de.hits(), 0, "the DE fall-through stays held");
+        assert_eq!(resolved2.origin, WorldstateOrigin::De);
+        assert!(matches!(
+            resolved2.status,
+            FetchStatus::CacheFallback { ref reason }
+            if reason.contains("fetch hold")
+        ));
+        assert_eq!(resolved2.text, WS_TEXT);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn hold_success_path_does_not_latch() {
+        let dir = de_test_dir("hold-success");
+        let now = SystemTime::now();
+        let de = StubServer::start(200, WS_TEXT);
+        let fetched = fetch_worldstate_de_at(&stub_client(), &dir, now, &de.url)
+            .await
+            .unwrap();
+        assert!(matches!(fetched.status, FetchStatus::Fresh));
+        let prof = StubServer::start(200, PROFILE_TEXT);
+        let snap = fetch_profile_url_at(&stub_client(), &dir, "holdtest", now, &prof.url)
+            .await
+            .unwrap();
+        assert!(matches!(snap.status, FetchStatus::Fresh));
+        assert!(
+            !fetch_hold_latched(&dir),
+            "normal writes must not latch the hold"
+        );
+        assert!(take_fetch_hold_log(&dir).is_empty());
+        assert!(
+            read_de_lock(&dir, now).is_none(),
+            "no lock on the success path"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn hold_failure_is_recorded_in_resident_log() {
+        // The real observability path, end to end: latch via a
+        // genuine fetch failure, drain through the same helper the
+        // resident report job uses, record through a real AppLog,
+        // and read the line back out of resident.log itself.
+        let dir = de_test_dir("hold-resident-log");
+        std::fs::write(dir.join("worldstate.json"), WS_TEXT).unwrap();
+        std::fs::create_dir_all(dir.join("worldstate.tmp")).unwrap();
+        let now = SystemTime::now() + Duration::from_secs(20 * 60);
+        let de = StubServer::start(200, WS_TEXT);
+        let first = fetch_worldstate_de_at(&stub_client(), &dir, now, &de.url)
+            .await
+            .unwrap();
+        assert!(matches!(first.status, FetchStatus::Fresh));
+        assert!(fetch_hold_latched(&dir));
+        let log_dir = std::env::temp_dir()
+            .join(format!("fracker-hold-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&log_dir);
+        let log = crate::applog::AppLog::open(&log_dir);
+        assert_eq!(log.path(), log_dir.join("resident.log"));
+        for line in take_fetch_hold_log(&dir) {
+            log.record("fetch", &line);
+        }
+        let text = std::fs::read_to_string(log.path()).unwrap();
+        assert!(
+            text.contains("[fetch] DE fetch hold latched"),
+            "resident.log carries the latch line: {text}"
+        );
+        assert!(
+            text.contains("worldstate cache write failed"),
+            "resident.log names the failure: {text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&log_dir);
     }
 }
