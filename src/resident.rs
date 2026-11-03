@@ -669,6 +669,12 @@ fn spawn_report_job(
     tokio::spawn(async move {
         log.record("report", &format!("start ({trigger:?})"));
         do_report(&opts, &status, &tray, trigger, &completions).await;
+        // Fifty-seventh pass: a fetch hold latched during this
+        // generation lands in resident.log here (fetch.rs owns no
+        // logger, so it queues the line and this job records it).
+        for line in crate::fetch::take_fetch_hold_log(&opts.report.cache_dir) {
+            log.record("fetch", &line);
+        }
         log.record("report", "done");
         // Ninth pass §2/item 40b + twelfth pass §2: the settled login is the
         // only auto-open trigger, at most once per session.
