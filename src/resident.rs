@@ -937,11 +937,12 @@ fn parent_gear_for(data_dir: &Path, part: &str) -> Option<String> {
     roster.parents_of(part).into_iter().next()
 }
 
-/// Spawn the one-shot pack watch (pass 53): grab frames
-/// every 1 s while the purchase session lasts, detect each
-/// reveal screen's relic trio, credit proven trios, and
-/// disarm on the session-end rules. Completion is always
-/// reported on `done` so the loop can arm a fresh watch.
+/// Spawn the one-shot pack watch (pass 53; per-cell
+/// since pass 58): grab frames every 1 s while the
+/// purchase session lasts, detect each reveal screen's
+/// relic cells, credit proven cells, and disarm on the
+/// session-end rules. Completion is always reported on
+/// `done` so the loop can arm a fresh watch.
 fn spawn_pack_watch(
     opts: ResidentOptions,
     capture_live: bool,
@@ -957,48 +958,71 @@ fn spawn_pack_watch(
     })
 }
 
-/// Credit one proven pack trio (pass 53): +1 Intact each
-/// into relic stock, a `pack_open` event (whose beacon
-/// plays the page's chime), a capture.log line, and a
-/// regen. A failed credit logs and emits nothing — the
-/// screen must not read as captured when it was not.
+/// Credit proven pack cells (pass 53, per-cell since
+/// pass 58): +1 Intact each into relic stock, a
+/// capture.log line, and a regen. The `pack_open` event
+/// — whose beacon plays the page's chime — is appended
+/// only when `emit_event` is set, so a screen chimes
+/// once however many grabs its cells credit across: the
+/// watch passes true for the instance's first credit
+/// batch only. A failed credit logs and emits nothing —
+/// the screen must not read as captured when it was not.
 fn pack_credit(
-    trio: &[String; 3],
+    names: &[String],
+    emit_event: bool,
     stock_path: &Path,
     events_dir: &Path,
     log: &CaptureLog,
     regen_tx: &mpsc::UnboundedSender<Trigger>,
 ) {
-    match packopen::credit_relics(stock_path, trio) {
+    match packopen::credit_relics(stock_path, names) {
         Ok(counts) => {
             log.record(
                 "pack",
                 &format!(
                     "credited {} (Intact counts now {:?})",
-                    trio.join(", "),
+                    names.join(", "),
                     counts
                 ),
             );
-            crate::events::append(
-                events_dir,
-                &crate::events::EventRecord::pack_open(
-                    crate::events::now_ts(),
-                    trio.to_vec(),
-                ),
-            );
+            if emit_event {
+                crate::events::append(
+                    events_dir,
+                    &crate::events::EventRecord::pack_open(
+                        crate::events::now_ts(),
+                        names.to_vec(),
+                    ),
+                );
+            }
             let _ = regen_tx.send(Trigger::Manual);
         }
         Err(e) => log.record(
             "pack",
-            &format!("credit for {} failed: {e}", trio.join(", ")),
+            &format!("credit for {} failed: {e}", names.join(", ")),
         ),
     }
 }
 
-/// Record one ended-unproven pack screen (pass 53): a
-/// capture.log line and a `pack_miss` event naming the
-/// unresolved slots. A proven screen owes nothing.
-fn pack_miss(ended: &packopen::EndedScreen, events_dir: &Path, log: &CaptureLog) {
+/// Record one ended pack screen (pass 58): per-cell miss
+/// lines for gated-but-unproven cells, skipped lines for
+/// cells that never gated as relic columns (the Aya
+/// case — logged, never a failure), and, only when no
+/// cell credited, a `pack_miss` event naming the miss
+/// slots. A screen with >= 1 credited cell owes no miss
+/// event: its `pack_open` already fired.
+fn pack_screen_ended(ended: &packopen::EndedScreen, events_dir: &Path, log: &CaptureLog) {
+    for i in ended.miss_slots() {
+        log.record(
+            "pack",
+            &format!("per-cell miss: slot {} unproven", i + 1),
+        );
+    }
+    for i in ended.skipped_slots() {
+        log.record(
+            "pack",
+            &format!("skipped: slot {} did not gate as a relic cell", i + 1),
+        );
+    }
     if ended.proven {
         return;
     }
@@ -1013,15 +1037,19 @@ fn pack_miss(ended: &packopen::EndedScreen, events_dir: &Path, log: &CaptureLog)
     );
 }
 
-/// The pack watch itself (pass 53). Arms on the purchase
-/// dialog, grabs at the 1 s cadence from the live capture
-/// stream when one is running (via the tap) or from its
-/// own negotiated stream otherwise, and runs the
-/// [`packopen::PackWatch`] machine until a disarm rule
-/// fires. Every pack screen's first frame is saved under
-/// capture-debug/packs/ (and the crediting frame too when
-/// it is a later grab), so a miss is debuggable after the
-/// fact.
+/// The pack watch itself (pass 53; per-cell since pass
+/// 58). Arms on the purchase dialog, grabs at the 1 s
+/// cadence from the live capture stream when one is
+/// running (via the tap) or from its own negotiated
+/// stream otherwise, and runs the [`packopen::PackWatch`]
+/// machine until a disarm rule fires. Every pack screen's
+/// first frame is saved under capture-debug/packs/ (and
+/// the crediting frame too when it is a later grab), so
+/// a miss is debuggable after the fact — note the save
+/// sits behind the screen classification, so a screen
+/// that never classifies (the pass-58 Aya screen under
+/// the old all-three-columns gate) saves nothing at all;
+/// see docs/fifty-eighth-pass.md.
 async fn pack_watch(
     opts: ResidentOptions,
     capture_live: bool,
@@ -1117,6 +1145,10 @@ async fn pack_watch(
     watch.arm(std::time::Instant::now());
     let mut instance: u32 = 0;
     let mut in_instance = false;
+    // Pass 58: whether this screen-instance already
+    // emitted its pack_open (chime once per screen,
+    // however many grabs its cells credit across).
+    let mut chimed = false;
     loop {
         tokio::time::sleep(packopen::GRAB_INTERVAL).await;
         let frame = if capture_live {
@@ -1128,13 +1160,15 @@ async fn pack_watch(
             let now = std::time::Instant::now();
             if !packopen::is_pack_screen(&frame) {
                 if let Some(ended) = watch.note_frame(now, false) {
-                    pack_miss(&ended, &events_dir, &log);
+                    pack_screen_ended(&ended, &events_dir, &log);
                 }
                 in_instance = false;
+                chimed = false;
             } else {
                 if !in_instance {
                     instance += 1;
                     in_instance = true;
+                    chimed = false;
                     log.record(
                         "pack",
                         &format!("pack screen seen (instance {instance})"),
@@ -1163,21 +1197,40 @@ async fn pack_watch(
                 .await
                 .ok()
                 .flatten();
-                let resolved = read
+                let (resolved, gated) = read
                     .as_ref()
-                    .map(|r| r.resolved.clone())
-                    .unwrap_or([None, None, None]);
-                match watch.note_resolution(resolved) {
+                    .map(|r| (r.resolved.clone(), r.gated))
+                    .unwrap_or(([None, None, None], [false, false, false]));
+                match watch.note_resolution(resolved, gated) {
                     packopen::ResolutionStep::Pending => {}
-                    packopen::ResolutionStep::ReadyToCredit(trio) => {
-                        pack_credit(&trio, &stock_path, &events_dir, &log, &regen_tx);
-                        watch.mark_proven();
+                    packopen::ResolutionStep::ReadyToCredit(cells) => {
+                        let slots: Vec<usize> = cells.iter().map(|(i, _)| *i).collect();
+                        let names: Vec<String> =
+                            cells.iter().map(|(_, n)| n.clone()).collect();
+                        pack_credit(
+                            &names,
+                            !chimed,
+                            &stock_path,
+                            &events_dir,
+                            &log,
+                            &regen_tx,
+                        );
+                        chimed = true;
+                        watch.mark_credited(&slots);
                     }
                     packopen::ResolutionStep::Replaced { ended, ready } => {
-                        pack_miss(&ended, &events_dir, &log);
-                        if let Some(trio) = ready {
-                            pack_credit(&trio, &stock_path, &events_dir, &log, &regen_tx);
-                            watch.mark_proven();
+                        pack_screen_ended(&ended, &events_dir, &log);
+                        chimed = false;
+                        if let Some(cells) = ready {
+                            let slots: Vec<usize> =
+                                cells.iter().map(|(i, _)| *i).collect();
+                            let names: Vec<String> =
+                                cells.iter().map(|(_, n)| n.clone()).collect();
+                            pack_credit(
+                                &names, true, &stock_path, &events_dir, &log, &regen_tx,
+                            );
+                            chimed = true;
+                            watch.mark_credited(&slots);
                         }
                     }
                 }
@@ -1185,7 +1238,7 @@ async fn pack_watch(
         }
         if let Some(reason) = watch.disarm_due(std::time::Instant::now()) {
             if let Some(ended) = watch.finish_instance() {
-                pack_miss(&ended, &events_dir, &log);
+                pack_screen_ended(&ended, &events_dir, &log);
             }
             log.record("pack", &format!("disarmed: {}", reason.label()));
             break;

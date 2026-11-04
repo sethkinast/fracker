@@ -3185,3 +3185,30 @@ it refines the brief where they disagree. For the next worker pass.
     does. Details: docs/fifty-seventh-pass.md. Live
     verification owed: Seth confirms the installed app
     reporting 0.5.52.
+124. **Fifty-eighth pass: per-cell pack detection (Aya
+    screens).** Pass 53's atomic rule is superseded: each
+    pack column is gated and OCR'd on its own, a proven
+    cell credits +1 Intact immediately, duplicates credit
+    multiset, a gated-but-unproven cell is a logged
+    per-cell miss, and a cell whose column fails the
+    structural gate (no era icon, no caption glyphs) is
+    skipped without OCR — no dedicated Aya classifier.
+    Screen yields `pack_open` at >= 1 credited cell and
+    `pack_miss` only at 0; the chime fires once per
+    screen-instance (first credit batch only).
+    `is_pack_screen` is now dark gaps plus >= 1 gated
+    column (the gaps, not the column count, keep reward
+    and gameplay frames out). Fixture
+    `fixtures/pack-open/pack-aya.png` (grayscale derived
+    from Seth's 2026-11-03 dump; the RGBA dump itself is
+    not committed) proves Axi A21 + Meso V13 with the
+    middle Aya cell skipped. Fixture-gap diagnosis: the
+    Aya screen saved NO frame because it never
+    classified as a pack frame at all under the old
+    all-three-columns gate — the audit save sits inside
+    the `is_pack_screen` branch in `pack_watch`, so the
+    non-pack branch saved nothing and logged nothing;
+    the save path itself was never success-only. The
+    per-cell gate change is what lets mixed screens
+    classify and therefore save; no separate fix was
+    added. Details: docs/fifty-eighth-pass.md.

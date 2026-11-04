@@ -1,5 +1,6 @@
 //! Pack-open detection (fifty-third pass, Seth's criteria
-//! of 2026-10-28; loop stage 1's inflow).
+//! of 2026-10-28, per-cell rule of the fifty-eighth pass;
+//! loop stage 1's inflow).
 //!
 //! Granted relics from opened packs are named nowhere in
 //! EE.log (content-blind, settled 2026-10-26 and reconfirmed
@@ -10,12 +11,21 @@
 //! reveal screen ("PACK n OF 3") prints the three granted
 //! relic NAMES as captions under large era icons. So: arm
 //! on the dialog line, grab one portal frame per second,
-//! classify each frame structurally as a pack screen, OCR
-//! the three captions against the relic universe under the
-//! pass-46 admission discipline, and — only when ALL THREE
-//! captions prove — credit +1 Intact each. Anything less
-//! is a miss, never a guess (the never-fabricate rule) and
-//! never a partial credit (Seth: atomic per screen).
+//! classify each frame structurally as a pack screen, then
+//! gate and OCR each of the three columns ON ITS OWN
+//! against the relic universe under the pass-46 admission
+//! discipline. A cell that proves as a relic credits +1
+//! Intact, duplicates crediting multiset; a cell that
+//! proves as neither a relic nor (trivially) a non-relic
+//! is a logged per-cell miss, and a cell whose column
+//! fails the structural gate outright (no era icon, no
+//! caption glyphs — the Aya cell of the fifty-eighth pass)
+//! is skipped without OCR. A non-relic cell never fails
+//! the screen: the screen yields `pack_open` when >= 1
+//! cell credits and `pack_miss` only at 0. Anything
+//! unproven is a miss, never a guess (the
+//! never-fabricate rule). The pass-53 atomic rule (all
+//! three captions or no credit at all) is superseded.
 //!
 //! The chime is the human half of the loop (Seth): a proven
 //! screen appends a `pack_open` event whose beacon plays
@@ -209,15 +219,30 @@ fn gaps_dark(frame: &GrayImage) -> bool {
 }
 
 /// Classification gate: the frame positively shows a pack
-/// reveal screen — all three measured card columns carry
-/// an era icon, a caption, and a drop-table column, and
-/// the gaps between the cards are the dark backdrop.
-/// Reward screens fail it (their cards sit on a different
-/// pitch, so the pack columns straddle card art and the
-/// gap windows land on panels); gameplay fails it (scene
-/// in the gaps, scene density in the drop zone).
+/// reveal screen — the gaps between the cards are the
+/// dark backdrop AND at least one card column carries an
+/// era icon, a caption, and a drop-table column. The
+/// per-cell rule (fifty-eighth pass) moved the column
+/// conjunction from the screen to the cell: a mixed
+/// screen (relic cells beside an Aya cell, which has no
+/// era icon and no caption) must still classify, and the
+/// screen-level discriminator that keeps reward and
+/// gameplay frames out is the gaps, not the column
+/// count — reward screens fail it (their cards sit on a
+/// different pitch, so the gap windows land on panels)
+/// and gameplay fails it (scene in the gaps, scene
+/// density in the drop zone). A blank frame fails it
+/// too (no column at all). Which columns gated is
+/// carried per cell by [`PackRead::gated`].
 pub fn is_pack_screen(frame: &GrayImage) -> bool {
-    (0..3).all(|slot| column_present(frame, slot)) && gaps_dark(frame)
+    (0..3).any(|slot| column_present(frame, slot)) && gaps_dark(frame)
+}
+
+/// Per-cell structural gate, for callers that need one
+/// column's verdict (the screen gate above is its
+/// any-column form).
+pub fn cell_gated(frame: &GrayImage, slot: usize) -> bool {
+    column_present(frame, slot)
 }
 
 // ---------------------------------------------------------------------------
@@ -290,37 +315,72 @@ fn resolve_caption(
 pub struct PackRead {
     /// Per-slot proven relic name (`None` = unproven).
     pub resolved: [Option<String>; 3],
-    /// Per-slot representative raw caption read (diagnostics).
+    /// Per-slot representative raw caption read (diagnostics;
+    /// empty for a skipped cell — no OCR ran on it).
     pub raw: [String; 3],
+    /// Per-slot structural gate: `true` when the column
+    /// carries an era icon, a caption, and a drop-table
+    /// column. A `false` cell is skipped, not a miss: it
+    /// never had a relic caption to prove (the Aya case).
+    pub gated: [bool; 3],
 }
 
 impl PackRead {
-    /// All three captions proven: the screen's trio, in
-    /// display order (a multiset — duplicates kept).
-    pub fn trio(&self) -> Option<[String; 3]> {
-        let [a, b, c] = &self.resolved;
-        match (a, b, c) {
-            (Some(a), Some(b), Some(c)) => Some([a.clone(), b.clone(), c.clone()]),
-            _ => None,
-        }
+    /// The proven cells, in display order, as
+    /// (slot, name) pairs (a multiset — duplicates kept).
+    pub fn proven_cells(&self) -> Vec<(usize, String)> {
+        self.resolved
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| r.clone().map(|n| (i, n)))
+            .collect()
+    }
+
+    /// Slots that gated as relic columns but proved
+    /// nothing: per-cell misses (0-based).
+    pub fn miss_slots(&self) -> Vec<usize> {
+        (0..3)
+            .filter(|&i| self.gated[i] && self.resolved[i].is_none())
+            .collect()
+    }
+
+    /// Slots that failed the structural gate: skipped
+    /// non-relic cells (0-based).
+    pub fn skipped_slots(&self) -> Vec<usize> {
+        (0..3)
+            .filter(|&i| !self.gated[i])
+            .collect()
     }
 }
 
 /// Full detection on one grabbed frame: classify, then
-/// resolve the three captions. `None` when the frame is
-/// not a pack screen at all.
+/// gate and resolve each column on its own. A column
+/// that fails the structural gate is skipped (no OCR —
+/// there is no relic caption there to read); a gated
+/// column resolves under the pass-46 discipline or stays
+/// unproven. `None` when the frame is not a pack screen
+/// at all.
 pub fn detect_pack(engine: &dyn OcrEngine, frame: &GrayImage, relics: &Universe) -> Option<PackRead> {
     if !is_pack_screen(frame) {
         return None;
     }
     let mut resolved: [Option<String>; 3] = [None, None, None];
     let mut raw: [String; 3] = [String::new(), String::new(), String::new()];
+    let mut gated: [bool; 3] = [false, false, false];
     for slot in 0..3 {
+        gated[slot] = column_present(frame, slot);
+        if !gated[slot] {
+            continue;
+        }
         let (name, read) = resolve_caption(engine, frame, slot, relics);
         resolved[slot] = name;
         raw[slot] = read;
     }
-    Some(PackRead { resolved, raw })
+    Some(PackRead {
+        resolved,
+        raw,
+        gated,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -404,19 +464,62 @@ impl DisarmReason {
 #[derive(Debug, Clone, PartialEq)]
 pub struct EndedScreen {
     pub resolved: [Option<String>; 3],
+    /// At least one cell credited: the screen yielded
+    /// `pack_open`, so no `pack_miss` is owed for it.
     pub proven: bool,
+    /// Per-cell credit state at end (a credited cell
+    /// credited exactly once for this instance).
+    pub credited: [bool; 3],
+    /// Per-cell gate state at end: a slot is `true` when
+    /// any frame of the instance gated it as a relic
+    /// column. A slot that never gated is a skipped
+    /// non-relic cell, not a miss.
+    pub ever_gated: [bool; 3],
 }
 
 impl EndedScreen {
-    /// The `pack_miss` reason naming the unresolved slots
-    /// (1-based, display order): "unresolved slot 2",
-    /// "unresolved slots 1 and 3", …
+    /// Per-cell miss slots (0-based): gated as relic
+    /// columns but never proven.
+    pub fn miss_slots(&self) -> Vec<usize> {
+        (0..3)
+            .filter(|&i| self.ever_gated[i] && self.resolved[i].is_none())
+            .collect()
+    }
+
+    /// Skipped slots (0-based): never gated as a relic
+    /// column, so never a miss either.
+    pub fn skipped_slots(&self) -> Vec<usize> {
+        (0..3)
+            .filter(|&i| !self.ever_gated[i])
+            .collect()
+    }
+
+    /// The `pack_miss` reason naming the per-cell miss
+    /// slots (1-based, display order): "unresolved
+    /// slot 2", "unresolved slots 1 and 3", … Skipped
+    /// cells are not named: they were never relic
+    /// candidates. Only called for unproven screens.
     pub fn unresolved_reason(&self) -> String {
-        unresolved_reason(&self.resolved)
+        let slots: Vec<String> = self
+            .miss_slots()
+            .iter()
+            .map(|i| (i + 1).to_string())
+            .collect();
+        match slots.len() {
+            0 => "unresolved".to_owned(),
+            1 => format!("unresolved slot {}", slots[0]),
+            2 => format!("unresolved slots {} and {}", slots[0], slots[1]),
+            _ => format!(
+                "unresolved slots {}, {} and {}",
+                slots[0], slots[1], slots[2]
+            ),
+        }
     }
 }
 
-/// The `pack_miss` reason for a resolution state.
+/// The `pack_miss` reason for a resolution state whose
+/// gated slots are all the unproven ones (the legacy
+/// one-argument form; prefer [`EndedScreen`]).
 pub fn unresolved_reason(resolved: &[Option<String>; 3]) -> String {
     let slots: Vec<String> = resolved
         .iter()
@@ -439,41 +542,46 @@ pub fn unresolved_reason(resolved: &[Option<String>; 3]) -> String {
 /// screen-instance.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResolutionStep {
-    /// Stored; the instance is not (newly) creditable —
-    /// either still partial, or already proven and this
-    /// read agrees with it.
+    /// Stored; no cell is newly creditable — either
+    /// nothing new proved, or every proven cell already
+    /// credited for this instance and this read agrees.
     Pending,
-    /// The instance just became fully proven: credit this
-    /// trio (once — the caller then calls
-    /// [`PackWatch::mark_proven`]).
-    ReadyToCredit([String; 3]),
+    /// Cells that just proved and have not credited yet
+    /// for this instance, in display order: credit these
+    /// names (once — the caller then calls
+    /// [`PackWatch::mark_credited`] with their slots).
+    /// A later grab proving another cell of the same
+    /// screen returns only that cell.
+    ReadyToCredit(Vec<(usize, String)>),
     /// The read conflicts with the stored instance (a slot
     /// proven both ways with different names): the stored
     /// instance ended — the returned [`EndedScreen`] — and
     /// the new read starts a fresh instance (whose own
-    /// creditable trio, when the read alone proves one, is
-    /// in `ready`).
+    /// newly proven cells, if any, are in `ready`).
     Replaced {
         ended: EndedScreen,
-        ready: Option<[String; 3]>,
+        ready: Option<Vec<(usize, String)>>,
     },
 }
 
 #[derive(Debug, Clone, Default)]
 struct ScreenInstance {
     resolved: [Option<String>; 3],
-    proven: bool,
+    credited: [bool; 3],
+    ever_gated: [bool; 3],
 }
 
 /// The armed pack watch: arm/disarm timing plus the
-/// current screen-instance's exactly-once state. The
-/// resident task drives it once per grab; the machine
+/// current screen-instance's exactly-once-per-cell state.
+/// The resident task drives it once per grab; the machine
 /// itself is pure (instants in, decisions out) so the
 /// Seth-pinned behaviours are unit-testable without
 /// frames: cadence is the caller's, disarm at 15 s
-/// no-screen and at the 60 s cap, the same screen credits
-/// once, an identical trio after an intervening absence
-/// (or after a conflicting screen) credits again.
+/// no-screen and at the 60 s cap, the same cell credits
+/// once per instance, an identical screen after an
+/// intervening absence (or after a conflicting screen)
+/// credits again, and a screen with >= 1 credited cell
+/// owes no `pack_miss` however many cells missed.
 #[derive(Debug, Default)]
 pub struct PackWatch {
     armed_at: Option<Instant>,
@@ -534,21 +642,30 @@ impl PackWatch {
             None
         } else {
             self.current.take().map(|c| EndedScreen {
+                proven: c.credited.iter().any(|b| *b),
                 resolved: c.resolved,
-                proven: c.proven,
+                credited: c.credited,
+                ever_gated: c.ever_gated,
             })
         }
     }
 
     /// Fold one pack frame's caption verdicts into the
     /// current instance. Slots merge (a proven slot stays
-    /// proven) unless a slot is proven both ways with
-    /// different names — a conflict means the screen
-    /// CHANGED under us (the next pack's reveal replaced
-    /// this one between grabs, with no absent frame in
-    /// between): the old instance ends and the new read
-    /// starts a fresh one.
-    pub fn note_resolution(&mut self, resolved: [Option<String>; 3]) -> ResolutionStep {
+    /// proven; a slot gated on any frame stays gated)
+    /// unless a slot is proven both ways with different
+    /// names — a conflict means the screen CHANGED under
+    /// us (the next pack's reveal replaced this one
+    /// between grabs, with no absent frame in between):
+    /// the old instance ends and the new read starts a
+    /// fresh one. A cell credits the first grab it proves
+    /// on, independently of the other cells; a skipped
+    /// (never-gated) cell never blocks or fails anything.
+    pub fn note_resolution(
+        &mut self,
+        resolved: [Option<String>; 3],
+        gated: [bool; 3],
+    ) -> ResolutionStep {
         if self.current.is_none() {
             self.current = Some(ScreenInstance::default());
         }
@@ -559,51 +676,65 @@ impl PackWatch {
         });
         if conflict {
             let ended = EndedScreen {
+                proven: cur.credited.iter().any(|b| *b),
                 resolved: cur.resolved.clone(),
-                proven: cur.proven,
+                credited: cur.credited,
+                ever_gated: cur.ever_gated,
             };
-            let ready = match (&resolved[0], &resolved[1], &resolved[2]) {
-                (Some(a), Some(b), Some(c)) => {
-                    Some([a.clone(), b.clone(), c.clone()])
-                }
-                _ => None,
-            };
+            let ready: Vec<(usize, String)> = resolved
+                .iter()
+                .enumerate()
+                .filter_map(|(i, r)| r.clone().map(|n| (i, n)))
+                .collect();
+            let ready = if ready.is_empty() { None } else { Some(ready) };
             self.current = Some(ScreenInstance {
                 resolved,
-                proven: false,
+                credited: [false, false, false],
+                ever_gated: gated,
             });
             return ResolutionStep::Replaced { ended, ready };
         }
         for i in 0..3 {
+            if gated[i] {
+                cur.ever_gated[i] = true;
+            }
             if resolved[i].is_some() {
                 cur.resolved[i] = resolved[i].clone();
             }
         }
-        if cur.proven {
-            return ResolutionStep::Pending;
-        }
-        match (&cur.resolved[0], &cur.resolved[1], &cur.resolved[2]) {
-            (Some(a), Some(b), Some(c)) => {
-                ResolutionStep::ReadyToCredit([a.clone(), b.clone(), c.clone()])
-            }
-            _ => ResolutionStep::Pending,
+        let newly: Vec<(usize, String)> = (0..3)
+            .filter(|&i| !cur.credited[i])
+            .filter_map(|i| cur.resolved[i].clone().map(|n| (i, n)))
+            .collect();
+        if newly.is_empty() {
+            ResolutionStep::Pending
+        } else {
+            ResolutionStep::ReadyToCredit(newly)
         }
     }
 
-    /// The current instance's trio was credited (call on
-    /// [`ResolutionStep::ReadyToCredit`]): later reads of
-    /// the same screen agree-and-do-nothing.
-    pub fn mark_proven(&mut self) {
+    /// The given cells of the current instance were
+    /// credited (call on [`ResolutionStep::ReadyToCredit`]
+    /// after the credit attempt, success or failure — as
+    /// before, a failed credit still counts as handled so
+    /// a repeat frame cannot double-credit): later reads
+    /// of the same screen agree-and-do-nothing for them,
+    /// while a still-unproven cell may yet credit.
+    pub fn mark_credited(&mut self, slots: &[usize]) {
         if let Some(cur) = self.current.as_mut() {
-            cur.proven = true;
+            for &i in slots {
+                cur.credited[i] = true;
+            }
         }
     }
 
     /// End the current instance at disarm time.
     pub fn finish_instance(&mut self) -> Option<EndedScreen> {
         self.current.take().map(|c| EndedScreen {
+            proven: c.credited.iter().any(|b| *b),
             resolved: c.resolved,
-            proven: c.proven,
+            credited: c.credited,
+            ever_gated: c.ever_gated,
         })
     }
 }
@@ -662,16 +793,81 @@ mod tests {
             );
             let read = detect_pack(&engine, &frame, &universe)
                 .unwrap_or_else(|| panic!("pack-{} must detect", i + 1));
-            let trio = read.trio().unwrap_or_else(|| {
-                panic!(
-                    "pack-{} must prove all three captions; resolved {:?} from reads {:?}",
-                    i + 1,
-                    read.resolved,
-                    read.raw
-                )
-            });
-            assert_eq!(&trio, truth, "pack-{} trio", i + 1);
+            assert!(
+                read.gated.iter().all(|g| *g),
+                "pack-{}: all three columns gate",
+                i + 1
+            );
+            let proven: Vec<String> = read
+                .proven_cells()
+                .into_iter()
+                .map(|(_, n)| n)
+                .collect();
+            assert_eq!(&proven, truth, "pack-{} cells", i + 1);
         }
+    }
+
+    #[test]
+    fn aya_fixture_credits_both_relics_and_skips_the_middle_cell() {
+        let Some(engine) = real_engine() else {
+            eprintln!("skip Aya fixture: no tesseract in this environment");
+            return;
+        };
+        let universe = relic_universe();
+        let frame = fixture("fixtures/pack-open/pack-aya.png")
+            .expect("fixture pack-aya missing");
+        assert!(
+            is_pack_screen(&frame),
+            "the mixed screen must classify (its two relic columns gate)"
+        );
+        let read = detect_pack(&engine, &frame, &universe).expect("must detect");
+        assert_eq!(
+            read.resolved,
+            [
+                Some("Axi A21".to_owned()),
+                None,
+                Some("Meso V13".to_owned())
+            ],
+            "Aya fixture resolutions: {read:?}"
+        );
+        assert_eq!(read.gated, [true, false, true], "Aya fixture gates");
+        assert_eq!(read.skipped_slots(), vec![1], "middle cell is skipped");
+        assert_eq!(read.miss_slots(), Vec::<usize>::new(), "no per-cell miss");
+        assert_eq!(read.raw[1], "", "no OCR ran on the skipped cell");
+        // Through the state machine: both relic cells
+        // credit on the first grab, the repeated frame
+        // credits nothing again, and the ended screen
+        // owes no pack_miss (it proved) and names no
+        // miss for the skipped cell.
+        let mut watch = PackWatch::new();
+        let t0 = Instant::now();
+        watch.arm(t0);
+        assert_eq!(watch.note_frame(t0, true), None);
+        match watch.note_resolution(read.resolved.clone(), read.gated) {
+            ResolutionStep::ReadyToCredit(cells) => {
+                assert_eq!(
+                    cells,
+                    vec![
+                        (0, "Axi A21".to_owned()),
+                        (2, "Meso V13".to_owned())
+                    ]
+                );
+                let slots: Vec<usize> = cells.iter().map(|(i, _)| *i).collect();
+                watch.mark_credited(&slots);
+            }
+            other => panic!("expected ReadyToCredit, got {other:?}"),
+        }
+        assert_eq!(
+            watch.note_resolution(read.resolved.clone(), read.gated),
+            ResolutionStep::Pending
+        );
+        let ended = watch
+            .note_frame(t0 + Duration::from_secs(2), false)
+            .expect("the instance ends on absence");
+        assert!(ended.proven);
+        assert_eq!(ended.credited, [true, false, true]);
+        assert_eq!(ended.miss_slots(), Vec::<usize>::new());
+        assert_eq!(ended.skipped_slots(), vec![1]);
     }
 
     #[test]
@@ -731,7 +927,7 @@ mod tests {
     }
 
     #[test]
-    fn one_unprovable_caption_yields_no_credit_and_names_its_slot() {
+    fn one_unprovable_caption_credits_the_other_two_and_names_its_slot() {
         let Some(engine) = real_engine() else {
             eprintln!("skip corrupted-caption gate: no tesseract");
             return;
@@ -759,26 +955,59 @@ mod tests {
             "the corrupted frame still classifies (density preserved)"
         );
         let read = detect_pack(&engine, &frame, &universe).expect("still a pack screen");
-        assert_eq!(read.trio(), None, "no trio may be proven: {read:?}");
         assert!(read.resolved[0].is_some(), "slot 1 still proves");
         assert_eq!(read.resolved[1], None, "slot 2 is the unprovable one");
         assert!(read.resolved[2].is_some(), "slot 3 still proves");
-        // Through the state machine: the screen ends
-        // unproven, exactly once, naming slot 2 — and
-        // nothing was credited (no ReadyToCredit ever).
+        assert_eq!(read.gated, [true, true, true], "corruption keeps the gate");
+        assert_eq!(read.miss_slots(), vec![1], "slot 2 is the per-cell miss");
+        // Through the state machine: slots 1 and 3 credit
+        // at once, slot 2 never does, and the ended
+        // screen owes no pack_miss (it proved) while
+        // still naming slot 2 as its per-cell miss.
+        let mut watch = PackWatch::new();
+        let t0 = Instant::now();
+        watch.arm(t0);
+        assert_eq!(watch.note_frame(t0, true), None);
+        match watch.note_resolution(read.resolved.clone(), read.gated) {
+            ResolutionStep::ReadyToCredit(cells) => {
+                assert_eq!(cells.len(), 2);
+                assert_eq!(cells[0].0, 0);
+                assert_eq!(cells[1].0, 2);
+                let slots: Vec<usize> = cells.iter().map(|(i, _)| *i).collect();
+                watch.mark_credited(&slots);
+            }
+            other => panic!("expected ReadyToCredit, got {other:?}"),
+        }
+        let ended = watch
+            .note_frame(t0 + Duration::from_secs(2), false)
+            .expect("the instance ends on absence");
+        assert!(ended.proven);
+        assert_eq!(ended.credited, [true, false, true]);
+        assert_eq!(ended.miss_slots(), vec![1]);
+        assert_eq!(ended.unresolved_reason(), "unresolved slot 2");
+    }
+
+    #[test]
+    fn zero_creditable_cells_yield_a_pack_miss_with_no_chime_owed() {
+        // Watch level (no frame needed): every gated
+        // cell unproven, so the ended screen is unproven
+        // and names all three slots — the resident side
+        // emits pack_miss and no pack_open for it.
         let mut watch = PackWatch::new();
         let t0 = Instant::now();
         watch.arm(t0);
         assert_eq!(watch.note_frame(t0, true), None);
         assert_eq!(
-            watch.note_resolution(read.resolved.clone()),
+            watch.note_resolution([None, None, None], [true, true, true]),
             ResolutionStep::Pending
         );
         let ended = watch
             .note_frame(t0 + Duration::from_secs(2), false)
             .expect("the instance ends on absence");
         assert!(!ended.proven);
-        assert_eq!(ended.unresolved_reason(), "unresolved slot 2");
+        assert_eq!(ended.credited, [false, false, false]);
+        assert_eq!(ended.miss_slots(), vec![0, 1, 2]);
+        assert_eq!(ended.unresolved_reason(), "unresolved slots 1, 2 and 3");
     }
 
     // -- State machine pins --------------------------------
@@ -795,21 +1024,24 @@ mod tests {
         watch.arm(t0);
         assert_eq!(watch.note_frame(t0, true), None);
         assert_eq!(
-            watch.note_resolution(trio.clone()),
-            ResolutionStep::ReadyToCredit([
-                "Axi P10".to_owned(),
-                "Meso K9".to_owned(),
-                "Lith S19".to_owned()
+            watch.note_resolution(trio.clone(), [true, true, true]),
+            ResolutionStep::ReadyToCredit(vec![
+                (0, "Axi P10".to_owned()),
+                (1, "Meso K9".to_owned()),
+                (2, "Lith S19".to_owned())
             ])
         );
-        watch.mark_proven();
+        watch.mark_credited(&[0, 1, 2]);
         // Repeated grabs of the SAME screen: never again.
         for s in 1..=3 {
             assert_eq!(
                 watch.note_frame(t0 + Duration::from_secs(s), true),
                 None
             );
-            assert_eq!(watch.note_resolution(trio.clone()), ResolutionStep::Pending);
+            assert_eq!(
+                watch.note_resolution(trio.clone(), [true, true, true]),
+                ResolutionStep::Pending
+            );
         }
         // The screen goes away (proven — no miss owed).
         let ended = watch
@@ -820,9 +1052,75 @@ mod tests {
         // instance, credited again.
         assert_eq!(watch.note_frame(t0 + Duration::from_secs(6), true), None);
         assert!(matches!(
-            watch.note_resolution(trio.clone()),
+            watch.note_resolution(trio.clone(), [true, true, true]),
             ResolutionStep::ReadyToCredit(_)
         ));
+    }
+
+    #[test]
+    fn cells_credit_independently_across_grabs_and_instances() {
+        // Grab 1 proves slot 1 only; grab 2 proves slot 2
+        // as well — only the newly proven cell credits,
+        // and the per-cell rule holds across an
+        // intervening non-pack frame (a fresh instance).
+        let mut watch = PackWatch::new();
+        let t0 = Instant::now();
+        watch.arm(t0);
+        assert_eq!(watch.note_frame(t0, true), None);
+        assert_eq!(
+            watch.note_resolution(
+                [Some("Axi P10".to_owned()), None, None],
+                [true, true, true]
+            ),
+            ResolutionStep::ReadyToCredit(vec![(0, "Axi P10".to_owned())])
+        );
+        watch.mark_credited(&[0]);
+        assert_eq!(
+            watch.note_resolution(
+                [
+                    Some("Axi P10".to_owned()),
+                    Some("Meso K9".to_owned()),
+                    None
+                ],
+                [true, true, true]
+            ),
+            ResolutionStep::ReadyToCredit(vec![(1, "Meso K9".to_owned())])
+        );
+        watch.mark_credited(&[1]);
+        assert_eq!(
+            watch.note_resolution(
+                [
+                    Some("Axi P10".to_owned()),
+                    Some("Meso K9".to_owned()),
+                    None
+                ],
+                [true, true, true]
+            ),
+            ResolutionStep::Pending
+        );
+        let ended = watch
+            .note_frame(t0 + Duration::from_secs(3), false)
+            .unwrap();
+        assert!(ended.proven);
+        assert_eq!(ended.credited, [true, true, false]);
+        assert_eq!(ended.miss_slots(), vec![2]);
+        // After the absence, the same two cells credit
+        // again as a new instance.
+        assert_eq!(watch.note_frame(t0 + Duration::from_secs(4), true), None);
+        assert_eq!(
+            watch.note_resolution(
+                [
+                    Some("Axi P10".to_owned()),
+                    Some("Meso K9".to_owned()),
+                    None
+                ],
+                [true, true, true]
+            ),
+            ResolutionStep::ReadyToCredit(vec![
+                (0, "Axi P10".to_owned()),
+                (1, "Meso K9".to_owned())
+            ])
+        );
     }
 
     #[test]
@@ -853,26 +1151,37 @@ mod tests {
         let t0 = Instant::now();
         watch.arm(t0);
         assert_eq!(watch.note_frame(t0, true), None);
+        // Slots 1 and 3 credit at once (per-cell rule);
+        // slot 2 stays a per-cell miss candidate.
         assert_eq!(
-            watch.note_resolution([
-                Some("Axi P10".to_owned()),
-                None,
-                Some("Lith S19".to_owned())
-            ]),
-            ResolutionStep::Pending
+            watch.note_resolution(
+                [
+                    Some("Axi P10".to_owned()),
+                    None,
+                    Some("Lith S19".to_owned())
+                ],
+                [true, true, true]
+            ),
+            ResolutionStep::ReadyToCredit(vec![
+                (0, "Axi P10".to_owned()),
+                (2, "Lith S19".to_owned())
+            ])
         );
+        watch.mark_credited(&[0, 2]);
         // The next pack's reveal lands with no absent frame
         // in between: slot 1 proves a different name.
-        match watch.note_resolution(full(["Neo C11", "Lith V11", "Lith G14"])) {
+        match watch.note_resolution(full(["Neo C11", "Lith V11", "Lith G14"]), [true, true, true]) {
             ResolutionStep::Replaced { ended, ready } => {
-                assert!(!ended.proven);
+                assert!(ended.proven, "two cells credited before the change");
+                assert_eq!(ended.credited, [true, false, true]);
+                assert_eq!(ended.miss_slots(), vec![1]);
                 assert_eq!(ended.unresolved_reason(), "unresolved slot 2");
                 assert_eq!(
                     ready,
-                    Some([
-                        "Neo C11".to_owned(),
-                        "Lith V11".to_owned(),
-                        "Lith G14".to_owned()
+                    Some(vec![
+                        (0, "Neo C11".to_owned()),
+                        (1, "Lith V11".to_owned()),
+                        (2, "Lith G14".to_owned())
                     ])
                 );
             }
