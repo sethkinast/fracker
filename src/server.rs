@@ -251,6 +251,112 @@ impl DeLockClear {
     }
 }
 
+/// The toast Cancel wiring (fifty-ninth pass): everything
+/// `POST /cancel-credit` needs to undo one detection credit.
+/// The resident supplies it; a server without it (tests,
+/// headless tools) answers the route 404. The toast's beacon
+/// id (`ts|part`) names the SPECIFIC credit — never "the
+/// latest credit" — so a stale toast (an already-cancelled
+/// or superseded credit) is a safe no-op that changes
+/// nothing and never decrements the wrong part.
+pub struct CreditCancel {
+    /// The stock file to decrement — the same `stock.json`
+    /// capture finalize rewrites and the report reads.
+    pub stock_path: PathBuf,
+    /// The event log's directory (`events.jsonl` lives
+    /// beside `stock.json`): the credit is found here, and
+    /// the cancellation is appended here.
+    pub events_dir: PathBuf,
+    /// Invoked after a cancellation has been persisted, so
+    /// the resident regenerates the plan and the generation
+    /// push carries the decremented stock to open pages
+    /// (the same Manual trigger as the unverified toggle;
+    /// a cancel never auto-opens the page).
+    pub regen: Arc<dyn Fn() + Send + Sync>,
+    /// Serialises read-modify-write cycles across connection
+    /// threads (the TickStore's shared-Mutex pattern).
+    gate: Mutex<()>,
+}
+
+impl CreditCancel {
+    pub fn new(
+        stock_path: PathBuf,
+        events_dir: PathBuf,
+        regen: Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
+        Self {
+            stock_path,
+            events_dir,
+            regen,
+            gate: Mutex::new(()),
+        }
+    }
+
+    /// Cancel the credit named by beacon `id` (`ts|part`).
+    /// Returns `true` when a credit was actually undone,
+    /// `false` for a safe no-op: no matching credit record,
+    /// or this credit already cancelled (a second Cancel for
+    /// the same id never decrements twice). A cancelled
+    /// credit decrements the part's verified stock by 1,
+    /// saturating at 0 (an absent entry stays absent — 0 is
+    /// 0), appends a `credit_cancel` event naming the
+    /// credit, and fires the regen hook. An unparseable
+    /// stock file is `Unavailable` — like capture finalize,
+    /// a stock file we cannot read is never clobbered — and
+    /// nothing is logged or regenerated in that case.
+    /// Note: two credits for the same part in the same
+    /// second share a beacon id, so only the first of them
+    /// is cancellable by id; the toast's seen-ids already
+    /// dedupe such a pair to a single toast.
+    pub fn cancel(&self, id: &str) -> Result<bool, ToggleError> {
+        let _gate = self.gate.lock().unwrap_or_else(|p| p.into_inner());
+        let (ts, part) = match id.split_once('|') {
+            Some((ts, part)) if !ts.is_empty() && !part.is_empty() => (ts, part),
+            _ => return Ok(false),
+        };
+        let events = crate::events::load(&self.events_dir);
+        let found = events.iter().any(|e| {
+            e.kind == crate::events::EventKind::Credit
+                && e.ts == ts
+                && e.part.as_deref() == Some(part)
+        });
+        if !found {
+            return Ok(false);
+        }
+        let already = events.iter().any(|e| {
+            e.kind == crate::events::EventKind::CreditCancel
+                && e.credit_id.as_deref() == Some(id)
+        });
+        if already {
+            return Ok(false);
+        }
+        let mut stock = match std::fs::read_to_string(&self.stock_path) {
+            Ok(text) => crate::ocr::StockState::from_json(&text)
+                .map_err(|_| ToggleError::Unavailable)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                crate::ocr::StockState::default()
+            }
+            Err(_) => return Err(ToggleError::Unavailable),
+        };
+        if let Some(count) = stock.parts.get_mut(part) {
+            *count = count.saturating_sub(1);
+        }
+        stock
+            .write_to(&self.stock_path)
+            .map_err(|_| ToggleError::Unavailable)?;
+        crate::events::append(
+            &self.events_dir,
+            &crate::events::EventRecord::credit_cancel(
+                crate::events::now_ts(),
+                part.to_owned(),
+                id.to_owned(),
+            ),
+        );
+        (self.regen)();
+        Ok(true)
+    }
+}
+
 /// Why a toggle did not happen (thirtieth pass).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToggleError {
@@ -279,7 +385,8 @@ fn roster_part_names(roster: &crate::model::Roster) -> std::collections::HashSet
 /// where the active plan tab is persisted (thirteenth pass §2).
 /// `toggle` wires `POST /unverified` (thirtieth pass); `None` leaves
 /// the route answering 404. `de_lock` wires `POST /clear-de-lock`
-/// (fifty-fifth pass) the same way.
+/// (fifty-fifth pass) the same way. `cancel_credit` wires
+/// `POST /cancel-credit` (fifty-ninth pass) the same way.
 pub fn serve(
     preferred_port: u16,
     report_path: PathBuf,
@@ -288,6 +395,7 @@ pub fn serve(
     ticks: Arc<Mutex<TickStore>>,
     toggle: Option<Arc<UnverifiedToggle>>,
     de_lock: Option<Arc<DeLockClear>>,
+    cancel_credit: Option<Arc<CreditCancel>>,
 ) -> Result<PlanServer, String> {
     let listener = bind(preferred_port)?;
     let port = listener
@@ -316,6 +424,7 @@ pub fn serve(
             stop_thread,
             toggle,
             de_lock,
+            cancel_credit,
         )
     });
     Ok(PlanServer {
@@ -350,6 +459,7 @@ fn accept_loop(
     stop: Arc<AtomicBool>,
     toggle: Option<Arc<UnverifiedToggle>>,
     de_lock: Option<Arc<DeLockClear>>,
+    cancel_credit: Option<Arc<CreditCancel>>,
 ) {
     let _ = listener.set_nonblocking(true);
     while !stop.load(Ordering::Relaxed) {
@@ -365,6 +475,7 @@ fn accept_loop(
                 let stopped = stop.clone();
                 let toggle_thread = toggle.clone();
                 let de_lock_thread = de_lock.clone();
+                let cancel_thread = cancel_credit.clone();
                 std::thread::spawn(move || {
                     let _ = handle(
                         stream,
@@ -378,6 +489,7 @@ fn accept_loop(
                         &stopped,
                         toggle_thread.as_ref(),
                         de_lock_thread.as_ref(),
+                        cancel_thread.as_ref(),
                     );
                 });
             }
@@ -403,6 +515,7 @@ fn handle(
     stop: &Arc<AtomicBool>,
     toggle: Option<&Arc<UnverifiedToggle>>,
     de_lock: Option<&Arc<DeLockClear>>,
+    cancel_credit: Option<&Arc<CreditCancel>>,
 ) -> std::io::Result<()> {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
@@ -508,6 +621,10 @@ fn handle(
                     "{\"ok\":false,\"error\":\"no lock route\"}".to_owned(),
                 ),
             };
+            respond(&mut stream, status, "application/json", resp_body.as_bytes())
+        }
+        ("POST", "/cancel-credit") => {
+            let (status, resp_body) = apply_cancel_credit(cancel_credit, &body);
             respond(&mut stream, status, "application/json", resp_body.as_bytes())
         }
         ("GET", "/ws") => match ws_key.as_deref() {
@@ -879,6 +996,57 @@ fn apply_unverified(
             "{\"ok\":false}".to_owned(),
         ),
     }
+}
+
+/// Apply one toast credit cancellation (fifty-ninth pass).
+/// Accepts JSON (`{"id": "ts|part"}`) or form encoding,
+/// mirroring `/unverified`. A no-op id (unknown or already
+/// cancelled) is a 200 with `"cancelled":false` — never an
+/// error, never a state change, never a regen — so a stale
+/// toast's Cancel is harmless. A real cancellation is a 200
+/// with `"cancelled":true` after the stock write, the
+/// `credit_cancel` log append, and the regen hook.
+fn apply_cancel_credit(
+    cancel: Option<&Arc<CreditCancel>>,
+    body: &str,
+) -> (&'static str, String) {
+    let Some(cancel) = cancel else {
+        return ("404 Not Found", "{\"ok\":false}".to_owned());
+    };
+    let Some(id) = parse_cancel_credit_id(body) else {
+        return ("400 Bad Request", "{\"ok\":false}".to_owned());
+    };
+    match cancel.cancel(&id) {
+        Ok(cancelled) => (
+            "200 OK",
+            format!("{{\"ok\":true,\"cancelled\":{cancelled}}}"),
+        ),
+        Err(ToggleError::UnknownPart) => (
+            "404 Not Found",
+            "{\"ok\":false,\"error\":\"unknown part\"}".to_owned(),
+        ),
+        Err(ToggleError::Unavailable) => (
+            "500 Internal Server Error",
+            "{\"ok\":false}".to_owned(),
+        ),
+    }
+}
+
+/// Parse `{"id": "..."}` (JSON) or `id=...` (form).
+fn parse_cancel_credit_id(body: &str) -> Option<String> {
+    let trimmed = body.trim();
+    if trimmed.starts_with('{') {
+        let v: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+        return v.get("id")?.as_str().map(str::to_owned);
+    }
+    for pair in trimmed.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            if k == "id" {
+                return Some(url_decode(v));
+            }
+        }
+    }
+    None
 }
 
 /// Parse `{"name": "..."}` (JSON) or `name=...` (form).
@@ -1325,6 +1493,7 @@ mod tests {
             Arc::new(Mutex::new(TickStore::default())),
             Some(toggle),
             None,
+            None,
         )
         .expect("server binds");
         let post = |body: &str| -> String {
@@ -1376,6 +1545,136 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn cancel_credit_endpoint_undoes_one_credit_by_beacon_id() {
+        // Fifty-ninth pass: POST /cancel-credit decrements
+        // exactly the credited part, saturates at 0, logs a
+        // credit_cancel, fires regen once — and a stale or
+        // unknown id is a safe no-op that never touches the
+        // wrong part.
+        let dir = std::env::temp_dir().join(format!(
+            "fracker-cancel-credit-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let report = dir.join("plan.html");
+        std::fs::write(&report, "<!DOCTYPE html><html><body></body></html>").unwrap();
+        let stock_path = dir.join("stock.json");
+        std::fs::write(
+            &stock_path,
+            r#"{"parts":{"Fang Prime Handle":2,"Burston Prime Barrel":0}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            crate::events::file(&dir),
+            "{\
+             \"ts\":\"2026-11-04T05:00:00Z\",\"kind\":\"credit\",\
+             \"part\":\"Fang Prime Handle\",\"gear\":\"Fang Prime\"}\n\
+             {\
+             \"ts\":\"2026-11-04T05:02:00Z\",\"kind\":\"credit\",\
+             \"part\":\"Burston Prime Barrel\",\"gear\":\"Burston Prime\"}\n",
+        )
+        .unwrap();
+        let regens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let regens_hook = regens.clone();
+        let cancel = Arc::new(CreditCancel::new(
+            stock_path.clone(),
+            dir.clone(),
+            Arc::new(move || {
+                regens_hook.fetch_add(1, Ordering::Relaxed);
+            }),
+        ));
+        let server = serve(
+            0,
+            report.clone(),
+            TickStore::file(&dir),
+            TabStore::file(&dir),
+            Arc::new(Mutex::new(TickStore::default())),
+            None,
+            None,
+            Some(cancel),
+        )
+        .expect("server binds");
+        let post = |body: &str| -> String {
+            let mut s = TcpStream::connect(("127.0.0.1", server.port())).unwrap();
+            write!(
+                s,
+                "POST /cancel-credit HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+            let mut out = String::new();
+            s.read_to_string(&mut out).unwrap();
+            out
+        };
+        let on_disk = |path: &std::path::Path| {
+            crate::ocr::StockState::from_json(&std::fs::read_to_string(path).unwrap())
+                .unwrap()
+        };
+        let events_text = || std::fs::read_to_string(crate::events::file(&dir)).unwrap();
+
+        // Cancel the Fang credit: 200, stock 2 -> 1, the
+        // cancellation logged against the beacon id, regen once.
+        let resp = post(r#"{"id":"2026-11-04T05:00:00Z|Fang Prime Handle"}"#);
+        assert!(resp.contains("200 OK"), "{resp}");
+        assert!(resp.contains("\"cancelled\":true"), "{resp}");
+        assert_eq!(
+            on_disk(&stock_path).parts.get("Fang Prime Handle"),
+            Some(&1)
+        );
+        assert_eq!(regens.load(Ordering::Relaxed), 1);
+        assert!(
+            events_text().contains("\"kind\":\"credit_cancel\"")
+                && events_text()
+                    .contains("\"credit_id\":\"2026-11-04T05:00:00Z|Fang Prime Handle\""),
+            "cancellation logged: {}",
+            events_text()
+        );
+
+        // Same id again: already cancelled — a no-op, never a
+        // second decrement, no second log line, no regen.
+        let resp = post(r#"{"id":"2026-11-04T05:00:00Z|Fang Prime Handle"}"#);
+        assert!(resp.contains("\"cancelled\":false"), "{resp}");
+        assert_eq!(
+            on_disk(&stock_path).parts.get("Fang Prime Handle"),
+            Some(&1)
+        );
+        assert_eq!(regens.load(Ordering::Relaxed), 1);
+        assert_eq!(events_text().matches("credit_cancel").count(), 1);
+
+        // A mismatched id (Fang's timestamp, Burston's part)
+        // matches no credit: no-op, and Fang is untouched.
+        let resp = post(r#"{"id":"2026-11-04T05:00:00Z|Burston Prime Barrel"}"#);
+        assert!(resp.contains("\"cancelled\":false"), "{resp}");
+        assert_eq!(
+            on_disk(&stock_path).parts.get("Fang Prime Handle"),
+            Some(&1)
+        );
+        assert_eq!(regens.load(Ordering::Relaxed), 1);
+
+        // An unknown id is a safe no-op too.
+        let resp = post(r#"{"id":"2026-11-04T09:00:00Z|Fang Prime Handle"}"#);
+        assert!(resp.contains("\"cancelled\":false"), "{resp}");
+        assert_eq!(regens.load(Ordering::Relaxed), 1);
+
+        // Saturation: Burston sits at 0 — cancelling its
+        // credit still logs, but the count never goes negative.
+        let resp = post(r#"{"id":"2026-11-04T05:02:00Z|Burston Prime Barrel"}"#);
+        assert!(resp.contains("\"cancelled\":true"), "{resp}");
+        assert_eq!(
+            on_disk(&stock_path).parts.get("Burston Prime Barrel"),
+            Some(&0)
+        );
+        assert_eq!(regens.load(Ordering::Relaxed), 2);
+
+        // Unparseable body: a visible 400, like /tick.
+        let resp = post("not a cancel");
+        assert!(resp.contains("400"), "{resp}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Gate (forty-seventh pass): the overlay index route serves
     /// the sidecar the report pipeline published beside the
     /// report, and a missing sidecar is an empty 200 (the overlay
@@ -1395,6 +1694,7 @@ mod tests {
             TickStore::file(&dir),
             TabStore::file(&dir),
             ticks,
+            None,
             None,
             None,
         )
@@ -1441,6 +1741,7 @@ mod tests {
             ticks_path.clone(),
             TabStore::file(&dir),
             ticks.clone(),
+            None,
             None,
             None,
         )
@@ -1501,6 +1802,7 @@ mod tests {
             Arc::new(Mutex::new(TickStore::default())),
             None,
             None,
+            None,
         )
         .expect("server binds");
         // Byte-level fetch (the body is binary; http_get's
@@ -1542,6 +1844,7 @@ mod tests {
             TickStore::file(&dir),
             TabStore::file(&dir),
             Arc::new(Mutex::new(TickStore::default())),
+            None,
             None,
             None,
         )
@@ -1626,6 +1929,7 @@ mod tests {
             Arc::new(Mutex::new(TickStore::default())),
             None,
             None,
+            None,
         )
         .expect("server binds");
 
@@ -1657,6 +1961,7 @@ mod tests {
             TickStore::file(&dir),
             tabs_path,
             Arc::new(Mutex::new(TickStore::default())),
+            None,
             None,
             None,
         )
@@ -1695,6 +2000,7 @@ mod tests {
             TickStore::file(&dir),
             tabs_path.clone(),
             Arc::new(Mutex::new(TickStore::default())),
+            None,
             None,
             None,
         )
@@ -1857,6 +2163,7 @@ mod tests {
             Arc::new(Mutex::new(TickStore::default())),
             None,
             None,
+            None,
         )
         .expect("server binds");
         let current = http_get(server.port(), "/fragments?gen=gen-1");
@@ -1980,6 +2287,7 @@ mod tests {
             Arc::new(Mutex::new(TickStore::default())),
             None,
             None,
+            None,
         )
         .expect("server binds");
 
@@ -2059,6 +2367,7 @@ mod tests {
             Arc::new(Mutex::new(TickStore::default())),
             None,
             None,
+            None,
         )
         .expect("server binds");
 
@@ -2099,6 +2408,7 @@ mod tests {
             Arc::new(Mutex::new(TickStore::default())),
             None,
             None,
+            None,
         )
         .expect("server binds");
         let response = http_get(server.port(), "/ws");
@@ -2134,6 +2444,7 @@ mod tests {
             Arc::new(Mutex::new(TickStore::default())),
             None,
             Some(clear),
+            None,
         )
         .expect("server binds");
         let resp = http_post(server.port(), "/clear-de-lock");

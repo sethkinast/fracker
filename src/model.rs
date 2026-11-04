@@ -2389,6 +2389,88 @@ mod tests {
         }
     }
 
+    /// Fifty-ninth pass, the toast-icon parent refresh:
+    /// `data/icons.json` covers every roster parent that
+    /// carries parts, so a detection credit's toast shows a
+    /// real parent icon instead of a monogram. The refresh
+    /// source is the WFCD items dataset (parent name ->
+    /// `imageName`, verified identical to the previous 67
+    /// entries); the one manual alias is Kavasa Prime, which
+    /// WFCD carries only as the "Kavasa Prime Kubrow Collar"
+    /// skin that owns its components. The only roster
+    /// parents without entries are the four part-less ones
+    /// WFCD does not carry either — they have no parts, so
+    /// no toast can ever key on them, and the monogram
+    /// fallback stays for them. A future roster addition
+    /// without an icon fails this test: refresh the file.
+    #[test]
+    fn parent_icons_cover_every_part_bearing_roster_parent() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let read = |rel: &str| {
+            std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
+        };
+        let icons = load_icons(&read("data/icons.json")).unwrap();
+        let roster: serde_json::Value =
+            serde_json::from_str(&read("data/cache/wishlist.json")).unwrap();
+        let items = roster.as_array().expect("the roster seed is an array");
+        let mut missing: Vec<String> = Vec::new();
+        let mut part_bearing = 0usize;
+        for item in items {
+            let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let parts = item
+                .get("parts")
+                .and_then(|p| p.as_array())
+                .map(|p| p.len())
+                .unwrap_or(0);
+            if parts == 0 {
+                continue;
+            }
+            part_bearing += 1;
+            if !icons.contains_key(name) {
+                missing.push(name.to_owned());
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "part-bearing roster parents without a parent icon: {missing:?}"
+        );
+        assert!(
+            part_bearing > 150,
+            "the roster seed must actually list part-bearing parents ({part_bearing})"
+        );
+        // The motivating case: Burston Prime Barrel credited
+        // live showed the monogram "B" because Burston Prime
+        // was one of the 110 missing parents. It now resolves
+        // to a real icon, not a monogram.
+        assert_eq!(
+            icon_url("Burston Prime", &icons).as_deref(),
+            Some("https://cdn.warframestat.us/img/BurstonPrime.png"),
+            "the Burston Prime Barrel case resolves to a real icon"
+        );
+        // The only unresolvable roster parents, pinned: four
+        // part-less entries WFCD does not carry, which no
+        // toast can key on (no parts, no credits).
+        let unresolvable = ["1200X Kuva", "2X Forma Blueprint", "Exilus Weapon Adapter Blueprint", "Forma Blueprint"];
+        for name in items {
+            let n = name.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            if !icons.contains_key(n) {
+                assert!(
+                    unresolvable.contains(&n),
+                    "{n} has no parent icon but is not a pinned unresolvable entry"
+                );
+            }
+        }
+        // Every value is a bare image filename — never a
+        // guessed URL, never a path.
+        for (parent, img) in &icons {
+            assert!(
+                !img.contains(' ') && !img.contains('/')
+                    && (img.ends_with(".png") || img.ends_with(".jpg")),
+                "{parent} -> {img:?} is not a bare image filename"
+            );
+        }
+    }
+
     #[test]
     fn universe_scrub_excludes_and_canonicalizes() {
         // Sixth pass §1: the data-owned scrub drops excluded entries

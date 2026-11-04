@@ -524,6 +524,7 @@ const SEARCH_OVERLAY_SHELL: &str = r#"<div id="search-overlay" hidden>
 const TOAST_SHELL: &str = r#"<div id="toast" hidden>
 <div class="ticon" id="toast-icon"></div>
 <div class="tbody"><div class="tk">Relic Cracked</div><div class="tp" id="toast-part"></div></div>
+<button class="tbtn" id="toast-cancel" type="button">Cancel</button>
 </div>
 <audio id="credit-chime" src="/chime.mp3" preload="auto"></audio>
 "#;
@@ -555,9 +556,41 @@ const TOAST_JS: &str = r#"
     try { localStorage.setItem(SEEN_KEY, JSON.stringify(s)); } catch (e) {}
   };
   var hideTimer = null;
+  var currentId = null;
+  var hideToast = function () {
+    var t = document.getElementById("toast");
+    if (!t) { return; }
+    if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+    t.classList.remove("show");
+    setTimeout(function () { t.hidden = true; }, 400);
+  };
+  // Fifty-ninth pass: the toast's Cancel button undoes THIS
+  // credit — the beacon id it carries — via POST
+  // /cancel-credit, then dismisses the toast. A stale id is
+  // a server-side no-op, so a late click can never undo
+  // the wrong credit; the toast dismisses either way.
+  // Pack credits have no toast and no button (chime only).
+  var cancelBtn = document.getElementById("toast-cancel");
+  if (cancelBtn) {
+    cancelBtn.addEventListener("click", function () {
+      var id = currentId;
+      currentId = null;
+      if (id) {
+        try {
+          fetch("/cancel-credit", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id: id })
+          }).catch(function () {});
+        } catch (e) {}
+      }
+      hideToast();
+    });
+  }
   var showToast = function (b) {
     var t = document.getElementById("toast");
     if (!t) { return; }
+    currentId = b.getAttribute("data-id");
     var icon = document.getElementById("toast-icon");
     icon.innerHTML = "";
     var url = b.getAttribute("data-icon");
@@ -1300,13 +1333,20 @@ fn hunt_card_html(
         ));
     }
     // Footer: the recommendation line (mock `.gf`).
-    if g.resurgence_live {
+    // Fifty-ninth pass: the footer is built first, then a
+    // flex spacer (`.gsp`) is emitted ahead of it — the card
+    // is a flex column (see the `.g` rule), so the spacer
+    // absorbs the free space and pins the footer to the
+    // card's bottom edge, aligning footers across a grid
+    // row regardless of part count. Position only: the
+    // footer itself is byte-identical to before.
+    let foot = if g.resurgence_live {
         let ends = varzia_end
             .map(|e| esc(bare_duration(e)))
             .unwrap_or_else(|| "now".to_owned());
-        h.push_str(&format!(
+        format!(
             "<div class=\"gf\"><span class=\"fa vz\">◆ In Varzia · {ends} left</span></div>\n"
-        ));
+        )
     } else if let Some(ci) = crack {
         // Pass 38: the same `radshare` marker the crack queue row
         // renders, appended to the crack line when the verdict
@@ -1316,25 +1356,31 @@ fn hunt_card_html(
         } else {
             ""
         };
-        h.push_str(&format!(
+        format!(
             "<div class=\"gf\"><span class=\"fa\">▸ <b>{relic}</b> ×{batch} · {refine} → {part}{rad}</span></div>\n",
             relic = esc(&ci.relic),
             batch = ci.batch,
             refine = esc(&refinement_abbrev(&ci.refinement)),
             part = esc(&short_part(&ci.part, &ci.gear)),
             rad = rad,
-        ));
+        )
     } else if let Some(d) = g
         .parts
         .iter()
         .filter_map(|p| p.deal.as_ref())
         .next()
     {
-        h.push_str(&format!(
+        format!(
             "<div class=\"gf\"><span class=\"fa\">▸ <b>{relic}</b> · {refine}</span></div>\n",
             relic = esc(&d.relic),
             refine = esc(&d.refinement),
-        ));
+        )
+    } else {
+        String::new()
+    };
+    if !foot.is_empty() {
+        h.push_str("<div class=\"gsp\"></div>\n");
+        h.push_str(&foot);
     }
     h.push_str("</article>\n");
     h
@@ -1973,7 +2019,7 @@ fn log_html(ctx: &RenderContext<'_>) -> String {
     h.push_str(&frag_open("p5"));
     h.push_str("<section class=\"panel\">\n<h2>Log</h2>\n");
     if ctx.events.is_empty() {
-        h.push_str("<p class=\"mut sm\">No events yet. Detection credits, alert completions, missed cracks, and pack opens will appear here.</p>\n");
+        h.push_str("<p class=\"mut sm\">No events yet. Detection credits, credit cancellations, alert completions, missed cracks, and pack opens will appear here.</p>\n");
     } else {
         for ev in ctx.events.iter().rev() {
             h.push_str(&format!(
@@ -2094,7 +2140,7 @@ h3{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--mut)
 .tool{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
 .f{font:600 13px Rajdhani,sans-serif;letter-spacing:.08em;color:var(--mut);background:var(--cell);border:1px solid #1f2735;padding:5px 14px;cursor:pointer}.f.on{color:var(--cy);border-color:var(--cy)}.lg-note{margin-left:auto}
 .gg{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:12px}
-.g{background:var(--panel);border:1px solid var(--line);padding:12px 14px;clip-path:polygon(8px 0,100% 0,100% calc(100% - 8px),calc(100% - 8px) 100%,0 100%,0 8px)}.g.hide{display:none}
+.g{background:var(--panel);border:1px solid var(--line);padding:12px 14px;clip-path:polygon(8px 0,100% 0,100% calc(100% - 8px),calc(100% - 8px) 100%,0 100%,0 8px);display:flex;flex-direction:column}.g.hide{display:none}.gsp{flex:1 1 auto}
 .gh{display:flex;align-items:center;gap:9px;margin-bottom:8px}.gh>b{font-size:18px;white-space:nowrap}
 .bd{font-style:normal;font-size:10px;letter-spacing:.1em;padding:0 5px;border:1px solid var(--mut);color:var(--mut)}.bd.z{color:var(--gold);border-color:var(--gold)}
 .gc{margin-left:auto;display:flex;align-items:center;gap:8px;color:var(--mut);font-size:12px}.gc i,.bc i{font-style:normal}
@@ -2186,6 +2232,8 @@ label.row{cursor:pointer}
 #toast .tbody{padding:20px 28px 20px 24px;display:flex;flex-direction:column;justify-content:center;gap:8px}
 #toast .tk{font:600 15px Rajdhani,sans-serif;letter-spacing:.24em;text-transform:uppercase;color:var(--cy)}
 #toast .tp{font:700 27px Rajdhani,sans-serif;color:var(--tx);white-space:nowrap}
+#toast .tbtn{position:absolute;right:14px;bottom:10px;pointer-events:auto;background:none;border:0;padding:2px 4px;font:600 12px Rajdhani,sans-serif;letter-spacing:.08em;color:var(--mut);cursor:pointer}
+#toast .tbtn:hover{color:var(--cy)}
 "#;
 
 const JS: &str = r#"
@@ -2684,6 +2732,55 @@ mod tests {
         assert!(html.contains("age < 30"), "first-sight freshness window");
     }
 
+    /// Fifty-ninth pass: the acquisition toast carries a
+    /// small Cancel button at its bottom-right, wired to
+    /// POST the showing credit's beacon id to
+    /// /cancel-credit and dismiss the toast. Detection
+    /// credits only — the pack chime script below has no
+    /// such button, and the toast lifetime is unchanged.
+    #[test]
+    fn toast_cancel_button_wired_to_the_showing_credit() {
+        let t = crate::tuning::Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let ctx = empty_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
+        let html = render_plan(&Plan::default(), &ctx);
+        assert!(
+            html.contains("<button class=\"tbtn\" id=\"toast-cancel\" type=\"button\">Cancel</button>"),
+            "small text Cancel button in the toast shell"
+        );
+        assert!(
+            html.contains("#toast .tbtn{position:absolute;right:14px;bottom:10px;pointer-events:auto"),
+            "bottom-right, and clickable despite the toast's pointer-events:none"
+        );
+        assert!(
+            html.contains("fetch(\"/cancel-credit\""),
+            "Cancel posts to the cancel route"
+        );
+        assert!(
+            html.contains("method: \"POST\""),
+            "Cancel posts, never gets"
+        );
+        assert!(
+            html.contains("JSON.stringify({ id: id })"),
+            "Cancel posts the showing credit's beacon id, not 'the latest credit'"
+        );
+        assert!(
+            html.contains("}, 6000);"),
+            "toast lifetime unchanged (~6 s auto-dismiss)"
+        );
+        // The pack chime script must not gain a cancel: it
+        // fires for pack_open, which never toasts.
+        let pack_script = &html[html.find("fracker.packChimeSeen").unwrap()..];
+        assert!(
+            !pack_script.contains("cancel-credit"),
+            "pack chimes carry no cancel"
+        );
+    }
+
     /// Fifty-third pass: the pack pair renders in the Log,
     /// the newest pack_open rides the fragment as the pack
     /// beacon (keyed by the event identity), and the pack
@@ -3118,6 +3215,78 @@ mod tests {
         assert!(
             bpos("Bravo Prime") < bpos("Alpha Prime"),
             "Backlog keeps the planner's order (no ready partition)"
+        );
+    }
+
+    /// Fifty-ninth pass: every Hunt card's next-relic footer
+    /// (`.gf`) is pinned to the card's bottom by a flex spacer
+    /// (`.gsp`) ahead of it, so footers align across a grid
+    /// row regardless of part count. Position only: the
+    /// footer text and the part rows are unchanged.
+    #[test]
+    fn hunt_cards_pin_the_relic_footer_to_the_bottom() {
+        let t = crate::tuning::Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let ctx = empty_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
+        // Two Varzia-live cards (so both carry a footer) with
+        // different part counts: 1 part vs 4 parts.
+        let few = goal("Caliban Prime", "Caliban Prime Chassis Blueprint", false, true);
+        let mut many = goal("Lavos Prime", "Lavos Prime Neuroptics", false, true);
+        let row = |name: &str| PartRow {
+            name: name.to_owned(),
+            state: PartState::Need,
+            held: 0,
+            required: 1,
+            relics: vec![],
+            best_odds: String::new(),
+            rarity: Rarity::Rare,
+            deal: None,
+        };
+        many.parts.push(row("Lavos Prime Chassis Blueprint"));
+        many.parts.push(row("Lavos Prime Systems Blueprint"));
+        many.parts.push(row("Lavos Prime Blueprint"));
+        let plan = Plan {
+            goals: vec![few, many],
+            ..Default::default()
+        };
+        let html = render_plan(&plan, &ctx);
+        let p2 = page(&html, "p2");
+        // The bottom-pinning structure: the card is a flex
+        // column, a growing spacer sits directly ahead of
+        // every footer, and the footer itself is unchanged.
+        assert!(
+            html.contains(".g{background:var(--panel);border:1px solid var(--line);padding:12px 14px;clip-path:polygon(8px 0,100% 0,100% calc(100% - 8px),calc(100% - 8px) 100%,0 100%,0 8px);display:flex;flex-direction:column}"),
+            "Hunt cards are flex columns"
+        );
+        assert!(
+            html.contains(".gsp{flex:1 1 auto}"),
+            "the spacer grows to absorb free space"
+        );
+        assert_eq!(
+            p2.matches("<div class=\"gsp\"></div>\n<div class=\"gf\">").count(),
+            2,
+            "one spacer directly ahead of each card's footer: {p2}"
+        );
+        assert_eq!(
+            p2.matches("<div class=\"gf\">").count(),
+            2,
+            "both cards still carry their footer"
+        );
+        assert!(
+            p2.contains("In Varzia"),
+            "footer text unchanged: {p2}"
+        );
+        // Part rows unchanged: the 1-part card has one `.r`,
+        // the 4-part card four.
+        assert_eq!(
+            p2.matches("<div class=\"r\"").count()
+                + p2.matches("<div class=\"r ").count(),
+            5,
+            "part rows unchanged (1 + 4): {p2}"
         );
     }
 
