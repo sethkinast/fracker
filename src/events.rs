@@ -35,6 +35,10 @@ static APPEND_GATE: Mutex<()> = Mutex::new(());
 pub enum EventKind {
     /// Reward detection credited a part.
     Credit,
+    /// A detection credit was cancelled from the toast
+    /// (fifty-ninth pass): the credited part's stock was
+    /// decremented back, saturating at 0.
+    CreditCancel,
     /// An alert was seen completed (mission tracker proof).
     AlertDone,
     /// A relic crack episode whose burst detected nothing.
@@ -61,6 +65,11 @@ pub struct EventRecord {
     /// Credit: the part's parent item (the toast's icon key).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gear: Option<String>,
+    /// CreditCancel: the cancelled credit's beacon id
+    /// (`ts|part`, the toast's `data-id`) — the link back to
+    /// the credit this record undoes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit_id: Option<String>,
     /// AlertDone: the alert's identity as known at arm time
     /// (event tag / node from the armed `MissionInfo`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -87,6 +96,24 @@ impl EventRecord {
             kind: EventKind::Credit,
             part: Some(part),
             gear,
+            credit_id: None,
+            label: None,
+            reason: None,
+            roll: None,
+            names: None,
+        }
+    }
+
+    /// A toast Cancel undid the credit named by `credit_id`
+    /// (its beacon id, `ts|part`): the part's stock was
+    /// decremented by 1, saturating at 0.
+    pub fn credit_cancel(ts: String, part: String, credit_id: String) -> Self {
+        Self {
+            ts,
+            kind: EventKind::CreditCancel,
+            part: Some(part),
+            gear: None,
+            credit_id: Some(credit_id),
             label: None,
             reason: None,
             roll: None,
@@ -100,6 +127,7 @@ impl EventRecord {
             kind: EventKind::AlertDone,
             part: None,
             gear: None,
+            credit_id: None,
             label: Some(label),
             reason: None,
             roll: None,
@@ -113,6 +141,7 @@ impl EventRecord {
             kind: EventKind::CrackMiss,
             part: None,
             gear: None,
+            credit_id: None,
             label: None,
             reason: Some(reason),
             roll,
@@ -126,6 +155,7 @@ impl EventRecord {
             kind: EventKind::PackOpen,
             part: None,
             gear: None,
+            credit_id: None,
             label: None,
             reason: None,
             roll: None,
@@ -139,6 +169,7 @@ impl EventRecord {
             kind: EventKind::PackMiss,
             part: None,
             gear: None,
+            credit_id: None,
             label: None,
             reason: Some(reason),
             roll: None,
@@ -152,6 +183,10 @@ impl EventRecord {
         match self.kind {
             EventKind::Credit => format!(
                 "Relic cracked — {}",
+                self.part.as_deref().unwrap_or("unknown part")
+            ),
+            EventKind::CreditCancel => format!(
+                "Credit cancelled — {}",
                 self.part.as_deref().unwrap_or("unknown part")
             ),
             EventKind::AlertDone => format!(
@@ -331,6 +366,44 @@ mod tests {
         assert_eq!(
             latest_credit(&loaded).unwrap().part.as_deref(),
             Some("Voruna Prime Chassis Blueprint")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn credit_cancel_roundtrip_and_render() {
+        // Fifty-ninth pass: a toast Cancel appends a
+        // credit_cancel naming the undone credit's beacon id.
+        let dir = tmpdir("cancel");
+        let id = "2026-11-04T05:00:00Z|Fang Prime Handle";
+        append(
+            &dir,
+            &EventRecord::credit(
+                "2026-11-04T05:00:00Z".into(),
+                "Fang Prime Handle".into(),
+                Some("Fang Prime".into()),
+            ),
+        );
+        append(
+            &dir,
+            &EventRecord::credit_cancel(
+                "2026-11-04T05:01:00Z".into(),
+                "Fang Prime Handle".into(),
+                id.into(),
+            ),
+        );
+        let text = std::fs::read_to_string(file(&dir)).unwrap();
+        assert!(text.contains("\"kind\":\"credit_cancel\""), "{text}");
+        assert!(
+            text.contains("\"credit_id\":\"2026-11-04T05:00:00Z|Fang Prime Handle\""),
+            "{text}"
+        );
+        let loaded = load(&dir);
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[1].kind, EventKind::CreditCancel);
+        assert_eq!(
+            loaded[1].line(),
+            "Credit cancelled — Fang Prime Handle"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

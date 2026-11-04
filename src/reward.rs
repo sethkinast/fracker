@@ -481,16 +481,35 @@ pub fn detect_pick(
     frame: &GrayImage,
     parts: &Universe,
 ) -> Result<String, Miss> {
+    detect_pick_slot(engine, frame, parts).0
+}
+
+/// [`detect_pick`] plus the bordered slot the verdict rests
+/// on (fifty-ninth pass): `Some(slot)` exactly when a border
+/// winner cleared the floor + margin — for a clearing frame
+/// the slot that was read, for a `NameNoMatch` frame the slot
+/// whose name failed the discipline — and `None` when no
+/// border winner exists (not a reward screen, no winner, or
+/// an ambiguous border). The slot is geometry-relative (the
+/// winning geometry's own slot index); within one burst the
+/// geometry is fixed — same screen, same squad size — so
+/// slots are comparable across the burst's frames, which is
+/// what [`select_burst_pick`]'s void rule reads.
+pub fn detect_pick_slot(
+    engine: &dyn OcrEngine,
+    frame: &GrayImage,
+    parts: &Universe,
+) -> (Result<String, Miss>, Option<usize>) {
     if !is_reward_screen(frame) {
-        return Err(Miss::NotRewardScreen);
+        return (Err(Miss::NotRewardScreen), None);
     }
     let scores = border_scores(frame);
     if let Some(slot) = border_winner(&scores) {
         let region = name_band_region(frame.width, frame.height, slot);
-        return read_bordered_name(engine, frame, parts, region);
+        return (read_bordered_name(engine, frame, parts, region), Some(slot));
     }
     if scores.iter().any(|s| *s >= BORDER_FLOOR) {
-        return Err(Miss::NoBorderWinner { scores });
+        return (Err(Miss::NoBorderWinner { scores }), None);
     }
     for cards in [3usize, 2, 1] {
         let origin = row_origin(cards);
@@ -500,13 +519,16 @@ pub fn detect_pick(
         let alt_scores = border_scores_at(frame, origin, cards);
         if let Some(slot) = border_winner_in(&alt_scores) {
             let region = name_band_region_at(frame.width, frame.height, origin, slot);
-            return read_bordered_name(engine, frame, parts, region);
+            return (
+                read_bordered_name(engine, frame, parts, region),
+                Some(slot),
+            );
         }
         if alt_scores.iter().any(|s| *s >= BORDER_FLOOR) {
-            return Err(Miss::NoBorderWinner { scores });
+            return (Err(Miss::NoBorderWinner { scores }), None);
         }
     }
-    Err(Miss::NoBorderWinner { scores })
+    (Err(Miss::NoBorderWinner { scores }), None)
 }
 
 /// Read the bordered card's name band and apply the hold
@@ -564,12 +586,17 @@ fn read_bordered_name(
 // Burst selection (pass 43 amendment)
 // ---------------------------------------------------------------------------
 
-/// One burst frame's detection outcome: its grab offset and
-/// the unchanged per-frame verdict.
+/// One burst frame's detection outcome: its grab offset, the
+/// unchanged per-frame verdict, and the bordered slot the
+/// verdict rests on ([`detect_pick_slot`]: `Some` exactly
+/// when a border winner cleared the floor + margin, `None`
+/// otherwise). Frames built without slot evidence carry
+/// `None`, and the void rule never voids on missing evidence.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BurstFrame {
     pub offset_secs: u64,
     pub outcome: Result<String, Miss>,
+    pub border_slot: Option<usize>,
 }
 
 /// The burst's verdict. `Pick` credits the named part;
@@ -586,10 +613,23 @@ pub enum BurstVerdict {
 /// screen opens with the player's own roll pre-selected
 /// (a border from screen-open), so the latest clearing
 /// frame is the only one certain to reflect the player's
-/// actual choice rather than the default (and a border
-/// cannot un-happen: an early frame that cleared still
-/// credits when later frames show the screen already
-/// closed).
+/// actual choice rather than the default.
+///
+/// Fifty-ninth pass, the moved-selection void: a border
+/// cannot un-happen, but it CAN move to an untracked
+/// reward — a later frame whose bordered card reads
+/// `NameNoMatch` (its name is outside the roster parts
+/// universe, e.g. Forma) proves the selection left the
+/// pick's slot. So a pick is VOID when any frame AFTER the
+/// pick frame carries a border winner on a DIFFERENT slot
+/// than the pick's slot: the final selection is untracked
+/// and the burst must not credit the earlier pick. The
+/// screen-closed case is preserved: when no later frame
+/// has a border at all, the early pick still stands.
+/// The rule reads per-frame border-slot evidence only — a
+/// frame without slot evidence, or a pick without one,
+/// never voids (missing evidence is a stand, never a void,
+/// so a good pick is never voided on noise).
 /// Never-a-wrong-credit is untouched: selection only ever
 /// picks among frames that individually cleared the
 /// classifier, the border floor + margin, and the name
@@ -602,13 +642,26 @@ pub enum BurstVerdict {
 /// with the strongest best-side continuity (border tier)
 /// resp. the latest frame wins.
 pub fn select_burst_pick(frames: &[BurstFrame]) -> BurstVerdict {
-    let mut pick: Option<&BurstFrame> = None;
-    for f in frames {
+    let mut pick_idx: Option<usize> = None;
+    for (i, f) in frames.iter().enumerate() {
         if f.outcome.is_ok() {
-            pick = Some(f);
+            pick_idx = Some(i);
         }
     }
-    if let Some(f) = pick {
+    if let Some(i) = pick_idx {
+        let f = &frames[i];
+        if let Some(pick_slot) = f.border_slot {
+            for later in &frames[i + 1..] {
+                if let Some(slot) = later.border_slot {
+                    if slot != pick_slot {
+                        return BurstVerdict::Miss(format!(
+                            "burst pick void: selection moved from slot {pick_slot} to slot {slot} after the T+{} pick; final selection is untracked, no credit",
+                            f.offset_secs
+                        ));
+                    }
+                }
+            }
+        }
         return BurstVerdict::Pick {
             offset_secs: f.offset_secs,
             name: f.outcome.clone().unwrap(),
@@ -663,6 +716,8 @@ pub fn miss_reason_class(why: &str) -> &'static str {
         "no bordered card"
     } else if why.contains("no frame was the reward screen") {
         "no reward screen"
+    } else if why.contains("selection moved") {
+        "selection moved"
     } else {
         "name not proven"
     }
@@ -677,9 +732,13 @@ pub fn detect_burst(
 ) -> BurstVerdict {
     let outcomes: Vec<BurstFrame> = frames
         .iter()
-        .map(|(offset_secs, frame)| BurstFrame {
-            offset_secs: *offset_secs,
-            outcome: detect_pick(engine, frame, parts),
+        .map(|(offset_secs, frame)| {
+            let (outcome, border_slot) = detect_pick_slot(engine, frame, parts);
+            BurstFrame {
+                offset_secs: *offset_secs,
+                outcome,
+                border_slot,
+            }
         })
         .collect();
     select_burst_pick(&outcomes)
@@ -1285,6 +1344,21 @@ mod tests {
         BurstFrame {
             offset_secs,
             outcome,
+            border_slot: None,
+        }
+    }
+
+    /// A burst frame WITH border-slot evidence: the slot the
+    /// frame's border winner sat on (fifty-ninth pass).
+    fn bf_slot(
+        offset_secs: u64,
+        outcome: Result<String, Miss>,
+        border_slot: usize,
+    ) -> BurstFrame {
+        BurstFrame {
+            offset_secs,
+            outcome,
+            border_slot: Some(border_slot),
         }
     }
 
@@ -1326,6 +1400,156 @@ mod tests {
             BurstVerdict::Pick {
                 offset_secs: 8,
                 name: "Baza Prime Stock".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn burst_moved_selection_voids_the_stale_pick() {
+        // Fifty-ninth pass, the live Forma case: Seth's roll
+        // (Fang Prime Handle, slot 0) was pre-selected at
+        // screen-open and cleared; he then moved selection to
+        // Forma (slot 1), whose name is outside the roster
+        // universe, so that frame reads NameNoMatch — but its
+        // border winner on a different slot proves the pick
+        // is stale. The burst must NOT credit Fang.
+        let frames = vec![
+            bf_slot(8, Ok("Fang Prime Handle".to_owned()), 0),
+            bf_slot(
+                10,
+                Err(Miss::NameNoMatch {
+                    detail: "psm6 read \"Forma\" matched nothing".to_owned(),
+                }),
+                1,
+            ),
+        ];
+        match select_burst_pick(&frames) {
+            BurstVerdict::Miss(why) => {
+                assert!(why.contains("selection moved"), "line: {why}");
+                assert_eq!(miss_reason_class(&why), "selection moved");
+            }
+            other => panic!("a moved selection must void the pick, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn burst_screen_close_after_pick_still_credits() {
+        // The screen-closed preservation: the pick cleared on
+        // slot 0 and every later frame has NO border at all
+        // (the screen closed) — the early pick still stands,
+        // exactly as before the void rule.
+        let frames = vec![
+            bf_slot(8, Ok("Fang Prime Handle".to_owned()), 0),
+            bf(10, Err(Miss::NoBorderWinner {
+                scores: [0.12, 0.03, 0.44, 0.01],
+            })),
+            bf(12, Err(Miss::NotRewardScreen)),
+        ];
+        assert_eq!(
+            select_burst_pick(&frames),
+            BurstVerdict::Pick {
+                offset_secs: 8,
+                name: "Fang Prime Handle".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn burst_same_slot_name_miss_does_not_void() {
+        // A later NameNoMatch on the PICK's OWN slot is not a
+        // move — the selection never left, the name just
+        // failed to read — so the pick still credits.
+        let frames = vec![
+            bf_slot(8, Ok("Fang Prime Handle".to_owned()), 0),
+            bf_slot(
+                10,
+                Err(Miss::NameNoMatch {
+                    detail: "psm6 read \"Fang Prime Handle\" matched nothing".to_owned(),
+                }),
+                0,
+            ),
+        ];
+        assert_eq!(
+            select_burst_pick(&frames),
+            BurstVerdict::Pick {
+                offset_secs: 8,
+                name: "Fang Prime Handle".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn burst_selection_moves_away_and_back_credits_the_final_pick() {
+        // Fang -> Forma -> Fang, the final Fang frame
+        // clearing: latest-wins already handles this, and
+        // the void rule must not fire — no frame AFTER the
+        // final pick carries a different slot.
+        let frames = vec![
+            bf_slot(8, Ok("Fang Prime Handle".to_owned()), 0),
+            bf_slot(
+                10,
+                Err(Miss::NameNoMatch {
+                    detail: "psm6 read \"Forma\" matched nothing".to_owned(),
+                }),
+                1,
+            ),
+            bf_slot(12, Ok("Fang Prime Handle".to_owned()), 0),
+        ];
+        assert_eq!(
+            select_burst_pick(&frames),
+            BurstVerdict::Pick {
+                offset_secs: 12,
+                name: "Fang Prime Handle".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn burst_detect_moved_selection_voids_at_image_level() {
+        // End to end through detect_burst: the first grab's
+        // bordered slot 0 reads a roster part, the second
+        // grab's bordered slot 1 reads "Forma" (outside the
+        // universe) — the moved border voids the pick.
+        let engine = ScriptedEngine {
+            bands: [
+                "Dual Kamas Prime Blueprint".to_owned(),
+                "Forma".to_owned(),
+                "Kompressa Prime Receiver".to_owned(),
+                "Cedo Prime Stock".to_owned(),
+            ],
+        };
+        let frames = vec![
+            (8, synthetic_frame(&[0], true)),
+            (10, synthetic_frame(&[1], true)),
+        ];
+        match detect_burst(&engine, &frames, &parts_universe()) {
+            BurstVerdict::Miss(why) => {
+                assert!(why.contains("selection moved"), "line: {why}")
+            }
+            other => panic!("image-level moved selection must void, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn burst_missing_slot_evidence_never_voids() {
+        // Frames built without border-slot evidence (the
+        // pre-pass-59 shape) cannot void: missing evidence
+        // is a stand, never a void, so a good pick is never
+        // voided on noise.
+        let frames = vec![
+            bf(8, Ok("Fang Prime Handle".to_owned())),
+            bf(
+                10,
+                Err(Miss::NameNoMatch {
+                    detail: "psm6 read \"Forma\" matched nothing".to_owned(),
+                }),
+            ),
+        ];
+        assert_eq!(
+            select_burst_pick(&frames),
+            BurstVerdict::Pick {
+                offset_secs: 8,
+                name: "Fang Prime Handle".to_owned()
             }
         );
     }

@@ -3212,3 +3212,61 @@ it refines the brief where they disagree. For the next worker pass.
     per-cell gate change is what lets mixed screens
     classify and therefore save; no separate fix was
     added. Details: docs/fifty-eighth-pass.md.
+125. **Fifty-ninth pass: the queue bundle (Hunt footer
+    pinning, toast Cancel, parent icon refresh, burst
+    moved-selection void).** Hunt cards are flex columns
+    with a growing spacer ahead of the footer, so the
+    next-relic row pins to the card's bottom edge and
+    aligns across a grid row regardless of part count;
+    footer text, part rows, pips, headers, and widths
+    are unchanged, and the rule is Hunt-only by
+    construction (`.g` is emitted only by the Hunt card
+    renderer). The acquisition toast gains a small
+    "Cancel" button at its bottom-right (clickable
+    despite the toast's `pointer-events: none`), wired
+    to the showing credit's beacon id (`ts|part`) via
+    `POST /cancel-credit`: a real cancellation
+    decrements that part's verified stock by 1,
+    saturating at 0, appends a `credit_cancel` event
+    ("Credit cancelled — {part}"), and fires the regen
+    hook; an unknown, stale, mismatched, or
+    already-cancelled id is a safe no-op that never
+    decrements the wrong part. Toast lifetime is
+    unchanged (~6 s); pack credits have no toast and
+    no button. Toast icons take the parent-refresh
+    shape, not class icons: the WFCD items dataset
+    (fetched through the crate's own machinery)
+    carries parent `imageName`s agreeing 100% with
+    the previous 67 entries, while its per-part
+    `imageName`s are generic class art (23 images for
+    37 component names) with an ambiguous stripped-name
+    key (`Stock`, `Systems` each map to two images)
+    and would downgrade the 67 working toasts from
+    real item art to generic silhouettes against the
+    addendum #14 parent-icon rule — so
+    `data/icons.json` was refreshed 67 -> 173 keys,
+    covering all 163 part-bearing roster parents
+    (Burston Prime -> `BurstonPrime.png`, ending the
+    live monogram-"B" case), with one documented
+    manual alias (Kavasa Prime ->
+    `KubrowCollarPrimeA.png`, the skin entry that owns
+    its components) and only four part-less, WFCD-absent
+    parents left unresolvable, which no toast can key
+    on; the monogram fallback stays and no URL is
+    invented. Burst selection gains the moved-selection
+    void: a pick is void (verdict Miss, reason class
+    "selection moved") if any frame after the pick
+    frame carries a border winner on a different slot
+    than the pick's slot — the 2026-11-04 case where
+    Seth moved selection from Fang Prime Handle to
+    Forma no longer credits Fang — implemented on
+    per-frame border-slot evidence only (`BurstFrame`
+    gains `border_slot` from the existing floor +
+    margin winner gate; missing evidence never voids),
+    with the screen-closed case preserved (no later
+    border at all -> the early pick still stands) and
+    the move-away-and-back case still crediting the
+    final pick. The false +1 Fang Prime Handle in stock
+    was deliberately NOT corrected (Seth declined; he
+    reconciles stock himself). Details:
+    docs/fifty-ninth-pass.md.

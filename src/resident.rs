@@ -243,6 +243,21 @@ pub async fn run(
             }),
         ))
     };
+    // Fifty-ninth pass: the toast's Cancel button. The loopback
+    // server undoes one detection credit through this context
+    // (keyed by the credit's beacon id); the regen hook is a
+    // Manual trigger — a cancellation like the tray verb's,
+    // which never auto-opens the page.
+    let credit_cancel = {
+        let tx = trigger_tx.clone();
+        Arc::new(server::CreditCancel::new(
+            opts.report.stock_path.clone(),
+            event_log_dir(&opts),
+            Arc::new(move || {
+                let _ = tx.send(Trigger::Manual);
+            }),
+        ))
+    };
     let plan_server = match server::serve(
         opts.serve_port,
         opts.report.out.clone(),
@@ -251,6 +266,7 @@ pub async fn run(
         tick_store.clone(),
         Some(unverified_toggle),
         Some(de_lock_clear),
+        Some(credit_cancel),
     ) {
         Ok(s) => {
             println!("resident: serving the plan at {}", s.url());
