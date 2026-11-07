@@ -907,6 +907,40 @@ mod tests {
     }
 
     #[test]
+    fn pack_1794023098_resolves_all_three_slots() {
+        // Pass 60: the PACK 4 OF 4 frame from 2026-11-06
+        // whose Axi cell missed (log "Relic pack opened —
+        // Lith S19, Meso Y2"). Both PSMs read the Axi
+        // caption as "Ax! C13 Relic" — the dotted "i"
+        // renders as "!". Ground truth by slot, confirmed
+        // by direct tesseract reads of the caption bands:
+        // Axi C13, Lith S19, Meso Y2.
+        let Some(engine) = real_engine() else {
+            eprintln!("skip pack-1794023098-3 fixture: no tesseract in this environment");
+            return;
+        };
+        let universe = relic_universe();
+        let frame = fixture("fixtures/pack-open/pack-1794023098-3.png")
+            .expect("fixture pack-1794023098-3 missing");
+        assert!(
+            is_pack_screen(&frame),
+            "must classify as a pack screen"
+        );
+        let read = detect_pack(&engine, &frame, &universe).expect("must detect");
+        assert_eq!(read.gated, [true, true, true], "all three columns gate");
+        assert_eq!(
+            read.resolved,
+            [
+                Some("Axi C13".to_owned()),
+                Some("Lith S19".to_owned()),
+                Some("Meso Y2".to_owned())
+            ],
+            "all three slots resolve: {read:?}"
+        );
+        assert_eq!(read.miss_slots(), Vec::<usize>::new(), "no per-cell miss");
+    }
+
+    #[test]
     fn non_pack_frames_never_classify() {
         // A blank frame.
         assert!(!is_pack_screen(&GrayImage::blank(2560, 1440, 30)));

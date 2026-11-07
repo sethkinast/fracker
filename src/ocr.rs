@@ -2106,7 +2106,7 @@ impl Universe {
     /// Best fuzzy match for a raw read. Returns the canonical name and
     /// a 0..1 score. Matching is case/space-insensitive and forgives the
     /// glyph confusions OCR actually makes on this UI (0/O, 1/I/l,
-    /// 5/S, 8/B, 2/Z, 6/G). The threshold lives with the caller so tests
+    /// 5/S, 8/B, 2/Z, 6/G, !/I). The threshold lives with the caller so tests
     /// can pin it.
     pub fn best_match(&self, read: &str) -> Option<(&str, f32)> {
         self.best_match_margin(read).map(|(n, s, _)| (n, s))
@@ -2205,6 +2205,52 @@ impl Universe {
         let bp = format!("{name} Blueprint");
         if self.names.iter().any(|n| n == &bp) {
             return Some(bp);
+        }
+        None
+    }
+
+    /// The LONG siblings of `name` in this universe (sixtieth
+    /// pass): names whose tokens strictly contain `name`'s
+    /// tokens in order, with >=1 token inserted — the sibling
+    /// pairs the burst arbitration reasons over ("Voruna Prime
+    /// Blueprint" vs "Voruna Prime Neuroptics Blueprint").
+    /// Empty when no longer name in the universe is built from
+    /// this name plus inserted tokens.
+    pub fn long_siblings(&self, name: &str) -> Vec<&str> {
+        self.names
+            .iter()
+            .filter(|n| is_strict_token_superset(name, n))
+            .map(|n| n.as_str())
+            .collect()
+    }
+
+    /// The long sibling of `short` witnessed by the union of
+    /// the reads' tokens (sixtieth pass): a long sibling whose
+    /// inserted token(s) appear in the reads within confusable
+    /// distance <= 2 — the garbled "Uroptics" for "Neuroptics"
+    /// shape from the Nov 5 burst, where the production engine
+    /// dropped the discriminative token from the holding read
+    /// but the other read still carried it, garbled. `None`
+    /// when no long sibling is witnessed: a clean short read
+    /// holds the short name (true-short preservation).
+    ///
+    /// A read token that exactly equals a token of the held
+    /// short name is never a witness: it is explained by the
+    /// short name itself. Without that exclusion a duplicated
+    /// token — long "A B B" against short "A B" — would
+    /// self-witness on every true short read.
+    pub fn long_sibling_witnessed(&self, short: &str, reads: &[&str]) -> Option<String> {
+        let short_toks = folded_name_tokens(short);
+        let union: Vec<String> = reads.iter().flat_map(|r| cleaned_read_tokens(r)).collect();
+        for long in self.long_siblings(short) {
+            for extra in superset_extra_tokens(short, long) {
+                if union.iter().any(|tok| {
+                    !short_toks.iter().any(|st| st == tok)
+                        && levenshtein_confusable_bounded(tok, &extra, 2) <= 2
+                }) {
+                    return Some(long.to_owned());
+                }
+            }
         }
         None
     }
@@ -2493,6 +2539,70 @@ fn strict_exact_subset(read_toks: &[String], cand_toks: &[String]) -> bool {
     true
 }
 
+/// A name's tokens: folded (lowercase, whitespace-normalised)
+/// and squashed to alphanumerics, in order. The shared token
+/// form for the sibling relations below.
+fn folded_name_tokens(name: &str) -> Vec<String> {
+    fold(name)
+        .split(' ')
+        .filter(|t| !t.is_empty())
+        .map(squash_token)
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+/// The tokens of `long_toks` left unmatched by a left-to-right
+/// subsequence alignment of `short_toks` inside them — the
+/// inserted tokens, in order. Empty when `short_toks` is not a
+/// subsequence of `long_toks` (greedy leftmost matching finds a
+/// subsequence whenever one exists). The alignment consumes the
+/// FIRST occurrence of each short token, so with duplicated
+/// tokens the extras are the unmatched copies.
+fn extra_tokens(short_toks: &[String], long_toks: &[String]) -> Vec<String> {
+    let mut extras = Vec::new();
+    let mut j = 0;
+    for lt in long_toks {
+        if j < short_toks.len() && *lt == short_toks[j] {
+            j += 1;
+        } else {
+            extras.push(lt.clone());
+        }
+    }
+    if j == short_toks.len() {
+        extras
+    } else {
+        Vec::new()
+    }
+}
+
+/// Is `long` a STRICT TOKEN-SUPERSET sibling of `short`
+/// (sixtieth pass): `short`'s tokens appear in order inside
+/// `long`'s, with >=1 token inserted — "Voruna Prime
+/// Blueprint" inside "Voruna Prime Neuroptics Blueprint".
+/// The relation the burst arbitration reasons over; it is
+/// purely token-level, so [`crate::reward::select_burst_pick`]
+/// can apply it to held names without a universe in hand.
+pub fn is_strict_token_superset(short: &str, long: &str) -> bool {
+    let s = folded_name_tokens(short);
+    let l = folded_name_tokens(long);
+    !s.is_empty() && l.len() > s.len() && !extra_tokens(&s, &l).is_empty()
+}
+
+/// The inserted tokens distinguishing a strict token-superset
+/// sibling from its short name, in order — the long name's
+/// discriminative tokens for the arbitration ("neuroptics"
+/// for "Voruna Prime Neuroptics Blueprint" against "Voruna
+/// Prime Blueprint"). Empty when the pair is not a sibling
+/// pair.
+pub fn superset_extra_tokens(short: &str, long: &str) -> Vec<String> {
+    let s = folded_name_tokens(short);
+    let l = folded_name_tokens(long);
+    if s.is_empty() || l.len() <= s.len() {
+        return Vec::new();
+    }
+    extra_tokens(&s, &l)
+}
+
 /// The UI labels relic cells "Axi A1 Relic"; the universe stores "Axi A1".
 /// Drop a trailing `relic` token before matching (never a real item name
 /// suffix in this universe).
@@ -2541,6 +2651,16 @@ fn confusable(a: char, b: char) -> bool {
             // "S14"/"S12"/"S15" stack read as "$14"/"$12"/"$15" and failed
             // validation. Fold it so S-relics hold.
             | ('$', 's') | ('s', '$')
+            // tesseract renders the dotted "i" in "Axi" as "!"
+            // on the pack captions (sixtieth pass: the PACK 4
+            // OF 4 frame pack-1794023098-3.png reads "Ax! C13
+            // Relic" on both PSMs). Fold it so the caption
+            // scores 1.0 instead of 0.857 on the one-glyph
+            // edit. Pairwise only: '!' is NOT in any metric
+            // component ([`confusable_metric`]), so the
+            // radius decoder's disjointness guarantee is
+            // untouched by this pair.
+            | ('!', 'i') | ('i', '!')
     )
 }
 
@@ -4586,6 +4706,86 @@ mod tests {
     }
 
     #[test]
+    fn dotted_i_read_scores_axi_c13_at_one_point_zero() {
+        // Pass 60: the PACK 4 OF 4 frame pack-1794023098-3.png
+        // reads "Ax! C13 Relic" on both PSMs — the dotted "i"
+        // in "Axi" renders as "!". The pairwise confusable
+        // relation folds '!'/'i' at zero cost, so the read
+        // scores exactly 1.0 against "Axi C13" (pre-fix it
+        // scored 0.857 on the one-glyph edit, a 0.143 margin
+        // thin enough that one more garble drops it below
+        // the admission floor).
+        let u = c13_c18_universe();
+        let (name, score, second) = u
+            .best_match_margin("Ax! C13 Relic")
+            .expect("the dotted-i read must match something");
+        assert_eq!(name, "Axi C13");
+        assert_eq!(score, 1.0, "the dotted-i read must score exactly 1.0");
+        assert!(
+            score - second >= MATCH_MARGIN,
+            "margin {score} - {second} must clear {MATCH_MARGIN}"
+        );
+        assert!(
+            relic_name_witnessed("Ax! C13 Relic", "Axi C13"),
+            "the token witness must pass: '!' witnesses 'i' within one confusable edit"
+        );
+        // Scope pin: the METRIC closure does NOT fold
+        // '!'/'i' — the radius decoder's disjointness
+        // guarantee is stated over the metric, and this
+        // pair must not touch it.
+        assert_eq!(levenshtein_confusable("ax!", "axi"), 0);
+        assert_eq!(levenshtein_confusable_metric("ax!", "axi"), 1);
+    }
+
+    /// Relic slice around the C13/C18 pair, for the pass-60
+    /// dotted-i and B-boundary tests.
+    fn c13_c18_universe() -> Universe {
+        Universe::from_names(
+            &["Axi C11", "Axi C13", "Axi C18", "Lith S19", "Meso Y2"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    #[test]
+    fn b_ending_code_token_still_holds_c18() {
+        // Known boundary (pre-existing): a code token ending
+        // in "B" is genuinely ambiguous between C13 (3
+        // misread as B) and C18 (8 misread as B, and B/8 IS
+        // a confusable pair) — the discipline holds C18
+        // there. This pass must not make that worse: the
+        // ('!','i') pair must not flip a B-ending read to
+        // C13, and a dotted-i read of a B-ending code must
+        // still hold C18.
+        let u = c13_c18_universe();
+        for (read, want) in [
+            ("Axi C1B Relic", "Axi C18"),
+            ("Ax! C1B Relic", "Axi C18"),
+        ] {
+            let (name, score, second) = u
+                .best_match_margin(read)
+                .unwrap_or_else(|| panic!("{read:?} must match something"));
+            assert_eq!(name, want, "{read:?} must still hold {want}");
+            assert_eq!(score, 1.0, "{read:?} must score 1.0 against {want}");
+            assert!(
+                score - second >= MATCH_MARGIN,
+                "{read:?}: margin {score} - {second} must clear {MATCH_MARGIN}"
+            );
+            assert!(
+                relic_name_witnessed(read, want),
+                "{read:?} must witness {want}"
+            );
+        }
+        // And the C13 side is untouched: a clean C13 read
+        // still holds C13, not C18.
+        let (name, _, _) = u
+            .best_match_margin("Axi C13 Relic")
+            .expect("clean C13 must match");
+        assert_eq!(name, "Axi C13");
+    }
+
+    #[test]
     fn strip_tier_label_strips_only_balanced_spans() {
         // Balanced labels still strip whole, as before.
         assert_eq!(strip_tier_label("Neo C5 [Radiant]"), "Neo C5 ");
@@ -6285,7 +6485,11 @@ mod tests {
     }
 
     /// All substitutions of confusable twins (the zero-cost pairs of
-    /// [`confusable`]) over subsets of the applicable positions.
+    /// the METRIC closure [`confusable_metric`], which is what the
+    /// radius decoder's distances are stated over — the pairwise
+    /// [`confusable`] relation has one extra pair, '!'/'i', that
+    /// the metric deliberately does not fold) over subsets of the
+    /// applicable positions.
     fn confusable_variants(head: &str) -> Vec<String> {
         fn twins(c: char) -> &'static [char] {
             match c {
@@ -6388,6 +6592,101 @@ mod tests {
             ["lex"]
         );
         assert!(u.discriminative_tokens_of("Not A Real Item").is_none());
+    }
+
+    #[test]
+    fn strict_token_superset_sibling_relation() {
+        // Sixtieth pass: the sibling relation the burst
+        // arbitration reasons over — tokens in order, >=1
+        // inserted. Order matters (a shuffled long name is no
+        // sibling), and the short name must be strictly
+        // shorter.
+        assert!(is_strict_token_superset(
+            "Voruna Prime Blueprint",
+            "Voruna Prime Neuroptics Blueprint"
+        ));
+        assert!(is_strict_token_superset(
+            "Voruna Prime Blueprint",
+            "Voruna Prime Chassis Blueprint"
+        ));
+        assert!(!is_strict_token_superset(
+            "Voruna Prime Neuroptics Blueprint",
+            "Voruna Prime Blueprint"
+        ));
+        assert!(!is_strict_token_superset(
+            "Voruna Prime Blueprint",
+            "Voruna Prime Blueprint"
+        ));
+        assert!(!is_strict_token_superset(
+            "Voruna Prime Blueprint",
+            "Neuroptics Blueprint Voruna Prime"
+        ));
+        assert!(!is_strict_token_superset(
+            "Voruna Prime Blueprint",
+            "Saryn Prime Systems Blueprint"
+        ));
+        assert_eq!(
+            superset_extra_tokens(
+                "Voruna Prime Blueprint",
+                "Voruna Prime Neuroptics Blueprint"
+            ),
+            vec!["neuroptics".to_owned()]
+        );
+        assert!(superset_extra_tokens(
+            "Voruna Prime Blueprint",
+            "Saryn Prime Systems Blueprint"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn long_sibling_witnessed_sees_the_garbled_token() {
+        // Sixtieth pass: the Nov 5 shape — the holding read
+        // dropped "Neuroptics", the other read carries it
+        // garbled as "Uroptics" (confusable distance 2).
+        let u = Universe::from_names(&[
+            "Voruna Prime Blueprint".to_owned(),
+            "Voruna Prime Neuroptics Blueprint".to_owned(),
+            "Voruna Prime Chassis Blueprint".to_owned(),
+        ]);
+        assert_eq!(
+            u.long_sibling_witnessed(
+                "Voruna Prime Blueprint",
+                &["Voruna Prime Blueprint", "Voruna a. Uroptics ueprint"]
+            ),
+            Some("Voruna Prime Neuroptics Blueprint".to_owned())
+        );
+        // An exact witness counts too.
+        assert_eq!(
+            u.long_sibling_witnessed(
+                "Voruna Prime Blueprint",
+                &["Voruna Prime Blueprint", "Voruna Prime Neuroptics Blueprint"]
+            ),
+            Some("Voruna Prime Neuroptics Blueprint".to_owned())
+        );
+        // True-short preservation: clean short reads witness
+        // nothing — no long hold anywhere, no garbled token.
+        assert_eq!(
+            u.long_sibling_witnessed(
+                "Voruna Prime Blueprint",
+                &["Voruna Prime Blueprint", "Voruna Prime Blueprint"]
+            ),
+            None
+        );
+        // The other long sibling is not witnessed by the
+        // neuroptics garble either: "uroptics" sits far from
+        // "chassis".
+        assert_eq!(
+            u.long_siblings("Voruna Prime Blueprint"),
+            vec![
+                "Voruna Prime Neuroptics Blueprint",
+                "Voruna Prime Chassis Blueprint"
+            ]
+        );
+        // A token explained exactly by the short name itself
+        // never witnesses: long "A B B" against short "A B".
+        let dup = Universe::from_names(&["A B".to_owned(), "A B B".to_owned()]);
+        assert_eq!(dup.long_sibling_witnessed("A B", &["A B", "A B"]), None);
     }
 
     #[test]

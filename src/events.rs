@@ -65,6 +65,14 @@ pub struct EventRecord {
     /// Credit: the part's parent item (the toast's icon key).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gear: Option<String>,
+    /// Credit: true when the credited part was PartState::Need
+    /// immediately BEFORE the credit (sixtieth pass) — the toast's
+    /// gold NEW line. A needed copy, whether or not the credit
+    /// completes the requirement; duplicates (Have) and non-goal
+    /// parts (Unknown) carry false. Absent on records written
+    /// before this pass (default false: no NEW line).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub was_needed: Option<bool>,
     /// CreditCancel: the cancelled credit's beacon id
     /// (`ts|part`, the toast's `data-id`) — the link back to
     /// the credit this record undoes.
@@ -90,12 +98,16 @@ pub struct EventRecord {
 }
 
 impl EventRecord {
-    pub fn credit(ts: String, part: String, gear: Option<String>) -> Self {
+    /// `was_needed` is the credited part's pre-credit state
+    /// (sixtieth pass): true iff it was PartState::Need before
+    /// the stock increment — the toast's gold NEW line.
+    pub fn credit(ts: String, part: String, gear: Option<String>, was_needed: bool) -> Self {
         Self {
             ts,
             kind: EventKind::Credit,
             part: Some(part),
             gear,
+            was_needed: Some(was_needed),
             credit_id: None,
             label: None,
             reason: None,
@@ -113,6 +125,7 @@ impl EventRecord {
             kind: EventKind::CreditCancel,
             part: Some(part),
             gear: None,
+            was_needed: None,
             credit_id: Some(credit_id),
             label: None,
             reason: None,
@@ -127,6 +140,7 @@ impl EventRecord {
             kind: EventKind::AlertDone,
             part: None,
             gear: None,
+            was_needed: None,
             credit_id: None,
             label: Some(label),
             reason: None,
@@ -141,6 +155,7 @@ impl EventRecord {
             kind: EventKind::CrackMiss,
             part: None,
             gear: None,
+            was_needed: None,
             credit_id: None,
             label: None,
             reason: Some(reason),
@@ -155,6 +170,7 @@ impl EventRecord {
             kind: EventKind::PackOpen,
             part: None,
             gear: None,
+            was_needed: None,
             credit_id: None,
             label: None,
             reason: None,
@@ -169,6 +185,7 @@ impl EventRecord {
             kind: EventKind::PackMiss,
             part: None,
             gear: None,
+            was_needed: None,
             credit_id: None,
             label: None,
             reason: Some(reason),
@@ -324,6 +341,7 @@ mod tests {
                 "2026-10-28T05:00:00Z".into(),
                 "Voruna Prime Chassis Blueprint".into(),
                 Some("Voruna Prime".into()),
+                true,
             ),
         );
         append(
@@ -348,9 +366,14 @@ mod tests {
         assert!(text.contains("\"kind\":\"alert_done\""), "{text}");
         assert!(text.contains("\"kind\":\"crack_miss\""), "{text}");
         assert!(!text.contains("\"roll\":null"), "{text}");
+        // Sixtieth pass: the pre-credit Need flag rides the
+        // credit record (the toast's NEW line); false/absent
+        // fields stay omitted rather than null.
+        assert!(text.contains("\"was_needed\":true"), "{text}");
         let loaded = load(&dir);
         assert_eq!(loaded.len(), 3);
         assert_eq!(loaded[0].kind, EventKind::Credit);
+        assert_eq!(loaded[0].was_needed, Some(true));
         assert_eq!(
             loaded[0].line(),
             "Relic cracked — Voruna Prime Chassis Blueprint"
@@ -382,6 +405,7 @@ mod tests {
                 "2026-11-04T05:00:00Z".into(),
                 "Fang Prime Handle".into(),
                 Some("Fang Prime".into()),
+                false,
             ),
         );
         append(

@@ -3270,3 +3270,46 @@ it refines the brief where they disagree. For the next worker pass.
     was deliberately NOT corrected (Seth declined; he
     reconciles stock himself). Details:
     docs/fifty-ninth-pass.md.
+126. **Sixtieth pass: the queue bundle, round 2 (Hunt
+    footer Need-only, burst short-sibling arbitration,
+    Baro border-only pulse, toast gold NEW line, pack
+    dotted-i confusable + Axi C13 seed refresh).** The
+    Hunt footer fallback now takes the first Need part
+    with a deal and omits the footer entirely when no
+    Need part has one (Kompressa Prime now reads
+    "▸ Lith K12 · Radiant"). The burst arbitrates
+    short/long sibling holds per frame (both held ->
+    LONG; short-only with a garbled long-token witness
+    in the cross-read union -> refuse the frame) and
+    across the burst (any long hold upgrades a later
+    short pick, same-card scoped; two different long
+    siblings is a miss; a short name's own token never
+    self-witnesses), so the Nov 5 Voruna case credits
+    "Voruna Prime Neuroptics Blueprint" while true
+    short Blueprint picks still credit. The Baro pill
+    pulse animates `border-color` (line <-> gold) only,
+    no `opacity`. The toast gains a gold "NEW" first
+    line when the credited part's pre-credit state was
+    Need (any needed copy, 1/2 or 2/2), read before
+    the stock increment and degrading to no-NEW on
+    unreadable inputs. The pack side has two root
+    causes: "Axi C13" was missing from the baked
+    relic seed entirely (new in Hotfix 44.1.3, Oct
+    26/27; seed last updated Oct 22 — the matcher tied
+    0.857/0.857 with margin 0 and refused), so the
+    seed was refreshed via `fracker --bake-relics`
+    (+Axi C13, drop-rate percentages on 14 relics);
+    and ('!','i') joined the non-metric `confusable`
+    pairs only, lifting "Ax! C13" to score 1.0
+    (margin 0.143 over Axi C18/C11 at 0.857) while
+    the metric closure — and the radius decoder's
+    disjointness guarantee over it — is untouched
+    (pinned: `levenshtein_confusable_metric("ax!",
+    "axi") == 1`). The B-code boundary is unchanged
+    ("Axi C1B" still holds C18). Pack cross-read /
+    cross-frame arbitration was deliberately left out:
+    first-proven-wins would be a guess and majority
+    voting cannot fix a stable OCR error, and there
+    is no reproducing case to validate against; the
+    structured-parsing follow-up owns that question.
+    Details: docs/sixtieth-pass.md.
