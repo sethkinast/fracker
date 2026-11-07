@@ -523,7 +523,7 @@ const SEARCH_OVERLAY_SHELL: &str = r#"<div id="search-overlay" hidden>
 /// #398496, CC0 — see docs/fifty-first-pass.md).
 const TOAST_SHELL: &str = r#"<div id="toast" hidden>
 <div class="ticon" id="toast-icon"></div>
-<div class="tbody"><div class="tk">Relic Cracked</div><div class="tp" id="toast-part"></div></div>
+<div class="tbody"><div class="tn" id="toast-new" hidden>NEW</div><div class="tk">Relic Cracked</div><div class="tp" id="toast-part"></div></div>
 <button class="tbtn" id="toast-cancel" type="button">Cancel</button>
 </div>
 <audio id="credit-chime" src="/chime.mp3" preload="auto"></audio>
@@ -606,6 +606,13 @@ const TOAST_JS: &str = r#"
       icon.appendChild(mono);
     }
     document.getElementById("toast-part").textContent = b.getAttribute("data-part") || "";
+    // Sixtieth pass: the gold NEW line leads the toast — first
+    // in the body, ahead of the kicker — only when the beacon
+    // says the credited part was needed pre-credit (data-new).
+    // Duplicates, non-goal parts, and pre-pass records carry no
+    // attribute and show no NEW line. Hidden by default.
+    var nw = document.getElementById("toast-new");
+    if (nw) { nw.hidden = !b.getAttribute("data-new"); }
     t.hidden = false;
     requestAnimationFrame(function () { t.classList.add("show"); });
     var chime = document.getElementById("credit-chime");
@@ -1367,6 +1374,12 @@ fn hunt_card_html(
     } else if let Some(d) = g
         .parts
         .iter()
+        // Sixtieth pass: the footer recommends a relic for a part
+        // still NEEDED — a Have (or ⍻-held) part never drives it,
+        // even when it carries the better deal (pass-44
+        // "PartState::Need only" rule). No Need part with a deal:
+        // no footer at all, including on fully-ready cards.
+        .filter(|p| p.state == crate::plan::PartState::Need)
         .filter_map(|p| p.deal.as_ref())
         .next()
     {
@@ -2040,8 +2053,17 @@ fn log_html(ctx: &RenderContext<'_>) -> String {
         let epoch = chrono::DateTime::parse_from_rfc3339(&credit.ts)
             .map(|t| t.timestamp())
             .unwrap_or(0);
+        // Sixtieth pass: the beacon carries the credit's
+        // pre-credit Need flag as data-new — the toast's gold
+        // NEW line shows only for a needed part. Older records
+        // (no flag) render no attribute: no NEW line.
+        let new_attr = if credit.was_needed == Some(true) {
+            " data-new=\"1\""
+        } else {
+            ""
+        };
         h.push_str(&format!(
-            "<span id=\"credit-beacon\" hidden data-id=\"{}\" data-part=\"{}\" data-icon=\"{}\" data-initial=\"{}\" data-ts=\"{}\"></span>\n",
+            "<span id=\"credit-beacon\" hidden data-id=\"{}\" data-part=\"{}\" data-icon=\"{}\" data-initial=\"{}\" data-ts=\"{}\"{}></span>\n",
             esc(&format!(
                 "{}|{}",
                 credit.ts,
@@ -2051,6 +2073,7 @@ fn log_html(ctx: &RenderContext<'_>) -> String {
             esc(&icon),
             esc(&initial.to_string()),
             epoch,
+            new_attr,
         ));
     }
     // The pack beacon (fifty-third pass): the newest
@@ -2166,7 +2189,7 @@ input[type=checkbox]:checked::after{content:"";width:9px;height:5px;border:2px s
 @media(max-width:860px){.g2,.g2.b,.g3{grid-template-columns:1fr}.lg-note{margin-left:0}}
 
 /* Fracker extensions: states the static mock cannot show. */
-@keyframes baro-pulse{0%,100%{opacity:1}50%{opacity:.5}}
+@keyframes baro-pulse{0%,100%{border-color:var(--line)}50%{border-color:var(--gold)}}
 .pills span.baro-live{animation:baro-pulse 1.6s ease-in-out infinite}
 .row.done{opacity:.45}.row.done b,.row.done .tm{text-decoration:line-through}
 .row.dead .rl,.row.dead>div{opacity:.55;text-decoration:line-through}
@@ -2230,6 +2253,8 @@ label.row{cursor:pointer}
 #toast .ticon img{width:128px;height:128px;object-fit:contain;display:block}
 #toast .tmono{font:700 64px Rajdhani,sans-serif;color:var(--gold)}
 #toast .tbody{padding:20px 28px 20px 24px;display:flex;flex-direction:column;justify-content:center;gap:8px}
+#toast .tn{font:600 15px Rajdhani,sans-serif;letter-spacing:.24em;color:var(--gold)}
+#toast .tn[hidden]{display:none}
 #toast .tk{font:600 15px Rajdhani,sans-serif;letter-spacing:.24em;text-transform:uppercase;color:var(--cy)}
 #toast .tp{font:700 27px Rajdhani,sans-serif;color:var(--tx);white-space:nowrap}
 #toast .tbtn{position:absolute;right:14px;bottom:10px;pointer-events:auto;background:none;border:0;padding:2px 4px;font:600 12px Rajdhani,sans-serif;letter-spacing:.08em;color:var(--mut);cursor:pointer}
@@ -2662,6 +2687,7 @@ mod tests {
                 "2026-10-28T05:02:00Z".into(),
                 "Voruna Prime Chassis Blueprint".into(),
                 Some("Voruna Prime".into()),
+                true,
             ),
         ];
         ctx.events = &events;
@@ -2697,6 +2723,12 @@ mod tests {
         assert!(
             p5.contains(&format!("data-ts=\"{epoch}\"")),
             "beacon epoch: {p5}"
+        );
+        // Sixtieth pass: the needed credit's beacon carries
+        // data-new for the toast's NEW line.
+        assert!(
+            p5.contains("data-new=\"1\""),
+            "beacon carries data-new on a needed credit: {p5}"
         );
         // The toast shell + chime ride the page shell, and the
         // spec's CSS pins hold.
@@ -2779,6 +2811,79 @@ mod tests {
             !pack_script.contains("cancel-credit"),
             "pack chimes carry no cancel"
         );
+    }
+
+    /// Sixtieth pass, item 4: the acquisition toast gains a gold
+    /// NEW line, FIRST in the toast body (ahead of the "Relic
+    /// Cracked" kicker), when the credited part was needed
+    /// pre-credit. The beacon carries the flag as data-new; the
+    /// script shows the line only from it; a duplicate (not
+    /// needed) credit carries no attribute and shows no NEW.
+    /// Cancel behaviour is unchanged.
+    #[test]
+    fn toast_shows_gold_new_line_first_only_for_a_needed_credit() {
+        let t = crate::tuning::Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        // Shell: the NEW element leads the toast body, hidden
+        // by default, in gold.
+        let html = render_plan(&Plan::default(), &empty_ctx(&world, &t, &weekly, &proven, &icons, &cats, None));
+        assert!(
+            html.contains("<div class=\"tbody\"><div class=\"tn\" id=\"toast-new\" hidden>NEW</div><div class=\"tk\">Relic Cracked</div>"),
+            "NEW is the first line of the toast body, ahead of the kicker"
+        );
+        assert!(
+            html.contains("#toast .tn{font:600 15px Rajdhani,sans-serif;letter-spacing:.24em;color:var(--gold)}"),
+            "NEW line is gold"
+        );
+        // Script: shown only from the beacon's data-new.
+        assert!(
+            html.contains("nw.hidden = !b.getAttribute(\"data-new\")"),
+            "the script toggles NEW from data-new"
+        );
+        // Beacon: data-new on a needed credit, absent on a
+        // duplicate credit. (Scoped to the beacon span itself:
+        // the p5 slice runs to end of page and includes the
+        // toast script, which mentions data-new.)
+        fn beacon_of(p5: &str) -> &str {
+            let s = p5.find("<span id=\"credit-beacon\"").expect("beacon");
+            let e = p5[s..].find('>').map(|i| s + i + 1).unwrap();
+            &p5[s..e]
+        }
+        let mk_events = |needed: bool| {
+            vec![crate::events::EventRecord::credit(
+                "2026-10-28T05:02:00Z".into(),
+                "Voruna Prime Chassis Blueprint".into(),
+                Some("Voruna Prime".into()),
+                needed,
+            )]
+        };
+        let mut ctx = empty_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
+        let events = mk_events(true);
+        ctx.events = &events;
+        let html_needed = render_plan(&Plan::default(), &ctx);
+        let p5 = page(&html_needed, "p5");
+        assert!(
+            beacon_of(p5).contains("data-new=\"1\""),
+            "needed credit: beacon carries data-new: {p5}"
+        );
+        let events = mk_events(false);
+        ctx.events = &events;
+        let html_dup = render_plan(&Plan::default(), &ctx);
+        let p5 = page(&html_dup, "p5");
+        assert!(
+            !beacon_of(p5).contains("data-new"),
+            "duplicate credit: no data-new, no NEW line: {p5}"
+        );
+        // Cancel behaviour unchanged.
+        assert!(
+            html.contains("fetch(\"/cancel-credit\""),
+            "Cancel still posts to the cancel route"
+        );
+        assert!(html.contains("}, 6000);"), "toast lifetime unchanged (~6 s auto-dismiss)");
     }
 
     /// Fifty-third pass: the pack pair renders in the Log,
@@ -2963,7 +3068,10 @@ mod tests {
 
     /// Addendum #85: the Baro pill pulses only while a trader window
     /// is live (plan.baro present); the pulse keyframes ship in the
-    /// style block either way.
+    /// style block either way. Sixtieth pass: the pulse flashes
+    /// the pill's BORDER only (border-color between the resting
+    /// line and gold) — background and text stay steady, so the
+    /// pill never fades as a whole.
     #[test]
     fn baro_pill_pulses_only_while_the_trader_is_live() {
         let t = crate::tuning::Tuning::for_tests();
@@ -2985,6 +3093,23 @@ mod tests {
         assert!(html.contains("class=\"baro-live\""), "live pill carries the pulse class");
         assert!(html.contains("@keyframes baro-pulse"), "pulse keyframes in the style block");
         assert!(html.contains("Leaves in 18h24m"), "live pill shows the leave countdown");
+        // The keyframes animate border-color only: the border
+        // flashes gold against the resting line while the pill's
+        // background and text hold still.
+        let kf_start = html.find("@keyframes baro-pulse").expect("keyframes");
+        let kf_line = &html[kf_start..html[kf_start..].find('\n').map(|i| kf_start + i).unwrap_or(html.len())];
+        assert!(
+            kf_line.contains("border-color:var(--line)") && kf_line.contains("border-color:var(--gold)"),
+            "pulse runs the border between the resting line and gold: {kf_line}"
+        );
+        assert!(
+            !kf_line.contains("opacity"),
+            "pulse never fades the whole pill: {kf_line}"
+        );
+        assert!(
+            html.contains(".pills span.baro-live{animation:baro-pulse 1.6s ease-in-out infinite}"),
+            "same 1.6s ease-in-out infinite timing"
+        );
         let idle = render_plan(&Plan::default(), &ctx);
         assert!(
             !idle.contains("class=\"baro-live\""),
@@ -3287,6 +3412,133 @@ mod tests {
                 + p2.matches("<div class=\"r ").count(),
             5,
             "part rows unchanged (1 + 4): {p2}"
+        );
+    }
+
+    /// Sixtieth pass, item 1: the Hunt footer's fallback never
+    /// recommends a relic for a part already held. Kompressa
+    /// Prime, 2/3 — Blueprint Have (Lith V11 deal), Barrel Need
+    /// (Lith K12 deal), Receiver Have — must footer the Barrel's
+    /// relic, not the owned Blueprint's.
+    #[test]
+    fn hunt_footer_recommends_a_needed_part_never_an_owned_one() {
+        let t = crate::tuning::Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let ctx = empty_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
+        let deal = |relic: &str, refinement: &str| {
+            Some(PartDeal {
+                relic: relic.to_owned(),
+                vaulted: false,
+                refinement: refinement.to_owned(),
+                chance: 10.0,
+                expected: 10.0,
+                owned: None,
+                radiant: None,
+                source_tier: crate::plan::SourceTier::Unvaulted,
+            })
+        };
+        let row = |name: &str, state: PartState, held: u32, d: Option<PartDeal>| PartRow {
+            name: name.to_owned(),
+            state,
+            held,
+            required: 1,
+            relics: vec![],
+            best_odds: String::new(),
+            rarity: Rarity::Rare,
+            deal: d,
+        };
+        let mut g = goal("Kompressa Prime", "Kompressa Prime Blueprint", false, false);
+        g.parts = vec![
+            row(
+                "Kompressa Prime Blueprint",
+                PartState::Have,
+                1,
+                deal("Lith V11", "Intact"),
+            ),
+            row(
+                "Kompressa Prime Barrel",
+                PartState::Need,
+                0,
+                deal("Lith K12", "Radiant"),
+            ),
+            row("Kompressa Prime Receiver", PartState::Have, 1, None),
+        ];
+        g.parts_have = 2;
+        g.parts_total = 3;
+        let plan = Plan {
+            goals: vec![g],
+            ..Default::default()
+        };
+        let html = render_plan(&plan, &ctx);
+        let p2 = page(&html, "p2");
+        // The footer line (▸ <b>…) names the Need part's relic;
+        // the owned Blueprint's relic appears only on its own
+        // part row, never in a footer.
+        assert!(
+            p2.contains("▸ <b>Lith K12</b> · Radiant"),
+            "footer recommends the needed Barrel's relic: {p2}"
+        );
+        assert!(
+            !p2.contains("▸ <b>Lith V11</b>"),
+            "owned Blueprint's relic never drives the footer: {p2}"
+        );
+    }
+
+    /// Sixtieth pass, item 1: a fully-ready card — every part
+    /// held, deals or not — renders no footer at all.
+    #[test]
+    fn fully_ready_hunt_card_renders_no_footer() {
+        let t = crate::tuning::Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let ctx = empty_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
+        let deal = |relic: &str| {
+            Some(PartDeal {
+                relic: relic.to_owned(),
+                vaulted: false,
+                refinement: "Intact".to_owned(),
+                chance: 10.0,
+                expected: 10.0,
+                owned: None,
+                radiant: None,
+                source_tier: crate::plan::SourceTier::Unvaulted,
+            })
+        };
+        let row = |name: &str, d: Option<PartDeal>| PartRow {
+            name: name.to_owned(),
+            state: PartState::Have,
+            held: 1,
+            required: 1,
+            relics: vec![],
+            best_odds: String::new(),
+            rarity: Rarity::Rare,
+            deal: d,
+        };
+        let mut g = goal("Kompressa Prime", "Kompressa Prime Blueprint", false, false);
+        g.parts = vec![
+            row("Kompressa Prime Blueprint", deal("Lith V11")),
+            row("Kompressa Prime Barrel", deal("Lith K12")),
+            row("Kompressa Prime Receiver", None),
+        ];
+        g.parts_have = 3;
+        g.parts_total = 3;
+        g.ready = true;
+        let plan = Plan {
+            goals: vec![g],
+            ..Default::default()
+        };
+        let html = render_plan(&plan, &ctx);
+        let p2 = page(&html, "p2");
+        assert!(
+            !p2.contains("<div class=\"gf\">"),
+            "no footer on a fully-ready card: {p2}"
         );
     }
 
