@@ -2209,6 +2209,52 @@ impl Universe {
         None
     }
 
+    /// The LONG siblings of `name` in this universe (sixtieth
+    /// pass): names whose tokens strictly contain `name`'s
+    /// tokens in order, with >=1 token inserted — the sibling
+    /// pairs the burst arbitration reasons over ("Voruna Prime
+    /// Blueprint" vs "Voruna Prime Neuroptics Blueprint").
+    /// Empty when no longer name in the universe is built from
+    /// this name plus inserted tokens.
+    pub fn long_siblings(&self, name: &str) -> Vec<&str> {
+        self.names
+            .iter()
+            .filter(|n| is_strict_token_superset(name, n))
+            .map(|n| n.as_str())
+            .collect()
+    }
+
+    /// The long sibling of `short` witnessed by the union of
+    /// the reads' tokens (sixtieth pass): a long sibling whose
+    /// inserted token(s) appear in the reads within confusable
+    /// distance <= 2 — the garbled "Uroptics" for "Neuroptics"
+    /// shape from the Nov 5 burst, where the production engine
+    /// dropped the discriminative token from the holding read
+    /// but the other read still carried it, garbled. `None`
+    /// when no long sibling is witnessed: a clean short read
+    /// holds the short name (true-short preservation).
+    ///
+    /// A read token that exactly equals a token of the held
+    /// short name is never a witness: it is explained by the
+    /// short name itself. Without that exclusion a duplicated
+    /// token — long "A B B" against short "A B" — would
+    /// self-witness on every true short read.
+    pub fn long_sibling_witnessed(&self, short: &str, reads: &[&str]) -> Option<String> {
+        let short_toks = folded_name_tokens(short);
+        let union: Vec<String> = reads.iter().flat_map(|r| cleaned_read_tokens(r)).collect();
+        for long in self.long_siblings(short) {
+            for extra in superset_extra_tokens(short, long) {
+                if union.iter().any(|tok| {
+                    !short_toks.iter().any(|st| st == tok)
+                        && levenshtein_confusable_bounded(tok, &extra, 2) <= 2
+                }) {
+                    return Some(long.to_owned());
+                }
+            }
+        }
+        None
+    }
+
     /// The candidate's discriminative tokens (its head — the only
     /// tokens that distinguish it from its suffix-class siblings),
     /// or `None` for a name outside this universe. Diagnostics and
@@ -2491,6 +2537,70 @@ fn strict_exact_subset(read_toks: &[String], cand_toks: &[String]) -> bool {
         }
     }
     true
+}
+
+/// A name's tokens: folded (lowercase, whitespace-normalised)
+/// and squashed to alphanumerics, in order. The shared token
+/// form for the sibling relations below.
+fn folded_name_tokens(name: &str) -> Vec<String> {
+    fold(name)
+        .split(' ')
+        .filter(|t| !t.is_empty())
+        .map(squash_token)
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+/// The tokens of `long_toks` left unmatched by a left-to-right
+/// subsequence alignment of `short_toks` inside them — the
+/// inserted tokens, in order. Empty when `short_toks` is not a
+/// subsequence of `long_toks` (greedy leftmost matching finds a
+/// subsequence whenever one exists). The alignment consumes the
+/// FIRST occurrence of each short token, so with duplicated
+/// tokens the extras are the unmatched copies.
+fn extra_tokens(short_toks: &[String], long_toks: &[String]) -> Vec<String> {
+    let mut extras = Vec::new();
+    let mut j = 0;
+    for lt in long_toks {
+        if j < short_toks.len() && *lt == short_toks[j] {
+            j += 1;
+        } else {
+            extras.push(lt.clone());
+        }
+    }
+    if j == short_toks.len() {
+        extras
+    } else {
+        Vec::new()
+    }
+}
+
+/// Is `long` a STRICT TOKEN-SUPERSET sibling of `short`
+/// (sixtieth pass): `short`'s tokens appear in order inside
+/// `long`'s, with >=1 token inserted — "Voruna Prime
+/// Blueprint" inside "Voruna Prime Neuroptics Blueprint".
+/// The relation the burst arbitration reasons over; it is
+/// purely token-level, so [`crate::reward::select_burst_pick`]
+/// can apply it to held names without a universe in hand.
+pub fn is_strict_token_superset(short: &str, long: &str) -> bool {
+    let s = folded_name_tokens(short);
+    let l = folded_name_tokens(long);
+    !s.is_empty() && l.len() > s.len() && !extra_tokens(&s, &l).is_empty()
+}
+
+/// The inserted tokens distinguishing a strict token-superset
+/// sibling from its short name, in order — the long name's
+/// discriminative tokens for the arbitration ("neuroptics"
+/// for "Voruna Prime Neuroptics Blueprint" against "Voruna
+/// Prime Blueprint"). Empty when the pair is not a sibling
+/// pair.
+pub fn superset_extra_tokens(short: &str, long: &str) -> Vec<String> {
+    let s = folded_name_tokens(short);
+    let l = folded_name_tokens(long);
+    if s.is_empty() || l.len() <= s.len() {
+        return Vec::new();
+    }
+    extra_tokens(&s, &l)
 }
 
 /// The UI labels relic cells "Axi A1 Relic"; the universe stores "Axi A1".
@@ -6388,6 +6498,101 @@ mod tests {
             ["lex"]
         );
         assert!(u.discriminative_tokens_of("Not A Real Item").is_none());
+    }
+
+    #[test]
+    fn strict_token_superset_sibling_relation() {
+        // Sixtieth pass: the sibling relation the burst
+        // arbitration reasons over — tokens in order, >=1
+        // inserted. Order matters (a shuffled long name is no
+        // sibling), and the short name must be strictly
+        // shorter.
+        assert!(is_strict_token_superset(
+            "Voruna Prime Blueprint",
+            "Voruna Prime Neuroptics Blueprint"
+        ));
+        assert!(is_strict_token_superset(
+            "Voruna Prime Blueprint",
+            "Voruna Prime Chassis Blueprint"
+        ));
+        assert!(!is_strict_token_superset(
+            "Voruna Prime Neuroptics Blueprint",
+            "Voruna Prime Blueprint"
+        ));
+        assert!(!is_strict_token_superset(
+            "Voruna Prime Blueprint",
+            "Voruna Prime Blueprint"
+        ));
+        assert!(!is_strict_token_superset(
+            "Voruna Prime Blueprint",
+            "Neuroptics Blueprint Voruna Prime"
+        ));
+        assert!(!is_strict_token_superset(
+            "Voruna Prime Blueprint",
+            "Saryn Prime Systems Blueprint"
+        ));
+        assert_eq!(
+            superset_extra_tokens(
+                "Voruna Prime Blueprint",
+                "Voruna Prime Neuroptics Blueprint"
+            ),
+            vec!["neuroptics".to_owned()]
+        );
+        assert!(superset_extra_tokens(
+            "Voruna Prime Blueprint",
+            "Saryn Prime Systems Blueprint"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn long_sibling_witnessed_sees_the_garbled_token() {
+        // Sixtieth pass: the Nov 5 shape — the holding read
+        // dropped "Neuroptics", the other read carries it
+        // garbled as "Uroptics" (confusable distance 2).
+        let u = Universe::from_names(&[
+            "Voruna Prime Blueprint".to_owned(),
+            "Voruna Prime Neuroptics Blueprint".to_owned(),
+            "Voruna Prime Chassis Blueprint".to_owned(),
+        ]);
+        assert_eq!(
+            u.long_sibling_witnessed(
+                "Voruna Prime Blueprint",
+                &["Voruna Prime Blueprint", "Voruna a. Uroptics ueprint"]
+            ),
+            Some("Voruna Prime Neuroptics Blueprint".to_owned())
+        );
+        // An exact witness counts too.
+        assert_eq!(
+            u.long_sibling_witnessed(
+                "Voruna Prime Blueprint",
+                &["Voruna Prime Blueprint", "Voruna Prime Neuroptics Blueprint"]
+            ),
+            Some("Voruna Prime Neuroptics Blueprint".to_owned())
+        );
+        // True-short preservation: clean short reads witness
+        // nothing — no long hold anywhere, no garbled token.
+        assert_eq!(
+            u.long_sibling_witnessed(
+                "Voruna Prime Blueprint",
+                &["Voruna Prime Blueprint", "Voruna Prime Blueprint"]
+            ),
+            None
+        );
+        // The other long sibling is not witnessed by the
+        // neuroptics garble either: "uroptics" sits far from
+        // "chassis".
+        assert_eq!(
+            u.long_siblings("Voruna Prime Blueprint"),
+            vec![
+                "Voruna Prime Neuroptics Blueprint",
+                "Voruna Prime Chassis Blueprint"
+            ]
+        );
+        // A token explained exactly by the short name itself
+        // never witnesses: long "A B B" against short "A B".
+        let dup = Universe::from_names(&["A B".to_owned(), "A B B".to_owned()]);
+        assert_eq!(dup.long_sibling_witnessed("A B", &["A B", "A B"]), None);
     }
 
     #[test]

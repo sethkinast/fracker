@@ -548,10 +548,31 @@ fn read_bordered_name(
     // the standard discipline and no read holds a DIFFERENT
     // name; two holds that disagree are an active
     // contradiction and refuse.
+    //
+    // Sixtieth pass, short-sibling arbitration: a read that
+    // drops a token ("Voruna Prime Blueprint" for "Voruna
+    // Prime Neuroptics Blueprint") scores 1.0 against the
+    // short sibling and clears the margin over the long name
+    // (0.333 over MATCH_MARGIN 0.10), so the discipline alone
+    // holds the WRONG name confidently — the Clause-2
+    // strict-subset guard is one-directional and cannot see
+    // it. Two rules, both refusing rather than guessing:
+    // (1) when the two reads hold a short name and its long
+    // sibling, the frame holds the LONG name; (2) when only
+    // the short name is held, the union of the two reads'
+    // tokens is checked for the long sibling's discriminative
+    // token(s) within confusable distance <= 2 — a garbled
+    // witness ("Uroptics") refuses the short hold for this
+    // frame. A clean short read, with no witness anywhere,
+    // still holds the short name: a true short pick reads
+    // identically to a truncated long read, so no guard may
+    // use the single read alone.
     let mut held: Vec<String> = Vec::new();
+    let mut reads: Vec<String> = Vec::new();
     let mut detail = String::new();
     for psm in [6, 11] {
         let read = engine.read_text(frame, region, psm, 4);
+        reads.push(read.clone());
         match parts.best_match_margin(&read) {
             Some((name, score, second))
                 if score >= NAME_MIN_SCORE && score - second >= MATCH_MARGIN =>
@@ -573,12 +594,39 @@ fn read_bordered_name(
             }
         }
     }
+    if held.len() == 1 {
+        let name = held.pop().unwrap();
+        let read_refs: Vec<&str> = reads.iter().map(String::as_str).collect();
+        if let Some(long) = parts.long_sibling_witnessed(&name, &read_refs) {
+            return Err(Miss::NameNoMatch {
+                detail: format!(
+                    "short-sibling arbitration: {name} held but the reads witness the long sibling {long}; refusing the short hold rather than crediting it"
+                ),
+            });
+        }
+        return Ok(name);
+    }
     match held.len() {
-        1 => Ok(held.pop().unwrap()),
         0 => Err(Miss::NameNoMatch { detail }),
-        _ => Err(Miss::NameNoMatch {
-            detail: format!("reads disagree: {} vs {}", held[0], held[1]),
-        }),
+        _ => {
+            // Two holds that disagree — unless they are a
+            // short/long sibling pair, in which case the frame
+            // holds the LONG name (rule 1 above): the reads
+            // agree on the card, one of them just dropped the
+            // discriminative token.
+            if held.len() == 2 {
+                let (a, b) = (&held[0], &held[1]);
+                if crate::ocr::is_strict_token_superset(a, b) {
+                    return Ok(b.clone());
+                }
+                if crate::ocr::is_strict_token_superset(b, a) {
+                    return Ok(a.clone());
+                }
+            }
+            Err(Miss::NameNoMatch {
+                detail: format!("reads disagree: {} vs {}", held[0], held[1]),
+            })
+        }
     }
 }
 
@@ -635,6 +683,14 @@ pub enum BurstVerdict {
 /// classifier, the border floor + margin, and the name
 /// discipline.
 ///
+/// Sixtieth pass, burst short-sibling arbitration: when any
+/// frame in the burst holds a LONG sibling of the latest
+/// holding frame's name (same card — same slot, or slot
+/// evidence absent), the pick is the LONG name: an early
+/// frame read the full name and the latest only the short
+/// one, the dropped-token shape. Two different long siblings
+/// is a contradiction and misses rather than guessing.
+///
 /// When nothing clears, the miss names the CLOSEST
 /// attempt: a frame that reached name matching outranks
 /// one that only failed the border gate, which outranks
@@ -662,9 +718,54 @@ pub fn select_burst_pick(frames: &[BurstFrame]) -> BurstVerdict {
                 }
             }
         }
+        // Sixtieth pass, burst short-sibling arbitration: the
+        // pick is the latest holding frame — except when some
+        // frame in the burst holds a LONG sibling of the pick
+        // name (the dropped-token shape: an early frame read
+        // the full name, the latest only the short name), in
+        // which case the pick is the LONG name. A wrong credit
+        // is much worse than a miss, and the long hold is
+        // positive evidence the card is the long item.
+        //
+        // Same-card scope: a long hold on a KNOWN-DIFFERENT
+        // slot is a different card's name, not evidence about
+        // the picked card — it never upgrades the pick (the
+        // void rule already treats a different slot as a
+        // different card). Missing slot evidence never blocks
+        // the upgrade: holding frames always carry a slot in
+        // production, so the unscoped case only arises in
+        // tests built without it. Two DIFFERENT long siblings
+        // held anywhere is a contradiction, not a pick: miss
+        // rather than guess between them.
+        let pick_name = f.outcome.clone().unwrap();
+        let mut longs: Vec<String> = Vec::new();
+        for other in frames.iter() {
+            if let Ok(name) = &other.outcome {
+                if crate::ocr::is_strict_token_superset(&pick_name, name)
+                    && !longs.iter().any(|l| l == name)
+                    && (f.border_slot.is_none()
+                        || other.border_slot.is_none()
+                        || other.border_slot == f.border_slot)
+                {
+                    longs.push(name.clone());
+                }
+            }
+        }
+        let name = match longs.len() {
+            0 => pick_name,
+            1 => longs.pop().unwrap(),
+            _ => {
+                return BurstVerdict::Miss(format!(
+                    "burst pick ambiguous: the T+{} pick holds {} but frames also hold long siblings {}; no credit",
+                    f.offset_secs,
+                    pick_name,
+                    longs.join(", ")
+                ));
+            }
+        };
         return BurstVerdict::Pick {
             offset_secs: f.offset_secs,
-            name: f.outcome.clone().unwrap(),
+            name,
         };
     }
     // Closest name-tier miss: the latest frame that had a
@@ -1074,6 +1175,55 @@ mod tests {
                 "Cedo Prime Stock".to_owned(),
             ],
         }
+    }
+
+    /// Engine scripted by (slot, psm): each slot's name band
+    /// returns one text under PSM 6 and another under PSM 11
+    /// (sixtieth pass: the two reads of a frame can disagree,
+    /// and the dropped-token shape lives in that disagreement).
+    struct PsmScriptedEngine {
+        bands6: [String; SLOTS],
+        bands11: [String; SLOTS],
+    }
+
+    impl OcrEngine for PsmScriptedEngine {
+        fn name(&self) -> &str {
+            "psm-scripted"
+        }
+        fn ocr_cell(&self, _cell: &GrayImage) -> OcrRead {
+            OcrRead::empty()
+        }
+        fn read_text(
+            &self,
+            image: &GrayImage,
+            region: [f32; 4],
+            psm: u32,
+            _upscale: u32,
+        ) -> String {
+            let bands = match psm {
+                6 => &self.bands6,
+                11 => &self.bands11,
+                _ => return String::new(),
+            };
+            for slot in 0..SLOTS {
+                if region == name_band_region(image.width, image.height, slot) {
+                    return bands[slot].clone();
+                }
+            }
+            String::new()
+        }
+    }
+
+    fn voruna_universe() -> Universe {
+        Universe::from_names(&[
+            "Voruna Prime Blueprint".to_owned(),
+            "Voruna Prime Neuroptics Blueprint".to_owned(),
+            "Voruna Prime Chassis Blueprint".to_owned(),
+            "Voruna Prime Systems Blueprint".to_owned(),
+            "Saryn Prime Systems Blueprint".to_owned(),
+            "Braton Prime Blueprint".to_owned(),
+            "Bronco Prime Receiver".to_owned(),
+        ])
     }
 
     #[test]
@@ -1616,6 +1766,215 @@ mod tests {
             panic!("expected a miss");
         };
         assert_eq!(miss_reason_class(&why), "no reward screen");
+    }
+
+    // -- Short-sibling arbitration (sixtieth pass) --------------
+
+    #[test]
+    fn frame_clean_short_reads_on_both_psms_hold_the_short_name() {
+        // True-short preservation, per-frame: both reads carry
+        // only the short name and no read witnesses the extra
+        // token, so the short name still credits — a true
+        // Blueprint pick must not become a miss.
+        let frame = synthetic_frame(&[0], true);
+        let engine = PsmScriptedEngine {
+            bands6: [
+                "Voruna Prime Blueprint".to_owned(),
+                "Saryn Prime Systems Blueprint".to_owned(),
+                "Braton Prime Blueprint".to_owned(),
+                "Bronco Prime Receiver".to_owned(),
+            ],
+            bands11: [
+                "Voruna Prime Blueprint".to_owned(),
+                "Saryn Prime Systems Blueprint".to_owned(),
+                "Braton Prime Blueprint".to_owned(),
+                "Bronco Prime Receiver".to_owned(),
+            ],
+        };
+        assert_eq!(
+            detect_pick(&engine, &frame, &voruna_universe()),
+            Ok("Voruna Prime Blueprint".to_owned())
+        );
+    }
+
+    #[test]
+    fn frame_garbled_long_token_in_the_other_read_refuses_the_short_hold() {
+        // The Nov 5 production shape, scripted: one read holds
+        // the short name (dropped "Neuroptics"); the other
+        // read's tokens witness the long token garbled
+        // ("Uroptics" for "Neuroptics", "ueprint" for
+        // "Blueprint" — the real psm11 garble, which itself
+        // scores below the hold discipline). The frame holds
+        // nothing rather than crediting the short name.
+        let frame = synthetic_frame(&[0], true);
+        let engine = PsmScriptedEngine {
+            bands6: [
+                "Voruna Prime Blueprint".to_owned(),
+                "Saryn Prime Systems Blueprint".to_owned(),
+                "Braton Prime Blueprint".to_owned(),
+                "Bronco Prime Receiver".to_owned(),
+            ],
+            bands11: [
+                "Voruna a. Uroptics ueprint".to_owned(),
+                "Saryn Prime Systems Blueprint".to_owned(),
+                "Braton Prime Blueprint".to_owned(),
+                "Bronco Prime Receiver".to_owned(),
+            ],
+        };
+        match detect_pick(&engine, &frame, &voruna_universe()) {
+            Err(Miss::NameNoMatch { detail }) => {
+                assert!(
+                    detail.contains("Voruna Prime Neuroptics Blueprint"),
+                    "detail: {detail}"
+                );
+                assert!(detail.contains("short-sibling"), "detail: {detail}");
+            }
+            other => panic!("a witnessed long token must refuse the short hold, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn frame_split_reads_short_and_long_hold_the_long_name() {
+        // One read holds the full long name, the other only
+        // the short name (dropped token on one read only):
+        // the frame holds the LONG name, not a "reads
+        // disagree" refusal.
+        let frame = synthetic_frame(&[0], true);
+        let engine = PsmScriptedEngine {
+            bands6: [
+                "Voruna Prime Neuroptics Blueprint".to_owned(),
+                "Saryn Prime Systems Blueprint".to_owned(),
+                "Braton Prime Blueprint".to_owned(),
+                "Bronco Prime Receiver".to_owned(),
+            ],
+            bands11: [
+                "Voruna Prime Blueprint".to_owned(),
+                "Saryn Prime Systems Blueprint".to_owned(),
+                "Braton Prime Blueprint".to_owned(),
+                "Bronco Prime Receiver".to_owned(),
+            ],
+        };
+        assert_eq!(
+            detect_pick(&engine, &frame, &voruna_universe()),
+            Ok("Voruna Prime Neuroptics Blueprint".to_owned())
+        );
+    }
+
+    #[test]
+    fn burst_early_long_frame_upgrades_later_short_pick() {
+        // An early frame holds the long sibling and a later
+        // frame holds only the short name — the dropped-token
+        // shape from the Nov 5 burst. The burst credits the
+        // LONG name, at the latest holding frame's offset.
+        let frames = vec![
+            bf_slot(8, Ok("Voruna Prime Neuroptics Blueprint".to_owned()), 0),
+            bf_slot(12, Ok("Voruna Prime Blueprint".to_owned()), 0),
+        ];
+        assert_eq!(
+            select_burst_pick(&frames),
+            BurstVerdict::Pick {
+                offset_secs: 12,
+                name: "Voruna Prime Neuroptics Blueprint".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn burst_long_hold_on_another_slot_does_not_upgrade_the_pick() {
+        // The long hold was a DIFFERENT card's name (slot 1),
+        // so it is not evidence about the picked card (slot
+        // 0): the short pick stands. The void rule only fires
+        // on frames after the pick, so this pre-pick long hold
+        // on another slot must not upgrade through the side
+        // door either.
+        let frames = vec![
+            bf_slot(8, Ok("Voruna Prime Neuroptics Blueprint".to_owned()), 1),
+            bf_slot(12, Ok("Voruna Prime Blueprint".to_owned()), 0),
+        ];
+        assert_eq!(
+            select_burst_pick(&frames),
+            BurstVerdict::Pick {
+                offset_secs: 12,
+                name: "Voruna Prime Blueprint".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn burst_two_different_long_siblings_is_a_miss_not_a_guess() {
+        // Frames hold two different long siblings of the pick
+        // name: a contradiction, not a pick — miss rather than
+        // guess between them.
+        let frames = vec![
+            bf_slot(8, Ok("Voruna Prime Neuroptics Blueprint".to_owned()), 0),
+            bf_slot(10, Ok("Voruna Prime Chassis Blueprint".to_owned()), 0),
+            bf_slot(12, Ok("Voruna Prime Blueprint".to_owned()), 0),
+        ];
+        match select_burst_pick(&frames) {
+            BurstVerdict::Miss(why) => {
+                assert!(why.contains("ambiguous"), "line: {why}");
+                assert_eq!(miss_reason_class(&why), "name not proven");
+            }
+            other => panic!("two long siblings must not resolve to a guess, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn burst_all_short_frames_still_credit_the_short_name() {
+        // True-short preservation, burst-level: no frame or
+        // read in the burst contains any evidence of the extra
+        // token, so the short name still credits.
+        let frames = vec![
+            bf_slot(8, Ok("Voruna Prime Blueprint".to_owned()), 0),
+            bf_slot(12, Ok("Voruna Prime Blueprint".to_owned()), 0),
+            bf_slot(14, Ok("Voruna Prime Blueprint".to_owned()), 0),
+        ];
+        assert_eq!(
+            select_burst_pick(&frames),
+            BurstVerdict::Pick {
+                offset_secs: 14,
+                name: "Voruna Prime Blueprint".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn nov5_voruna_burst_credits_the_long_name() {
+        // Regression fixture: Seth's Nov 5 burst
+        // (reward-1793928846, t0..t14), committed under
+        // fixtures/reward-burst/. Production credited the
+        // short sibling ("Voruna Prime Blueprint") when the
+        // pick was Voruna Prime Neuroptics Blueprint; the
+        // VM's tesseract reads the full name on every frame
+        // from t2 (psm11 garbles it as "Uroptics" throughout),
+        // so the burst must credit the long name here.
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let Some(layout) = crate::ocr::Layout::load_file(&base.join("data/capture/layouts.toml"))
+            .ok()
+            .and_then(|l| l.get("relic").cloned())
+        else {
+            return; // layouts unavailable in this environment
+        };
+        let Some(engine) = crate::ocr::TesseractCliEngine::probe(layout) else {
+            return; // no tesseract in this environment
+        };
+        let mut frames = Vec::new();
+        for t in [0u64, 2, 4, 6, 8, 10, 12, 14] {
+            let rel = format!("fixtures/reward-burst/reward-1793928846-t{t}.png");
+            let Some(frame) = sibling_image(&rel) else {
+                eprintln!("skip voruna burst frame {rel}: absent");
+                return;
+            };
+            frames.push((t, frame));
+        }
+        match detect_burst(&engine, &frames, &voruna_universe()) {
+            BurstVerdict::Pick { name, .. } => {
+                assert_eq!(name, "Voruna Prime Neuroptics Blueprint")
+            }
+            BurstVerdict::Miss(why) => {
+                panic!("nov 5 voruna burst must credit the long name, missed: {why}")
+            }
+        }
     }
 
     #[test]
