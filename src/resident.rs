@@ -874,7 +874,17 @@ async fn reward_grab(
         Ok(Ok(reward::BurstVerdict::Pick {
             offset_secs,
             name,
-        })) => match reward::credit_part(&stock_path, &name) {
+        })) => {
+            // Sixtieth pass: the part's pre-credit Need state —
+            // read BEFORE the increment below, it is what the
+            // toast's NEW line keys on.
+            let was_needed = pre_credit_was_needed(
+                &opts.report.data_dir,
+                &opts.report.cache_dir,
+                &stock_path,
+                &name,
+            );
+            match reward::credit_part(&stock_path, &name) {
             Ok(count) => {
                 log.record(
                     "reward",
@@ -888,12 +898,14 @@ async fn reward_grab(
                         crate::events::now_ts(),
                         name.clone(),
                         parent_gear_for(&opts.report.data_dir, &name),
+                        was_needed,
                     ),
                 );
                 let _ = regen_tx.send(Trigger::Manual);
             }
             Err(e) => log.record("reward", &format!("credit for {name} failed: {e}")),
-        },
+            }
+        }
         Ok(Ok(reward::BurstVerdict::Miss(why))) => {
             log.record("reward", &format!("miss: {why}"));
             crate::events::append(
@@ -951,6 +963,108 @@ fn parent_gear_for(data_dir: &Path, part: &str) -> Option<String> {
     let text = std::fs::read_to_string(data_dir.join("cache/wishlist.json")).ok()?;
     let roster = crate::model::Roster::from_json(&text).ok()?;
     roster.parents_of(part).into_iter().next()
+}
+
+/// Sixtieth pass: the credited part's PRE-credit state, read
+/// BEFORE the stock increment, for the toast's gold NEW line —
+/// true iff the part was PartState::Need at credit time. This
+/// mirrors the planner's part-row rule (plan.rs): wanted
+/// (scrubbed backlog, parent gear not profile-owned), verified
+/// units below the recipe's required count, and not
+/// Seth-asserted (⍻) held. Any input that cannot be read
+/// degrades to "not needed" (no NEW line) rather than a guess:
+/// a missing backlog or roster cannot establish Need, a missing
+/// profile cache just skips the owned prune, a missing
+/// required.toml degrades to all-x1 (the report's own rule).
+/// The owned set comes from the cached profile snapshot — the
+/// same source the report's profile fallback prefers — never a
+/// live fetch in the credit path.
+fn pre_credit_was_needed(
+    data_dir: &Path,
+    cache_dir: &Path,
+    stock_path: &Path,
+    part: &str,
+) -> bool {
+    // Stock BEFORE the increment: verified canonical count and
+    // the unverified (⍻) assertion map.
+    let stock = match std::fs::read_to_string(stock_path)
+        .ok()
+        .and_then(|t| crate::ocr::StockState::from_json(&t).ok())
+    {
+        Some(s) => s,
+        None => return false,
+    };
+    // Roster with required counts.
+    let mut roster = match std::fs::read_to_string(data_dir.join("cache/wishlist.json"))
+        .ok()
+        .and_then(|t| crate::model::Roster::from_json(&t).ok())
+    {
+        Some(r) => r,
+        None => return false,
+    };
+    if let Some(counts) = std::fs::read_to_string(data_dir.join("required.toml"))
+        .ok()
+        .and_then(|t| crate::model::load_required_counts(&t).ok())
+    {
+        roster.apply_required_counts(&counts);
+    }
+    // Required units for this part (1 when the roster doesn't
+    // know it); the first parent is the card grouping's parent,
+    // matching parent_gear_for above.
+    let required = roster
+        .parents_of(part)
+        .into_iter()
+        .next()
+        .and_then(|g| roster.by_name(&g))
+        .and_then(|item| item.parts.iter().find(|p| p.name == part))
+        .map(|p| p.required)
+        .unwrap_or(1)
+        .max(1);
+    // Wants: scrubbed backlog, pruned by profile-owned gear.
+    let wants = match std::fs::read_to_string(data_dir.join("backlog.json"))
+        .ok()
+        .and_then(|t| crate::model::Backlog::from_json(&t).ok())
+    {
+        Some(b) => b.wants(),
+        None => return false,
+    };
+    let wants = match std::fs::read_to_string(data_dir.join("exclusions.toml"))
+        .ok()
+        .and_then(|t| crate::model::UniverseScrub::from_toml(&t).ok())
+    {
+        Some(scrub) => scrub.scrub_wants(&wants),
+        None => wants,
+    };
+    if !wants.iter().any(|w| w == part) {
+        return false;
+    }
+    let owned = std::fs::read_to_string(
+        cache_dir.join(format!("profile-{}.json", crate::report::PROFILE_ACCOUNT_ID)),
+    )
+    .ok()
+    .and_then(|t| crate::fetch::parse_profile(&t).ok())
+    .map(|snap| {
+        crate::fetch::owned_names_from_profile(&snap, &crate::fetch::load_item_names(data_dir))
+    })
+    .unwrap_or_default();
+    if roster
+        .parents_of(part)
+        .iter()
+        .any(|p| owned.names.contains(p))
+    {
+        return false;
+    }
+    // Asserted-held (⍻) is held, not Need — and the credit
+    // verifies it rather than filling a want.
+    if stock.unverified.contains_key(part) {
+        return false;
+    }
+    let verified = stock
+        .canonical_part_counts(&roster)
+        .get(part)
+        .copied()
+        .unwrap_or(0);
+    verified < required
 }
 
 /// Spawn the one-shot pack watch (pass 53; per-cell
@@ -2529,5 +2643,88 @@ mod tests {
         shutdown.trigger();
         handle.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Sixtieth pass, item 4: the pre-credit Need flag the toast's
+    /// NEW line keys on — read before the stock increment, from
+    /// the same inputs the planner's part-row rule uses (scrubbed
+    /// backlog wants, roster + required.toml, pre-credit stock).
+    fn pre_credit_fixture(tag: &str, stock_json: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let base = tmpdir(tag);
+        let data_dir = base.join("data");
+        let cache_dir = base.join("cache");
+        std::fs::create_dir_all(data_dir.join("cache")).unwrap();
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        // Roster: Kompressa (Barrel doubled via required.toml)
+        // and Fang.
+        std::fs::write(
+            data_dir.join("cache/wishlist.json"),
+            r#"[{"name":"Kompressa Prime","vaulted":false,"parts":[{"name":"Kompressa Prime Blueprint"},{"name":"Kompressa Prime Barrel"},{"name":"Kompressa Prime Receiver"}],"type":"weapon"},{"name":"Fang Prime","vaulted":true,"parts":[{"name":"Fang Prime Handle"}],"type":"melee"}]"#,
+        )
+        .unwrap();
+        std::fs::write(
+            data_dir.join("required.toml"),
+            "[required]\n\"Kompressa Prime Barrel\" = 2\n",
+        )
+        .unwrap();
+        std::fs::write(
+            data_dir.join("backlog.json"),
+            r#"{"primes":{"roster":2,"mastered":0,"unmastered":[{"name":"Kompressa Prime","all_parts":["Kompressa Prime Blueprint","Kompressa Prime Barrel","Kompressa Prime Receiver"]},{"name":"Fang Prime","all_parts":["Fang Prime Handle"]}]}}"#,
+        )
+        .unwrap();
+        std::fs::write(data_dir.join("exclusions.toml"), "").unwrap();
+        let stock_path = base.join("stock.json");
+        std::fs::write(&stock_path, stock_json).unwrap();
+        (data_dir, cache_dir, stock_path)
+    }
+
+    #[test]
+    fn pre_credit_was_needed_mirrors_the_planner_part_row_rule() {
+        // Needed, nothing held.
+        let (d, c, s) = pre_credit_fixture("need-empty", r#"{"parts":{}}"#);
+        assert!(pre_credit_was_needed(&d, &c, &s, "Kompressa Prime Barrel"));
+        // Duplicate: held == required (1).
+        let (d, c, s) =
+            pre_credit_fixture("need-dup", r#"{"parts":{"Kompressa Prime Blueprint":1}}"#);
+        assert!(!pre_credit_was_needed(&d, &c, &s, "Kompressa Prime Blueprint"));
+        // Partial multi-unit: 1 of 2 Barrels held — still Need,
+        // so a credit of the second copy is still NEW.
+        let (d, c, s) =
+            pre_credit_fixture("need-partial", r#"{"parts":{"Kompressa Prime Barrel":1}}"#);
+        assert!(pre_credit_was_needed(&d, &c, &s, "Kompressa Prime Barrel"));
+        // Completed multi-unit: 2 of 2 — a further credit is a
+        // duplicate, no NEW.
+        let (d, c, s) =
+            pre_credit_fixture("need-full", r#"{"parts":{"Kompressa Prime Barrel":2}}"#);
+        assert!(!pre_credit_was_needed(&d, &c, &s, "Kompressa Prime Barrel"));
+        // Non-goal part: never wanted, never NEW.
+        let (d, c, s) = pre_credit_fixture("need-unknown", r#"{"parts":{}}"#);
+        assert!(!pre_credit_was_needed(&d, &c, &s, "Cedo Prime Stock"));
+        // Asserted-held (⍻): held in the unverified sense, not
+        // Need — the credit verifies it rather than filling a want.
+        let (d, c, s) = pre_credit_fixture(
+            "need-uv",
+            r#"{"parts":{},"unverified":{"Kompressa Prime Barrel":1}}"#,
+        );
+        assert!(!pre_credit_was_needed(&d, &c, &s, "Kompressa Prime Barrel"));
+    }
+
+    #[test]
+    fn pre_credit_was_needed_skips_parts_of_owned_gear() {
+        let (d, c, s) = pre_credit_fixture("need-owned", r#"{"parts":{}}"#);
+        // Profile cache owns Fang Prime; its Handle want is pruned.
+        std::fs::write(
+            d.join("cache/item-names.json"),
+            r#"{"/Lotus/Weapons/Tenno/Melee/FangPrime/FangPrime":"Fang Prime"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            c.join(format!("profile-{}.json", crate::report::PROFILE_ACCOUNT_ID)),
+            r#"{"Results":[{"DisplayName":"Seth","AccountId":{"$oid":"5420fba23846322173707618"},"PlayerLevel":30,"LoadOutInventory":{"XPInfo":[{"ItemType":"/Lotus/Weapons/Tenno/Melee/FangPrime/FangPrime"}]}}]}"#,
+        )
+        .unwrap();
+        assert!(!pre_credit_was_needed(&d, &c, &s, "Fang Prime Handle"));
+        // Kompressa is not owned: still Need.
+        assert!(pre_credit_was_needed(&d, &c, &s, "Kompressa Prime Barrel"));
     }
 }
