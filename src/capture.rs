@@ -3649,7 +3649,13 @@ mod tests {
         //   Seth's; stock-2's scroll never reached them), and
         //   Axi K2, a bare x1 stock-2 never recorded;
         // - the labelled population is unchanged from pass 43
-        //   (411 stacks at their counts);
+        //   (411 stacks at their counts), plus the pass-60
+        //   additions: Meso I1 Intact x3 (the dotted-i read
+        //   "Meso !1" tied I1/L1 at 0.857 and refused before
+        //   the ('!','i') confusable pair broke the tie toward
+        //   the true 'i') and Axi C13 Intact x2 (the new relic
+        //   Hotfix 44.1.3 added 2026-10-26, now in the refreshed
+        //   relic tables) — 413 stacks at their counts;
         // - "Meso L1" has no tile: the reader names the Meso
         //   C11 [Radiant] cell "Meso L1" in both its settled
         //   appearances (raw "Mesoll Relic [Radiant]"). Pass 45
@@ -3862,16 +3868,18 @@ mod tests {
                 "owned x1 {name} {tier:?} must import at x1"
             );
         }
-        // The labelled population is pass 43's: exactly the
-        // same 411 stacks ever show a label, and each imports
-        // at the count the (unchanged, pass-27) vote machinery
+        // The labelled population is pass 43's plus the two
+        // pass-60 additions named above (Meso I1 Intact x3,
+        // Axi C13 Intact x2): exactly the same 413 stacks ever
+        // show a label, and each imports at the count the
+        // (unchanged, pass-27) vote machinery
         // resolves from its per-frame reads — the mode of the
         // counts its frames voted, ties to the larger. Where
         // the label reads disagree across appearances (Lith
         // C9 reads 14 and 15), the mode is the arbiter, in
         // pass 43 and here alike; the max label is asserted
         // only where the reads agree.
-        assert_eq!(labelled.len(), 411, "labelled stack count changed");
+        assert_eq!(labelled.len(), 413, "labelled stack count changed");
         for ((name, tier), max_label) in &labelled {
             let votes = &relic_votes[&(name.clone(), *tier)];
             let mode = votes
@@ -3939,11 +3947,12 @@ mod tests {
             name_summary.contains("Meso L1") && name_summary.contains("Mesoll"),
             "finalize line must name the refusal: {name_summary}"
         );
-        // Totals reconcile: 411 labelled + the owned x1 list;
-        // the garble pair is gone (505, down from 506).
+        // Totals reconcile: 413 labelled + the owned x1 list;
+        // the garble pair is gone (505 at pass 45, down from
+        // 506), plus the two pass-60 additions (507).
         assert_eq!(
             total_stacks,
-            411 + OWNED_X1.len(),
+            413 + OWNED_X1.len(),
             "import composition changed"
         );
     }
