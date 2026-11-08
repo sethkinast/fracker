@@ -3313,3 +3313,40 @@ it refines the brief where they disagree. For the next worker pass.
     is no reproducing case to validate against; the
     structured-parsing follow-up owns that question.
     Details: docs/sixtieth-pass.md.
+127. **Sixty-first pass: structured parsing as a second
+    voice for relic captions and part names
+    (`Universe::parse_structured`, v0.5.56).** The parser
+    knows the grammar — relic `<Era> <Code>`, part
+    `<Name> Prime <Component> [Blueprint]` — and admits
+    exactly when ONE real name fits the read
+    positionally (non-code tokens <= 1 confusable edit,
+    the discriminative token <= 2, code tokens by
+    letter-plus-digit classes with clean digits matching
+    exactly); a fit with a long sibling is refused, never
+    admitted. It sits alongside the fuzzy matcher, purely
+    additive: a fuzzy hold stands untouched, and a parser
+    proof admits only under the same gates (the hold
+    predicate, plus the token witness for relic captions).
+    A/B over the fixture corpus (tests/ab_pass61.rs):
+    reward frames 13/39 (33.3%) -> 27/39 (69.2%),
+    burst verdicts 2/5 (40.0%) -> 4/5 (80.0%), pack
+    cells 14/14 throughout, false holds 0 on both sides.
+    The baseline's mechanism: correct 1.00 reads refused
+    on MATCH_MARGIN because a same-suffix sibling sits 3
+    edits away ("Voruna Prime Neuroptics Blueprint" over
+    "Garuda Prime Neuroptics Blueprint" at 0.909;
+    "Braton Prime Receiver" over "Burston Prime Receiver"
+    at 0.909) — the pass-60 burst test passed only against
+    its 7-name slice universe; under the real universe
+    the Nov 5 burst misses in v0.5.55. Two boundaries
+    pinned: a B-ending code admits Axi C13 in the real
+    universe because Axi C18 does not exist (no *C18 in
+    any era of the 801-relic seed, vaulted included) while
+    refusing where C18 does exist; and the Nov 7 23:31
+    burst stays a miss — its "Prime" token is destroyed
+    in every read, so no grammar parse exists. The 23:48
+    Caliban burst did not land (the three recovered dirs
+    are 23:26/23:31/23:35), so the pinned Caliban case
+    stays scripted. Known parser limit: Requiem numerals
+    refuse (I fits I, Ii and Iii) and stay with the fuzzy
+    matcher. Details: docs/sixty-first-pass.md.
