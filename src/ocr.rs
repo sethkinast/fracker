@@ -2266,6 +2266,154 @@ impl Universe {
             .map(|i| self.discriminative[i].as_slice())
     }
 
+    /// Structured parse (sixty-first pass): a second voice for
+    /// relic captions and part names, alongside the fuzzy
+    /// matcher — it does NOT replace it. The parser knows the
+    /// SHAPE of the answer, so a garbled token costs almost
+    /// nothing when only one real name fits that shape:
+    ///
+    /// - Relic captions: `<Era> <Code> [Relic]` — Era in
+    ///   {Lith, Meso, Neo, Axi, Requiem}; Code = a letter plus
+    ///   1–2 digits (Requiem has no code). The (Era, Code) pair
+    ///   must exist in this universe.
+    /// - Part names: `<Name> Prime <Component> [Blueprint]` —
+    ///   the read must match a roster name token-for-token,
+    ///   positionally, with equal token counts.
+    ///
+    /// Per-token budgets: every non-code token within
+    /// confusable-Levenshtein distance <= 1, except a token
+    /// that distinguishes the candidate from a strict-subset
+    /// sibling (the discriminative token — "Neuroptics"
+    /// against "Voruna Prime Blueprint") which may sit at
+    /// distance <= 2, the "Uroptics" shape. A code token
+    /// matches by [`code_token_matches`]: its letter by the
+    /// pairwise confusable relation, its digits exactly —
+    /// except a non-digit garble glyph in a digit position,
+    /// which may stand for a digit in its class (B for 3 or
+    /// 8, l/I for 1 or 7, and the rest of the digit-garble
+    /// classes). A clean digit is evidence and matches only
+    /// itself: expanding digits would make a clean "C13"
+    /// refuse against "C18".
+    ///
+    /// Ambiguity is computed EXACTLY: the answer is how many
+    /// REAL names fit the read (whole read plus every
+    /// leading-token trim, as the matcher tries them — icon
+    /// bleed prefixes a read the same way). One fit -> admit.
+    /// Zero -> refuse. Two or more -> refuse.
+    ///
+    /// And the never-guess guard: a fit that HAS a long
+    /// sibling in this universe is refused, not admitted —
+    /// a clean short read ("Voruna Prime Blueprint") fits
+    /// its short name exactly, but the long sibling is a
+    /// real name too, and the read cannot tell them apart.
+    /// Short names stay owned by the fuzzy matcher plus the
+    /// pass-60 burst arbitration; the parser only ever
+    /// admits names with no longer token-superset sibling.
+    /// (That also covers built forms: "Voruna Prime
+    /// Neuroptics" has the "... Blueprint" long sibling, so
+    /// the parser never admits a built form either.)
+    ///
+    /// The parser never touches [`confusable_metric`]: its
+    /// token distances use the pairwise
+    /// [`levenshtein_confusable`] relation, and the code
+    /// matcher uses [`confusable`] directly — the radius
+    /// decoder's disjointness guarantee is untouched.
+    pub fn parse_structured(&self, read: &str) -> Option<String> {
+        let cleaned = strip_tier_label(read);
+        let cleaned = strip_relic_suffix(&cleaned);
+        let tokens: Vec<String> = fold(&cleaned)
+            .split(' ')
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if tokens.is_empty() {
+            return None;
+        }
+        let cand_toks: Vec<Vec<String>> = self
+            .folded
+            .iter()
+            .map(|f| {
+                f.split(' ')
+                    .filter(|t| !t.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .collect();
+        let mut fits: Vec<usize> = Vec::new();
+        for start in 0..tokens.len() {
+            let interp = &tokens[start..];
+            for (i, cand) in cand_toks.iter().enumerate() {
+                if cand.len() != interp.len() || fits.contains(&i) {
+                    continue;
+                }
+                if self.structured_candidate_fits(interp, cand, &self.names[i]) {
+                    fits.push(i);
+                }
+            }
+        }
+        if fits.len() != 1 {
+            return None;
+        }
+        let name = self.names[fits[0]].as_str();
+        if !self.long_siblings(name).is_empty() {
+            return None;
+        }
+        Some(name.to_owned())
+    }
+
+    /// One candidate's positional fit against one read
+    /// interpretation (equal token counts — the caller
+    /// enforces that). The discriminative-token budget (<= 2)
+    /// is computed lazily: only a token sitting at exactly
+    /// distance 2 asks whether it is an extra token of this
+    /// candidate against a strict-subset sibling.
+    fn structured_candidate_fits(
+        &self,
+        interp: &[String],
+        cand: &[String],
+        cand_name: &str,
+    ) -> bool {
+        let mut extras: Option<HashSet<String>> = None;
+        for (rt, ct) in interp.iter().zip(cand.iter()) {
+            if is_code_token(ct) {
+                if !code_token_matches(rt, ct) {
+                    return false;
+                }
+                continue;
+            }
+            let d = levenshtein_confusable_bounded(&squash_token(rt), ct, 2);
+            if d <= 1 {
+                continue;
+            }
+            if d > 2 {
+                return false;
+            }
+            let extras = extras.get_or_insert_with(|| self.extra_tokens_of(cand_name));
+            if !extras.contains(ct.as_str()) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// The tokens that distinguish `name` from its
+    /// strict-subset siblings in this universe — the union of
+    /// the inserted tokens across every shorter name whose
+    /// tokens appear in order inside `name`'s. Empty when
+    /// the name has no shorter sibling (then every token is
+    /// on the <= 1 budget).
+    fn extra_tokens_of(&self, name: &str) -> HashSet<String> {
+        let mut out = HashSet::new();
+        for other in &self.names {
+            if is_strict_token_superset(other, name) {
+                for t in superset_extra_tokens(other, name) {
+                    out.insert(t);
+                }
+            }
+        }
+        out
+    }
+
     /// THE hold predicate (pass 33, addendum #97) — the single
     /// condition every path that can hold an item must satisfy, on
     /// top of its own evidence bars. Two clauses:
@@ -2662,6 +2810,75 @@ fn confusable(a: char, b: char) -> bool {
             // untouched by this pair.
             | ('!', 'i') | ('i', '!')
     )
+}
+
+/// Is this (folded) candidate token a relic code — a letter
+/// plus 1–2 digits ("c13", "s19", "a1")? Code tokens match
+/// by [`code_token_matches`], not by whole-token Levenshtein:
+/// the letter and the digits are separate fields with
+/// separate confusion rules.
+fn is_code_token(tok: &str) -> bool {
+    let mut chars = tok.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    let rest = chars.as_str();
+    (1..=2).contains(&rest.len()) && rest.chars().all(|c| c.is_ascii_digit())
+}
+
+/// Does the read's code token match the candidate's? Same
+/// length required; the letter position matches by the
+/// pairwise confusable relation (so a dotted-i '!' or a '1'
+/// for 'I' still matches, while 'i' vs 'l' stay distinct —
+/// both are real relic prefixes); each digit position
+/// matches exactly, EXCEPT a non-digit garble glyph, which
+/// may stand for a digit in its class ([`digit_garble_class`]).
+/// A clean digit is evidence: '3' matches only '3', so a
+/// clean "C13" never also fits "C18" (and vice versa) — the
+/// 3/8 and 1/7 digit mixups live in the garble glyphs ('B'
+/// for 3 or 8, 'l'/'I' for 1 or 7), not in the digits.
+fn code_token_matches(read: &str, cand: &str) -> bool {
+    let r: Vec<char> = read.chars().collect();
+    let c: Vec<char> = cand.chars().collect();
+    if r.len() != c.len() || r.is_empty() {
+        return false;
+    }
+    if !confusable(r[0], c[0]) {
+        return false;
+    }
+    for (rc, cc) in r.iter().zip(c.iter()).skip(1) {
+        if rc == cc {
+            continue;
+        }
+        match digit_garble_class(*rc) {
+            Some(class) if class.contains(cc) => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// The digits a non-digit garble glyph in a code digit
+/// position may stand for (sixty-first pass). 'B' is the
+/// pinned ambiguity: it looks like both 3 and 8, so a
+/// B-ending code fits every (Era, Code) pair it could be —
+/// and the parser refuses when that is two names. The
+/// letter-glyph classes are the classic OCR digit mixups
+/// restricted to garble glyphs: a letter sitting where a
+/// digit belongs is a misread digit, so it expands to the
+/// digits it could be; a digit sitting there is read as
+/// itself ([`code_token_matches`]).
+fn digit_garble_class(c: char) -> Option<&'static [char]> {
+    match c.to_ascii_lowercase() {
+        'b' => Some(&['3', '8']),
+        's' | '$' => Some(&['5']),
+        'o' => Some(&['0']),
+        'i' | 'l' | '|' | '!' => Some(&['1', '7']),
+        'z' => Some(&['2']),
+        'g' => Some(&['6']),
+        _ => None,
+    }
 }
 
 /// Substitution predicate for the metric closure of [`confusable`]
@@ -4783,6 +5000,305 @@ mod tests {
             .best_match_margin("Axi C13 Relic")
             .expect("clean C13 must match");
         assert_eq!(name, "Axi C13");
+    }
+
+    // -- Structured parser (sixty-first pass) -----------------
+
+    /// The REAL relic universe from the committed seed (the
+    /// parser's counting rule runs over real names, not a
+    /// slice — a B-ending code's ambiguity depends on which
+    /// codes actually exist).
+    fn real_relic_universe() -> Universe {
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        crate::capture::load_universe(&base.join("data"))
+            .expect("load universe")
+            .relics
+    }
+
+    /// Small part-name universe with the Voruna and Caliban
+    /// short/long sibling pairs (the pinned shapes).
+    fn parser_parts_universe() -> Universe {
+        Universe::from_names(
+            &[
+                "Voruna Prime Blueprint",
+                "Voruna Prime Neuroptics Blueprint",
+                "Voruna Prime Chassis Blueprint",
+                "Voruna Prime Systems Blueprint",
+                "Caliban Prime Blueprint",
+                "Caliban Prime Neuroptics Blueprint",
+                "Caliban Prime Chassis Blueprint",
+                "Caliban Prime Systems Blueprint",
+                "Garuda Prime Neuroptics Blueprint",
+                "Saryn Prime Systems Blueprint",
+                "Braton Prime Blueprint",
+                "Braton Prime Receiver",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>(),
+        )
+    }
+
+    #[test]
+    fn parser_admits_dotted_i_c13_and_refuses_b_code_and_c99() {
+        // The brief's pinned relic cases, on the slice
+        // universe where BOTH C13 and C18 exist.
+        let u = c13_c18_universe();
+        assert_eq!(
+            u.parse_structured("Ax! C13 Relic").as_deref(),
+            Some("Axi C13"),
+            "dotted-i era garble still parses"
+        );
+        assert_eq!(
+            u.parse_structured("Axi C13 Relic").as_deref(),
+            Some("Axi C13"),
+            "clean C13 parses"
+        );
+        // B-ending code: B looks like both 3 and 8, so both
+        // C13 and C18 fit — genuinely ambiguous, refuse.
+        assert_eq!(
+            u.parse_structured("Axi C1B Relic"),
+            None,
+            "C1B must refuse where C13 and C18 both exist"
+        );
+        assert_eq!(
+            u.parse_structured("Ax! C1B Relic"),
+            None,
+            "dotted-i C1B must refuse too"
+        );
+        // Nonexistent code: zero fits, refuse.
+        assert_eq!(
+            u.parse_structured("Axi C99 Relic"),
+            None,
+            "C99 names no real relic"
+        );
+    }
+
+    #[test]
+    fn parser_admits_b_code_where_only_one_sibling_exists() {
+        // The brief's "genuinely ambiguous" premise assumes
+        // Axi C18 exists. It does not: the baked seed (801
+        // relics, vaulted included, refreshed in pass 60)
+        // holds no *C18 code in ANY era, and the wiki's
+        // unvaulted list names no Axi C18 either. Over the
+        // real universe exactly one name fits a B-ending
+        // "C1B" read — Axi C13 — so the counting rule
+        // admits it. The fuzzy matcher, by contrast, ties
+        // 0.857/0.857 (C13 vs C11) with margin 0 and
+        // refuses: this is the parser's measured relic win.
+        let u = real_relic_universe();
+        let (name, score, second) = u
+            .best_match_margin("Ax! C1B Relic")
+            .expect("the B read must match something");
+        assert_eq!(score, second, "fuzzy must tie, not hold");
+        assert!(
+            score - second < MATCH_MARGIN,
+            "fuzzy margin must fail: {score} vs {second}"
+        );
+        assert_eq!(
+            u.parse_structured("Ax! C1B Relic").as_deref(),
+            Some("Axi C13"),
+            "parser admits the unique fit"
+        );
+        // And the same shape on a code whose B-sibling DOES
+        // exist in the real universe refuses: Lith S19's
+        // B-read fits both Lith S13 (B for 3) and Lith S18
+        // (B for 8).
+        assert_eq!(
+            u.parse_structured("Lith $1B Relic"),
+            None,
+            "S1B fits both S13 and S18 in the real universe"
+        );
+    }
+
+    #[test]
+    fn parser_admits_garbled_component_and_refuses_clean_short() {
+        // The brief's pinned part cases, plus Seth's Caliban
+        // case: a garbled discriminative token ("Uroptics"
+        // for "Neuroptics" — distance 2, the missing "Ne",
+        // inside the <= 2 discriminative budget) parses to
+        // the long name, while a clean short read refuses
+        // (never guess the long name from a clean short read).
+        let u = parser_parts_universe();
+        assert_eq!(
+            u.parse_structured("Voruna Prime Uroptics Blueprint")
+                .as_deref(),
+            Some("Voruna Prime Neuroptics Blueprint")
+        );
+        assert_eq!(
+            u.parse_structured("Caliban Prime Uroptics Blueprint")
+                .as_deref(),
+            Some("Caliban Prime Neuroptics Blueprint"),
+            "the pinned Caliban case: garbled Neuroptics admits the long name"
+        );
+        // Another distance-2 component garble still parses:
+        // "Nuroptlcs" is two edits from "Neuroptics" (the
+        // missing "e" plus l/i).
+        assert_eq!(
+            u.parse_structured("Voruna Prime Nuroptlcs Blueprint")
+                .as_deref(),
+            Some("Voruna Prime Neuroptics Blueprint")
+        );
+        // But distance 3 does not: "Uroptlcs" is three edits
+        // from "Neuroptics" and outside the budget.
+        assert_eq!(
+            u.parse_structured("Voruna Prime Uroptlcs Blueprint"),
+            None,
+            "a three-edit component garble is outside the grammar"
+        );
+        // Clean short reads refuse — the long sibling is a
+        // real name and the read cannot tell them apart.
+        assert_eq!(
+            u.parse_structured("Voruna Prime Blueprint"),
+            None,
+            "clean short read must refuse, never guess the long name"
+        );
+        assert_eq!(
+            u.parse_structured("Caliban Prime Blueprint"),
+            None,
+            "clean short Caliban read must refuse too"
+        );
+        // A built form refuses for the same reason: it has
+        // the "... Blueprint" long sibling.
+        assert_eq!(
+            u.parse_structured("Voruna Prime Neuroptics"),
+            None,
+            "built forms have a long sibling and stay with the fuzzy matcher"
+        );
+    }
+
+    #[test]
+    fn parser_refuses_reads_that_break_the_grammar() {
+        let u = parser_parts_universe();
+        // The name token is on the <= 1 budget: "Vorundt"
+        // is two edits from "Voruna", so no name fits.
+        assert_eq!(
+            u.parse_structured("Vorundt Prime Neuroptics Blueprint"),
+            None,
+            "a two-edit name garble is outside the grammar"
+        );
+        // The Nov 7 23:31 shape: the "Prime" literal is
+        // destroyed in every read, so no roster name fits
+        // positionally — the parser cannot fix it (and must
+        // not guess it).
+        assert_eq!(
+            u.parse_structured("Vorundt tie tnassi Blueprint"),
+            None,
+            "destroyed Prime token: no parse"
+        );
+        assert_eq!(
+            u.parse_structured("Vorun Se Brassis Blueprint"),
+            None,
+            "destroyed Prime token, psm11 shape: no parse"
+        );
+        // A dropped discriminative token is a clean short
+        // read — refused by the guard, never upgraded.
+        assert_eq!(
+            u.parse_structured("Voruna Prime Blueprint"),
+            None
+        );
+    }
+
+    #[test]
+    fn parser_admits_the_margin_refused_long_name_on_the_real_universe() {
+        // The baseline's mechanism, measured on the real
+        // parts universe: a correct 1.00 read of the long
+        // name refuses on MATCH_MARGIN because the
+        // same-suffix sibling "Garuda Prime Neuroptics
+        // Blueprint" sits 3 edits away (0.909, margin
+        // 0.091 < 0.10). The parser checks each field
+        // against its closed set — "voruna" matches the
+        // roster name exactly, "garuda" is 3 edits away and
+        // does not fit — so exactly one name fits.
+        let u = parts_universe();
+        let read = "ef Voruna Prime Neuroptics Blueprint";
+        let (name, score, second) = u
+            .best_match_margin(read)
+            .expect("the junk-prefixed read must match something");
+        assert_eq!(name, "Voruna Prime Neuroptics Blueprint");
+        assert_eq!(score, 1.0);
+        assert!(
+            score - second < MATCH_MARGIN,
+            "fuzzy must margin-refuse: {score} vs {second}"
+        );
+        assert_eq!(
+            u.parse_structured(read).as_deref(),
+            Some("Voruna Prime Neuroptics Blueprint"),
+            "parser admits the unique structural fit"
+        );
+        // The same shape for the Nov 7 23:26 burst:
+        // "Braton Prime Receiver" (1.00) over "Burston
+        // Prime Receiver" (0.909).
+        let read = "} “eG - * iti SA Braton Prime Receiver";
+        let (name, score, second) = u
+            .best_match_margin(read)
+            .expect("the Braton read must match something");
+        assert_eq!(name, "Braton Prime Receiver");
+        assert_eq!(score, 1.0);
+        assert!(
+            score - second < MATCH_MARGIN,
+            "fuzzy must margin-refuse: {score} vs {second}"
+        );
+        assert_eq!(
+            u.parse_structured(read).as_deref(),
+            Some("Braton Prime Receiver")
+        );
+    }
+
+    #[test]
+    fn parser_refuses_requiem_numerals() {
+        // Known limit, stated plainly: the per-token <= 1
+        // budget cannot separate single-character roman
+        // numerals — "Requiem I" fits I, Ii and Iii (each
+        // within 1, Iii within the discriminative 2) — so
+        // the parser refuses all three and leaves them to
+        // the fuzzy matcher, which holds them on margin.
+        // "Requiem Eterna" has no such neighbours and parses.
+        let u = real_relic_universe();
+        assert_eq!(u.parse_structured("Requiem I"), None);
+        assert_eq!(u.parse_structured("Requiem Ii"), None);
+        assert_eq!(u.parse_structured("Requiem Iii"), None);
+        assert_eq!(
+            u.parse_structured("Requiem Eterna").as_deref(),
+            Some("Requiem Eterna")
+        );
+    }
+
+    #[test]
+    fn parser_ignores_leading_icon_bleed_like_the_matcher() {
+        // Leading junk tokens trim away, as in
+        // best_match_margin; a junk token that is itself a
+        // name token does not create a second fit.
+        let u = parser_parts_universe();
+        assert_eq!(
+            u.parse_structured("x8 Voruna Prime Uroptics Blueprint")
+                .as_deref(),
+            Some("Voruna Prime Neuroptics Blueprint")
+        );
+        // And on the relic side (a junk-prefixed caption
+        // parses once the bleed token trims away).
+        let relics = real_relic_universe();
+        assert_eq!(
+            relics.parse_structured("x8 Meso C11 Relic").as_deref(),
+            Some("Meso C11"),
+            "junk-prefixed relic caption parses"
+        );
+    }
+
+    #[test]
+    fn parser_never_widens_the_metric() {
+        // Scope pin: the parser's distances use the pairwise
+        // relation only. The ('!','i') pair must not leak
+        // into the metric closure the radius decoder reasons
+        // over — same pin as the dotted-i test, restated
+        // for the parser's own token distances.
+        assert_eq!(levenshtein_confusable("ax!", "axi"), 0);
+        assert_eq!(levenshtein_confusable_metric("ax!", "axi"), 1);
+        // And a code-token garble stays out of the metric
+        // too: 'b' vs '3' is one pairwise edit and one
+        // metric edit alike (no shared component).
+        assert_eq!(levenshtein_confusable("c1b", "c13"), 1);
+        assert_eq!(levenshtein_confusable_metric("c1b", "c13"), 1);
     }
 
     #[test]

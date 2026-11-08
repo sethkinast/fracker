@@ -262,18 +262,34 @@ const CAPTION_MIN_SCORE: f32 = 0.80;
 /// trailing "Relic" is furniture: both the matcher and the
 /// witness drop it before judging). Returns the proven
 /// name; anything less is unresolved, never a guess.
+///
+/// Sixty-first pass, second voice: when the fuzzy matcher
+/// holds nothing on this read, the structured parser gets
+/// its turn — it proves a name when exactly one real name
+/// fits the read's field structure. A parser proof admits
+/// only under the SAME gates (the hold predicate and the
+/// token witness), and it never overrides a fuzzy hold: a
+/// read the fuzzy matcher holds under a different name
+/// returns that name above, before the parser is consulted.
+/// The parser's own long-sibling guard (it never admits a
+/// name with a longer token-superset sibling) means the
+/// combination cannot mint a short-sibling hold.
 fn admit_caption(read: &str, universe: &Universe) -> Option<String> {
     let (name, score, second) = universe.best_match_margin(read)?;
-    if score < CAPTION_MIN_SCORE || (score - second) < MATCH_MARGIN {
-        return None;
+    if score >= CAPTION_MIN_SCORE
+        && (score - second) >= MATCH_MARGIN
+        && universe.hold_permitted(read, name)
+        && crate::ocr::relic_name_witnessed(read, name)
+    {
+        return Some(name.to_owned());
     }
-    if !universe.hold_permitted(read, name) {
-        return None;
+    let parsed = universe.parse_structured(read)?;
+    if universe.hold_permitted(read, &parsed) && crate::ocr::relic_name_witnessed(read, &parsed)
+    {
+        Some(parsed)
+    } else {
+        None
     }
-    if !crate::ocr::relic_name_witnessed(read, name) {
-        return None;
-    }
-    Some(name.to_owned())
 }
 
 /// Resolve one caption slot from its reads. Two PSM reads
@@ -938,6 +954,65 @@ mod tests {
             "all three slots resolve: {read:?}"
         );
         assert_eq!(read.miss_slots(), Vec::<usize>::new(), "no per-cell miss");
+    }
+
+    // -- Structured parser, second voice (sixty-first pass) --
+
+    #[test]
+    fn admit_caption_parser_admits_where_fuzzy_ties() {
+        // Real relic universe: "Ax! C1B" ties C13/C11 at
+        // 0.857 with margin 0 under the fuzzy matcher, and
+        // the parser admits the unique structural fit, Axi
+        // C13 (no *C18 exists anywhere in the seed).
+        let universe = relic_universe();
+        assert_eq!(
+            admit_caption("Ax! C1B Relic", &universe).as_deref(),
+            Some("Axi C13")
+        );
+        // A clean C13 caption still admits via the fuzzy
+        // path, unchanged.
+        assert_eq!(
+            admit_caption("Ax! C13 Relic", &universe).as_deref(),
+            Some("Axi C13")
+        );
+        // "Axi C99" is NOT a parser case at this level: the
+        // fuzzy matcher holds the shorter code C9 for a
+        // doubled-digit read (pre-existing — a doubled 9
+        // reads as C9 at 0.857 with margin, the same way a
+        // dropped digit would). The parser itself refuses
+        // C99 (zero fits for a nonexistent code), pinned in
+        // ocr.rs; the combined admission follows the fuzzy
+        // hold, as the combination rule requires.
+        assert_eq!(
+            admit_caption("Axi C99 Relic", &universe).as_deref(),
+            Some("Axi C9")
+        );
+    }
+
+    #[test]
+    fn admit_caption_fuzzy_hold_stands_when_parser_refuses() {
+        // The combination rule's other side: where C18 DOES
+        // exist (this slice universe), the parser refuses a
+        // B-ending code as ambiguous — and that refusal must
+        // NOT veto the fuzzy hold. The discipline still holds
+        // C18 there, exactly as pass 60 pinned it; the
+        // parser is purely additive.
+        let universe = Universe::from_names(
+            &["Axi C11", "Axi C13", "Axi C18", "Lith S19", "Meso Y2"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            universe.parse_structured("Ax! C1B Relic"),
+            None,
+            "parser refuses the ambiguous B code"
+        );
+        assert_eq!(
+            admit_caption("Ax! C1B Relic", &universe).as_deref(),
+            Some("Axi C18"),
+            "the fuzzy C18 hold stands: the parser never vetoes"
+        );
     }
 
     #[test]

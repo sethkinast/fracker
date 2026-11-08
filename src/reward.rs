@@ -607,7 +607,43 @@ fn read_bordered_name(
         return Ok(name);
     }
     match held.len() {
-        0 => Err(Miss::NameNoMatch { detail }),
+        0 => {
+            // Sixty-first pass, second voice: neither read
+            // held anything under the fuzzy discipline, so
+            // the structured parser gets its turn — it proves
+            // a name when exactly one real name fits a read's
+            // field structure. The parser proves at most one
+            // name per read; the two reads must agree on it
+            // (a disagreement between them is a contradiction
+            // and refuses, as a fuzzy disagreement does). The
+            // proof must also pass the shared hold predicate
+            // on the read that proved it: the reward path's
+            // fuzzy discipline is score + margin, but a parser
+            // proof is a different kind of evidence, and the
+            // predicate is the single condition every hold
+            // path must satisfy — a parser-proven name whose
+            // head the proving read does not witness is not
+            // held. The parser never admits a name with a
+            // long sibling (its own guard), so this cannot
+            // mint a short-sibling hold; and it never runs
+            // when the fuzzy matcher held anything, so it can
+            // never override a contradicting hold.
+            let mut parsed: Vec<(String, String)> = Vec::new();
+            for read in &reads {
+                if let Some(name) = parts.parse_structured(read) {
+                    if !parsed.iter().any(|(n, _)| n == &name) {
+                        parsed.push((name, read.clone()));
+                    }
+                }
+            }
+            if parsed.len() == 1 {
+                let (name, proving_read) = parsed.pop().unwrap();
+                if parts.hold_permitted(&proving_read, &name) {
+                    return Ok(name);
+                }
+            }
+            Err(Miss::NameNoMatch { detail })
+        }
         _ => {
             // Two holds that disagree — unless they are a
             // short/long sibling pair, in which case the frame
@@ -1858,6 +1894,159 @@ mod tests {
             detect_pick(&engine, &frame, &voruna_universe()),
             Ok("Voruna Prime Neuroptics Blueprint".to_owned())
         );
+    }
+
+    // -- Structured parser, second voice (sixty-first pass) --
+
+    /// The REAL parts universe from the committed data dir —
+    /// the margin failures the parser fixes only exist there
+    /// (the small test universes have no same-suffix sibling
+    /// 3 edits away in the frame-name token).
+    fn real_parts_universe() -> Universe {
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        crate::capture::load_universe(&base.join("data"))
+            .expect("load universe")
+            .parts
+    }
+
+    #[test]
+    fn frame_margin_refused_long_read_admits_via_parser() {
+        // The Nov 5 burst's T+2 shape, scripted: psm6 reads
+        // the full long name (junk-prefixed), psm11 garbles
+        // it beyond the discipline. Under the real universe
+        // the fuzzy matcher refuses psm6 on margin (1.00 over
+        // Garuda Prime Neuroptics Blueprint at 0.909) and
+        // psm11 below the bars — so the frame holds nothing
+        // in v0.5.55. The parser proves the long name from
+        // psm6 alone (each field against its closed set) and
+        // the frame holds it.
+        let frame = synthetic_frame(&[0], true);
+        let engine = PsmScriptedEngine {
+            bands6: [
+                "ef Voruna Prime Neuroptics Blueprint".to_owned(),
+                "Saryn Prime Systems Blueprint".to_owned(),
+                "Braton Prime Blueprint".to_owned(),
+                "Bronco Prime Receiver".to_owned(),
+            ],
+            bands11: [
+                "\\\\WY Voruna ine een, rice Blueprint".to_owned(),
+                "Saryn Prime Systems Blueprint".to_owned(),
+                "Braton Prime Blueprint".to_owned(),
+                "Bronco Prime Receiver".to_owned(),
+            ],
+        };
+        let universe = real_parts_universe();
+        let (name, score, second) = universe
+            .best_match_margin("ef Voruna Prime Neuroptics Blueprint")
+            .expect("psm6 must match something");
+        assert_eq!(name, "Voruna Prime Neuroptics Blueprint");
+        assert_eq!(score, 1.0);
+        assert!(
+            score - second < MATCH_MARGIN,
+            "fuzzy must margin-refuse psm6: {score} vs {second}"
+        );
+        assert_eq!(
+            detect_pick(&engine, &frame, &universe),
+            Ok("Voruna Prime Neuroptics Blueprint".to_owned())
+        );
+    }
+
+    #[test]
+    fn frame_garbled_component_margin_refusal_admits_via_parser() {
+        // Second delta shape: the component garbled
+        // ("Uroptics") costs the long name 2 edits (0.939)
+        // while the same-suffix sibling sits at 0.848, so
+        // the margin is 0.091 < 0.10 and the fuzzy matcher
+        // refuses on BOTH reads. The parser's discriminative
+        // budget (<= 2 on the component token) proves the
+        // long name from either read.
+        let frame = synthetic_frame(&[0], true);
+        let engine = PsmScriptedEngine {
+            bands6: [
+                "Voruna Prime Uroptics Blueprint".to_owned(),
+                "Saryn Prime Systems Blueprint".to_owned(),
+                "Braton Prime Blueprint".to_owned(),
+                "Bronco Prime Receiver".to_owned(),
+            ],
+            bands11: [
+                "Voruna Prime Uroptics Blueprint".to_owned(),
+                "Saryn Prime Systems Blueprint".to_owned(),
+                "Braton Prime Blueprint".to_owned(),
+                "Bronco Prime Receiver".to_owned(),
+            ],
+        };
+        let universe = real_parts_universe();
+        let (name, score, second) = universe
+            .best_match_margin("Voruna Prime Uroptics Blueprint")
+            .expect("the garbled read must match something");
+        assert_eq!(name, "Voruna Prime Neuroptics Blueprint");
+        assert!(
+            score - second < MATCH_MARGIN,
+            "fuzzy must margin-refuse: {score} vs {second}"
+        );
+        assert_eq!(
+            detect_pick(&engine, &frame, &universe),
+            Ok("Voruna Prime Neuroptics Blueprint".to_owned())
+        );
+    }
+
+    #[test]
+    fn frame_clean_short_read_still_holds_short_on_the_real_universe() {
+        // True-short preservation on the real universe: the
+        // fuzzy matcher holds the short name (1.00, margin
+        // over the Garuda short sibling clears), so the
+        // parser is never consulted and nothing changes.
+        let frame = synthetic_frame(&[0], true);
+        let engine = PsmScriptedEngine {
+            bands6: [
+                "Voruna Prime Blueprint".to_owned(),
+                "Saryn Prime Systems Blueprint".to_owned(),
+                "Braton Prime Blueprint".to_owned(),
+                "Bronco Prime Receiver".to_owned(),
+            ],
+            bands11: [
+                "Voruna Prime Blueprint".to_owned(),
+                "Saryn Prime Systems Blueprint".to_owned(),
+                "Braton Prime Blueprint".to_owned(),
+                "Bronco Prime Receiver".to_owned(),
+            ],
+        };
+        assert_eq!(
+            detect_pick(&engine, &frame, &real_parts_universe()),
+            Ok("Voruna Prime Blueprint".to_owned())
+        );
+    }
+
+    #[test]
+    fn frame_parser_disagreement_between_reads_refuses() {
+        // The two reads parse to DIFFERENT names, and the
+        // fuzzy matcher holds nothing on either: psm6's
+        // garbled Neuroptics read margin-refuses (0.939 over
+        // 0.848), and psm11's clean Garuda read margin-refuses
+        // too (1.00 over Voruna at 0.909 — the same-suffix
+        // sibling sits 3 edits away in the frame-name token).
+        // The parser proves one name per read, they disagree,
+        // and the frame refuses rather than guessing between
+        // two real cards.
+        let frame = synthetic_frame(&[0], true);
+        let engine = PsmScriptedEngine {
+            bands6: [
+                "Voruna Prime Uroptics Blueprint".to_owned(),
+                "Saryn Prime Systems Blueprint".to_owned(),
+                "Braton Prime Blueprint".to_owned(),
+                "Bronco Prime Receiver".to_owned(),
+            ],
+            bands11: [
+                "Garuda Prime Neuroptics Blueprint".to_owned(),
+                "Saryn Prime Systems Blueprint".to_owned(),
+                "Braton Prime Blueprint".to_owned(),
+                "Bronco Prime Receiver".to_owned(),
+            ],
+        };
+        match detect_pick(&engine, &frame, &real_parts_universe()) {
+            Err(Miss::NameNoMatch { .. }) => {}
+            other => panic!("disagreeing parser proofs must refuse, got {other:?}"),
+        }
     }
 
     #[test]
