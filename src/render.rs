@@ -271,15 +271,29 @@ pub fn fmt_compact(n: u32) -> String {
     }
 }
 
-/// "25m" / "1h05m" / "in 2d" -> minutes, for the event-alert heat class.
+/// "25m" / "1h05m" / "12d 14h" / "in 2d" -> minutes, for the
+/// event-alert heat class. Day-long labels parse to their full
+/// minute count (heat only ever fires below 60m, so they stay cold).
 fn parse_left_minutes(left: &str) -> Option<u32> {
     let s = left.trim().trim_start_matches("in ").trim();
-    if let Some((h, rest)) = s.split_once('h') {
-        let hh: u32 = h.trim().parse().ok()?;
-        let mm: u32 = rest.trim().trim_end_matches('m').trim().parse().unwrap_or(0);
-        return Some(hh * 60 + mm);
+    let mut total: u32 = 0;
+    let mut rest = s;
+    if let Some((d, r)) = rest.split_once('d') {
+        if !d.trim().is_empty() && d.trim().chars().all(|c| c.is_ascii_digit()) {
+            total += d.trim().parse::<u32>().ok()? * 24 * 60;
+            rest = r.trim();
+            if rest.is_empty() {
+                return Some(total);
+            }
+        }
     }
-    s.strip_suffix('m')?.trim().parse().ok()
+    if let Some((h, r)) = rest.split_once('h') {
+        let hh: u32 = h.trim().parse().ok()?;
+        let mm: u32 = r.trim().trim_end_matches('m').trim().parse().unwrap_or(0);
+        return Some(total + hh * 60 + mm);
+    }
+    let m: u32 = rest.strip_suffix('m')?.trim().parse().ok()?;
+    Some(total + m)
 }
 
 /// "Xini (Eris)" -> ("Xini", "Eris"); a bare node keeps an empty planet.
@@ -399,7 +413,7 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     // dropped socket. A file:// demo export has neither and is simply
     // static. The refresh-flash rule (§19) keeps every repaint dark
     // (root background + color-scheme: dark).
-    h.push_str("<title>Fracker — session plan</title>\n");
+    h.push_str("<title>Fracker</title>\n");
     // Demo exports are self-contained (addendum #23: zero CDN
     // references): no font links, no hotlinks — system type only.
     // The product page keeps the display type + CDN icons.
@@ -780,6 +794,18 @@ pub fn fragment_hash(html: &str) -> u64 {
     hasher.finish()
 }
 
+/// Mastery-rank label (pass 62 §7): ranks 0–30 read "MR{n}";
+/// Legendary ranks 31+ read "LR{n-30}" (LR1 at 31 through LR6
+/// at 36, the highest currently achievable). Display only — the
+/// caps math still uses the raw numeric rank.
+pub(crate) fn mastery_rank_label(mr: u32) -> String {
+    if mr >= 31 {
+        format!("LR{}", mr - 30)
+    } else {
+        format!("MR{mr}")
+    }
+}
+
 /// The mock's slim header: brand + three status pills + one-line stamp.
 fn header_html(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     let vendor = esc(&ctx.tuning.planner.vendor.name.to_uppercase());
@@ -798,7 +824,7 @@ fn header_html(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     let parts: usize = plan.goals.iter().map(|g| g.parts.len()).sum();
     let mr = ctx
         .mastery_rank
-        .map(|m| m.to_string())
+        .map(mastery_rank_label)
         .unwrap_or_else(|| "—".to_owned());
     let mut h = String::new();
     h.push_str("<header class=\"top\">\n");
@@ -824,7 +850,7 @@ fn header_html(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     // opens on any printable keypress (see search::client_script).
     h.push_str("<button type=\"button\" class=\"sbtn\" id=\"search-open\" title=\"Search relics &amp; items — or just start typing\" aria-label=\"Search relics and items\">&#8981;</button>\n");
     h.push_str(&format!(
-        "<div class=\"stamp\">MR{mr} &middot; generated {} &middot; {} &middot; {}</div>\n",
+        "<div class=\"stamp\">{mr} &middot; generated {} &middot; {} &middot; {}</div>\n",
         esc(&ctx.generated_label),
         esc(&ctx.world_status),
         esc(&ctx.targets_status),
@@ -869,7 +895,7 @@ const DE_LOCK_JS: &str = r#"(function () {
 "#;
 
 /// One-line status countdown for a world-state expiry, relative to the
-/// plan's own timestamp ("in 2d", "in 5h", "in 25m").
+/// plan's own timestamp ("in 2d 3h", "in 5h", "in 25m").
 fn relative_countdown(ctx: &RenderContext<'_>, expiry: &str) -> String {
     let now = ctx
         .world
@@ -884,10 +910,11 @@ fn relative_countdown(ctx: &RenderContext<'_>, expiry: &str) -> String {
                 "now".to_owned()
             } else if mins < 60 {
                 format!("in {mins}m")
-            } else if mins < 48 * 60 {
+            } else if mins < 24 * 60 {
                 format!("in {}h", mins / 60)
             } else {
-                format!("in {}d", mins / (24 * 60))
+                // Pass 62 §1b: two places — d/h at a day or more.
+                format!("in {}", crate::plan::format_duration_mins(mins))
             }
         }
         _ => "—".to_owned(),
@@ -3148,6 +3175,86 @@ mod tests {
             !idle.contains("class=\"baro-live\""),
             "no pulse class attribute without a live window"
         );
+    }
+
+    #[test]
+    fn page_title_is_just_fracker() {
+        // Pass 62 §3: the plan page's <title> reads exactly "Fracker".
+        let t = crate::tuning::Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let ctx = empty_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
+        let html = render_plan(&Plan::default(), &ctx);
+        assert!(html.contains("<title>Fracker</title>"), "title is just Fracker");
+        assert!(
+            !html.contains("Fracker — session plan"),
+            "old session-plan title is gone"
+        );
+    }
+
+    #[test]
+    fn mastery_rank_label_maps_legendary_ranks() {
+        // Pass 62 §7: 0–30 -> MR{n}, 31+ -> LR{n-30}.
+        assert_eq!(mastery_rank_label(0), "MR0");
+        assert_eq!(mastery_rank_label(30), "MR30");
+        assert_eq!(mastery_rank_label(31), "LR1");
+        assert_eq!(mastery_rank_label(36), "LR6");
+    }
+
+    #[test]
+    fn header_stamp_shows_legendary_rank() {
+        // Pass 62 §7: Seth at Legendary 1 sees "LR1" in the stamp,
+        // not "MR31"; rank 30 still reads "MR30".
+        let t = crate::tuning::Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let mut ctx = empty_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
+        ctx.mastery_rank = Some(31);
+        let html = render_plan(&Plan::default(), &ctx);
+        assert!(html.contains(">LR1 &middot;"), "stamp reads LR1 at rank 31");
+        assert!(!html.contains("MR31"), "no MR31 anywhere in the page");
+        ctx.mastery_rank = Some(30);
+        let html = render_plan(&Plan::default(), &ctx);
+        assert!(html.contains(">MR30 &middot;"), "stamp still reads MR30 at rank 30");
+    }
+
+    #[test]
+    fn relative_countdown_renders_days_with_hours() {
+        // Pass 62 §1b: 302h16m out reads "in 12d 14h", not "in 302h"
+        // or "in 12d"; below a day the coarse "in Nh" stands.
+        let t = crate::tuning::Tuning::for_tests();
+        let mut world = WorldState::default();
+        world.timestamp = "2026-10-20T00:00:00Z".to_owned();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let ctx = empty_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
+        assert_eq!(
+            relative_countdown(&ctx, "2026-11-01T14:16:00Z"),
+            "in 12d 14h"
+        );
+        assert_eq!(relative_countdown(&ctx, "2026-10-21T06:00:00Z"), "in 1d 6h");
+        assert_eq!(relative_countdown(&ctx, "2026-10-20T05:30:00Z"), "in 5h");
+        assert_eq!(relative_countdown(&ctx, "2026-10-20T00:25:00Z"), "in 25m");
+    }
+
+    #[test]
+    fn parse_left_minutes_handles_day_labels() {
+        // Pass 62 §1b: the new "12d 14h" alert labels still parse
+        // for the heat class (day-long alerts stay cold, as before).
+        assert_eq!(parse_left_minutes("12d 14h"), Some(12 * 24 * 60 + 14 * 60));
+        assert_eq!(parse_left_minutes("in 2d"), Some(2 * 24 * 60));
+        assert_eq!(parse_left_minutes("2d"), Some(2 * 24 * 60));
+        assert_eq!(parse_left_minutes("1h05m"), Some(65));
+        assert_eq!(parse_left_minutes("5h30m"), Some(330));
+        assert_eq!(parse_left_minutes("25m"), Some(25));
     }
 
     /// Addendum #84: a part row in state Have is denoted on the Hunt
