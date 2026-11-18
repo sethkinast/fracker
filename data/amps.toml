@@ -1,0 +1,42 @@
+# Amp universe manifest (pass 62 §6c: backlog gap — Amps had no backlog).
+#
+# An Amp's masterable unit is its PRISM: profile XPInfo tracks lifetime
+# XP per prism barrel (`/Lotus/Weapons/*/OperatorAmplifiers/*/Barrel/*`),
+# and the display name is "<Prism> Amp" (Mote Amp, Raplak Amp, ...).
+# There is no WFCD Amps.json in the cache; the prism roster below is
+# the complete set of "* Prism" entries in data/cache/item-names.json
+# (WFCD-derived uniqueName -> display-name map), each keyed by its
+# barrel uniqueName so the next regen can re-derive mastery from a
+# fresh profile pull without re-deriving the roster.
+#
+# Mastery test (same as data/backlog.json note): lifetime XP per item
+# type in profile XPInfo >= 450k (weapons — amps live under
+# /Lotus/Weapons/). Absent from XPInfo = 0 XP = unmastered.
+# Verified against fixtures/profile-5420fba23846322173707618.json
+# (the profile the backlog was reconciled against):
+#   mastered (4): Granmu 5,615,678; Klamora 6,568,447;
+#                 Mote 473,990; Shwaak 612,375.
+#   unmastered (4): Cantic, Lega, Rahn, Raplak (all absent from XPInfo).
+# Sirocco is the Drifter's pistol (/Lotus/Weapons/Operator/Pistols/),
+# not a prism-built Amp; it is mastered (1,265,897 XP) and correctly
+# absent from the Amps backlog. The Drifter melee (DrifterTazer,
+# 458,200 XP) is likewise mastered and not an Amp.
+
+[prisms]
+# name = barrel uniqueName (XPInfo key)
+"Cantic Prism" = "/Lotus/Weapons/Corpus/OperatorAmplifiers/Set1/Barrel/CorpAmpSet1BarrelPartA"
+"Granmu Prism" = "/Lotus/Weapons/Sentients/OperatorAmplifiers/Set1/Barrel/SentAmpSet1BarrelPartC"
+"Klamora Prism" = "/Lotus/Weapons/Corpus/OperatorAmplifiers/Set1/Barrel/CorpAmpSet1BarrelPartC"
+"Lega Prism" = "/Lotus/Weapons/Corpus/OperatorAmplifiers/Set1/Barrel/CorpAmpSet1BarrelPartB"
+"Mote Prism" = "/Lotus/Weapons/Sentients/OperatorAmplifiers/SentTrainingAmplifier/SentAmpTrainingBarrel"
+"Rahn Prism" = "/Lotus/Weapons/Sentients/OperatorAmplifiers/Set2/Barrel/SentAmpSet2BarrelPartA"
+"Raplak Prism" = "/Lotus/Weapons/Sentients/OperatorAmplifiers/Set1/Barrel/SentAmpSet1BarrelPartA"
+"Shwaak Prism" = "/Lotus/Weapons/Sentients/OperatorAmplifiers/Set1/Barrel/SentAmpSet1BarrelPartB"
+
+[regen]
+# Last verification against the live profile (fixture) + datasets.
+date = "2026-11-18"
+prisms_in_roster = 8
+profile_prisms_mastered = ["Granmu Prism", "Klamora Prism", "Mote Prism", "Shwaak Prism"]
+profile_prisms_unmastered = ["Cantic Amp", "Lega Amp", "Rahn Amp", "Raplak Amp"]
+backlog_amps_unmastered = 4

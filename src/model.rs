@@ -1899,7 +1899,19 @@ pub struct BacklogPrimes {
 
 impl Backlog {
     pub fn from_json(text: &str) -> Result<Self, String> {
-        serde_json::from_str(text).map_err(|e| format!("backlog: {e}"))
+        let mut backlog: Self =
+            serde_json::from_str(text).map_err(|e| format!("backlog: {e}"))?;
+        // Pass 62 §6a: the Melee list arrived with 8 duplicated Zaw
+        // strikes (the regen joins two weapon sources that both carry
+        // them). Dedupe every category list at load — first occurrence
+        // wins, order preserved — so a regen that reintroduces dupes
+        // can never surface them twice on the Backlog tab.
+        for items in backlog.unmastered_by_category.values_mut() {
+            let mut seen: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            items.retain(|name| seen.insert(name.clone()));
+        }
+        Ok(backlog)
     }
 
     /// Planner wants derived from the reconciled backlog: every part of
@@ -2565,6 +2577,134 @@ mod tests {
         // Re-scrubbing is idempotent: the edited data already reflects it.
         let again = scrub.scrub_categories(&scrubbed);
         assert_eq!(again, scrubbed);
+    }
+
+    #[test]
+    fn backlog_from_json_dedupes_category_lists() {
+        // Pass 62 §6a: the Melee list arrived with 8 duplicated Zaw
+        // strikes (the regen joins two weapon sources that both carry
+        // them). Loading dedupes every category list — first occurrence
+        // wins, order preserved — so a regen that reintroduces dupes
+        // can never surface an item twice on the Backlog tab. The
+        // prime roster is untouched by the dedupe.
+        let text = r#"{
+            "primes": {"roster": 163, "mastered": 99, "unmastered": []},
+            "unmastered_by_category": {
+                "Melee": ["Mewan", "Balla", "Mewan", "Cyath", "Balla"],
+                "Primary": ["Acceltra", "Acceltra"]
+            }
+        }"#;
+        let backlog = Backlog::from_json(text).unwrap();
+        assert_eq!(
+            backlog.unmastered_by_category.get("Melee").unwrap(),
+            &vec!["Mewan".to_owned(), "Balla".to_owned(), "Cyath".to_owned()],
+            "first occurrence wins, order preserved"
+        );
+        assert_eq!(
+            backlog.unmastered_by_category.get("Primary").unwrap(),
+            &vec!["Acceltra".to_owned()],
+        );
+        assert_eq!(backlog.primes.roster, 163);
+    }
+
+    #[test]
+    fn backlog_data_has_no_duplicate_category_entries() {
+        // Pass 62 §6a guard on the shipped data: every category list
+        // is duplicate-free, and Mewan appears exactly once under
+        // Melees (75 entries / 67 unique before the fix).
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(base.join("data/backlog.json")).unwrap();
+        let backlog = Backlog::from_json(&text).unwrap();
+        for (cat, items) in &backlog.unmastered_by_category {
+            let mut seen = std::collections::HashSet::new();
+            for item in items {
+                assert!(seen.insert(item), "{item} appears twice under {cat}");
+            }
+        }
+        let melee = backlog
+            .unmastered_by_category
+            .get("Melee")
+            .expect("Melee list");
+        assert_eq!(melee.len(), 67, "75 -> 67 after removing the 8 Zaw dupes");
+        assert_eq!(melee.iter().filter(|n| *n == "Mewan").count(), 1);
+    }
+
+    #[test]
+    fn backlog_data_has_pets_and_amps_categories() {
+        // Pass 62 §6b/§6c: Pets and Amps backlogs, derived from the
+        // profile fixture (fixtures/profile-*.json) against the
+        // in-repo universes — masterable pets in data/cache/pets.json
+        // at the >= 900k companion threshold, amp prisms in
+        // data/amps.toml at the >= 450k weapon threshold. The exact
+        // lists are pinned so a regen that drops a category fails
+        // loudly instead of silently losing the backlog.
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(base.join("data/backlog.json")).unwrap();
+        let backlog = Backlog::from_json(&text).unwrap();
+        let pets = backlog
+            .unmastered_by_category
+            .get("Pets")
+            .expect("Pets category");
+        let expected_pets = vec![
+            "Bhaira Hound",
+            "Crescent Vulpaphyla",
+            "Dorma Hound",
+            "Lambeo Moa",
+            "Medjay Predasite",
+            "Nychus Moa",
+            "Panzer Vulpaphyla",
+            "Para Moa",
+            "Pharaoh Predasite",
+            "Sly Vulpaphyla",
+            "Vasca Kavat",
+            "Vizier Predasite",
+        ];
+        assert_eq!(pets, &expected_pets);
+        // Every listed pet is a masterable entry in the WFCD pets
+        // dataset (not a part, collar, or non-masterable resource).
+        let pets_text =
+            std::fs::read_to_string(base.join("data/cache/pets.json")).unwrap();
+        let pets_json: serde_json::Value =
+            serde_json::from_str(&pets_text).unwrap();
+        let masterable: std::collections::HashSet<&str> = pets_json
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| p.get("masterable").and_then(|m| m.as_bool()).unwrap_or(false))
+            .filter_map(|p| p.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert_eq!(masterable.len(), 22, "the masterable pet universe");
+        for pet in pets {
+            assert!(masterable.contains(pet.as_str()), "{pet} is not masterable");
+        }
+        assert!(!masterable.contains("Venari Prime"), "Venari Prime stays out");
+        let amps = backlog
+            .unmastered_by_category
+            .get("Amps")
+            .expect("Amps category");
+        let expected_amps =
+            vec!["Cantic Amp", "Lega Amp", "Rahn Amp", "Raplak Amp"];
+        assert_eq!(amps, &expected_amps);
+        // Every listed amp is a real prism: "<stem> Prism" exists in
+        // the item-names map, and the manifest roster agrees.
+        let names_text =
+            std::fs::read_to_string(base.join("data/cache/item-names.json")).unwrap();
+        let names_json: serde_json::Value =
+            serde_json::from_str(&names_text).unwrap();
+        let prism_names: std::collections::HashSet<&str> = names_json
+            .as_object()
+            .unwrap()
+            .values()
+            .filter_map(|v| v.as_str())
+            .filter(|v| v.ends_with(" Prism"))
+            .collect();
+        for amp in amps {
+            let stem = amp.strip_suffix(" Amp").unwrap();
+            assert!(
+                prism_names.contains(format!("{stem} Prism").as_str()),
+                "{amp} has no matching prism in the item-names map"
+            );
+        }
     }
 
     #[test]
