@@ -3350,3 +3350,56 @@ it refines the brief where they disagree. For the next worker pass.
     stays scripted. Known parser limit: Requiem numerals
     refuse (I fits I, Ii and Iii) and stay with the fuzzy
     matcher. Details: docs/sixty-first-pass.md.
+
+128. **Sixty-second pass: small-fixes bundle (v0.5.57).**
+    Seven fixes Seth released 2026-11-18 00:10 EST. (1a)
+    The §4 mission ledger is no longer today-scoped:
+    retention keys to the alert's lifetime
+    (`strikes_live_alert`, exact alertId or
+    tag+node+type corroboration plus a parseable expiry
+    after now; empty expiry counts live, unreadable
+    expiry fails closed), pruned only on a fresh
+    worldstate, with snapshot-only write-back so a
+    mid-report completion survives — a Gift of the
+    Lotus completed yesterday stays struck while live.
+    (1b) Durations render two places only:
+    `format_duration_mins`, d/h at >= 24h (302h16m ->
+    "12d 14h", whole days bare), h/m below; the
+    `days_until_hour_boundary = 48` tuning is now dead
+    config. (2) The search overlay query is a real
+    `<input>`, so Ctrl+A/Ctrl+C/paste work natively;
+    the document keydown handler falls through for
+    input-targeted keys. (3) Tab title is exactly
+    "Fracker". (4) The Warframe Lotus logo (840x859
+    RGBA PNG, 180,602 B, committed as
+    `assets/warframe-logo.png`) is served at
+    `GET /favicon.ico` with `image/png` and linked in
+    the page head. (5) Nightwave done-state scopes to
+    the Sunday 00:00 UTC week (`nw-week:<sunday>`
+    bucket, with migration for legacy day-keyed ticks);
+    daily ticks stay day-scoped. (6) Backlog Melee
+    deduped at load (75 -> 67, Mewan once) with guard
+    tests, plus a Pets category (12 unmastered, from
+    the 22 masterable in `pets.json` at the >= 900k
+    companion threshold) and an Amps category (4
+    unmastered, prism-keyed, >= 450k weapon
+    threshold); Sirocco is mastered and is the
+    Drifter's pistol, not a prism Amp. There is no
+    regen script in the repo — the fix lives in the
+    checked-in `data/backlog.json`, the load path, and
+    a new `data/amps.toml` + `[regen]` note in
+    `data/companions.toml`. (7) Mastery ranks render
+    Legendary above 30 (`mastery_rank_label`: 31 ->
+    "LR1" through 36 -> "LR6"); caps math stays
+    numeric. GATES: 24 new tests across the seven
+    items, all passing; integrated suite 535 passed /
+    0 failed (lib 505, +24 over v0.5.56; golden 15;
+    packaging 7; resident 6; tray_quit 1);
+    `cargo build --release --locked --offline` green
+    pre-tag, lock diff = version line only. Details:
+    docs/sixty-second-pass.md. Live verification owed:
+    Seth plays on this build and confirms the Lotus
+    strike survives the day boundary, day durations,
+    Ctrl+A, the title, the favicon, Nightwave ticks
+    through the week, the deduped Melee list with Pets
+    and Amps present, and the LR1 stamp.
