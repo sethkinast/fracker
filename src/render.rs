@@ -2273,11 +2273,24 @@ const JS: &str = r#"
   var served = document.body.hasAttribute('data-fracker-ticks');
   var done = {};
   // Checkbox ticks: the resident's loopback HTTP server is the store
-  // of record (POST /tick, keyed by item id + in-game day) and
-  // re-applies the ticks it injects onto <body data-fracker-ticks>
-  // (base64 JSON) on every serve — and in every fragment payload, so
-  // a swap carries the same store. localStorage remains only a
-  // progressive cache for a file:// page.
+  // of record (POST /tick, keyed by item id + in-game day — Nightwave
+  // ids by week, pass 62 §5) and re-applies the ticks it injects onto
+  // <body data-fracker-ticks> (base64 JSON) on every serve — and in
+  // every fragment payload, so a swap carries the same store.
+  // localStorage remains only a progressive cache for a file:// page.
+  // Nightwave acts refresh every Sunday 00:00 UTC, so an `nw-` tick
+  // lives in the `nw-week:<sunday>` bucket for its week: a Monday
+  // tick still shows done Friday, and the Sunday reset starts the
+  // next week unticked. Ticks stored before pass 62 under plain day
+  // keys are merged too when that day falls in the current week.
+  function weekSunday(d) {
+    var p = (d || '').split('-');
+    if (p.length !== 3) return '';
+    var dt = new Date(Date.UTC(+p[0], +p[1] - 1, +p[2]));
+    if (isNaN(dt.getTime())) return '';
+    dt.setUTCDate(dt.getUTCDate() - dt.getUTCDay());
+    return dt.toISOString().slice(0, 10);
+  }
   function loadTicks() {
     day = document.body.getAttribute('data-day') || '';
     done = {};
@@ -2286,10 +2299,30 @@ const JS: &str = r#"
       if (raw) {
         var store = JSON.parse(atob(raw)).days || {};
         (store[day] || []).forEach(function (i) { done[i] = true; });
+        var wk = weekSunday(day);
+        if (wk) {
+          (store['nw-week:' + wk] || []).forEach(function (i) { done[i] = true; });
+          var end = new Date(Date.UTC(+wk.slice(0, 4), +wk.slice(5, 7) - 1, +wk.slice(8, 10)));
+          end.setUTCDate(end.getUTCDate() + 7);
+          var endStr = end.toISOString().slice(0, 10);
+          Object.keys(store).forEach(function (k) {
+            if (k >= wk && k < endStr) {
+              (store[k] || []).forEach(function (i) {
+                if (i.indexOf('nw-') === 0) { done[i] = true; }
+              });
+            }
+          });
+        }
       }
     } catch (e) {}
   }
-  function key(id) { return 'fracker:' + day + ':' + id; }
+  function key(id) {
+    if (id.indexOf('nw-') === 0) {
+      var wk = weekSunday(day);
+      if (wk) { return 'fracker:nw-week:' + wk + ':' + id; }
+    }
+    return 'fracker:' + day + ':' + id;
+  }
   function host(box) { return box.closest('.cell,.row,.g'); }
   function paint(box, on) {
     var h = host(box);
@@ -3821,6 +3854,28 @@ mod tests {
             "description renders with the name"
         );
         assert!(html.contains(">Daily <small>1 · 1k</small>"), "nightwave grouping");
+    }
+
+    /// Pass 62 §5: the page's tick script merges the current
+    /// Nightwave week bucket (`nw-week:<sunday>`) on load, so a tick
+    /// made Monday paints done on Friday's page and the Sunday reset
+    /// clears it. The script is a string constant — this pins the
+    /// wiring; the bucket semantics themselves are covered by the
+    /// `TickStore` tests.
+    #[test]
+    fn tick_script_merges_the_nightwave_week_bucket() {
+        assert!(
+            JS.contains("store['nw-week:' + wk]"),
+            "loadTicks reads the current week's Nightwave bucket"
+        );
+        assert!(
+            JS.contains("function weekSunday(d)"),
+            "the week is anchored on its Sunday"
+        );
+        assert!(
+            JS.contains("fracker:nw-week:' + wk + ':' + id"),
+            "the file:// fallback key is week-scoped for nw- ids too"
+        );
     }
 
     #[test]
