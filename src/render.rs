@@ -414,6 +414,11 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     // static. The refresh-flash rule (§19) keeps every repaint dark
     // (root background + color-scheme: dark).
     h.push_str("<title>Fracker</title>\n");
+    // The Warframe Lotus logo as favicon (sixty-second pass): the
+    // resident serves the embedded PNG at /favicon.ico, so the
+    // served page carries the logo in the tab. A file:// demo
+    // export has no server; the link simply 404s there, harmless.
+    h.push_str("<link rel=\"icon\" type=\"image/png\" href=\"/favicon.ico\">\n");
     // Demo exports are self-contained (addendum #23: zero CDN
     // references): no font links, no hotlinks — system type only.
     // The product page keeps the display type + CDN icons.
@@ -519,7 +524,7 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
 /// reward window (forty-seventh pass, Seth's spec).
 const SEARCH_OVERLAY_SHELL: &str = r#"<div id="search-overlay" hidden>
 <div class="so-box">
-<div class="so-top"><span class="so-prompt">&#8981;</span><span id="search-query"></span></div>
+<div class="so-top"><span class="so-prompt">&#8981;</span><input id="search-query" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Search relics and items"></div>
 <div id="search-result"></div>
 <div class="so-hint" id="search-hint">relics &amp; prime items &middot; esc to close</div>
 </div>
@@ -2240,13 +2245,12 @@ label.row{cursor:pointer}
 .so-box{width:min(900px,94vw)}
 .so-top{display:flex;align-items:baseline;gap:14px;border-bottom:2px solid var(--cy);padding-bottom:10px;margin-bottom:18px}
 .so-prompt{color:var(--cy);font-size:30px}
-#search-query{font:700 38px Rajdhani,sans-serif;letter-spacing:.04em;color:var(--tx);min-height:46px}
-/* An empty #search-query has no text run, so in the baseline-
-   aligned .so-top flex row its baseline is synthesized from its
-   bottom edge and the row jumps up when the first glyph lands
-   (fiftieth pass). The nbsp strut gives the empty state the same
-   alphabetic baseline as any glyph: the line cannot shift. */
-#search-query:empty::before{content:"\00a0"}
+#search-query{font:700 38px Rajdhani,sans-serif;letter-spacing:.04em;color:var(--tx);min-height:46px;background:transparent;border:0;outline:0;padding:0;width:100%}
+/* A real <input> (sixty-second pass): its own line box holds the
+   baseline, so the empty query can no longer shift the row — the
+   fiftieth pass's :empty::before nbsp strut is retired with the
+   <span> it propped up. Native editing comes free: Ctrl+A selects
+   the query, Ctrl+C copies it, paste works. */
 .bd.u{color:#aeefce;border-color:#aeefce}
 .sr .r .srdeal{grid-column:1/-1;font-size:16px;color:var(--mut)}
 .so-hint{margin-top:16px;color:var(--mut);font-size:14px;letter-spacing:.08em;min-height:20px}
@@ -4749,9 +4753,14 @@ mod tests {
             "the overlay script prefetches its index"
         );
         assert!(
-            html.contains("#search-query:empty::before{content:\"\\00a0\"}"),
-            "the query line's empty-state strut (fiftieth pass): \
-             the empty query carries a text baseline, so the line cannot shift"
+            html.contains("<input id=\"search-query\" type=\"text\""),
+            "the query line is a real text input (sixty-second pass): \
+             native Ctrl+A/Ctrl+C/paste, no JS selection to maintain"
+        );
+        assert!(
+            html.contains("<link rel=\"icon\" type=\"image/png\" href=\"/favicon.ico\">"),
+            "the page head carries the Warframe logo favicon link \
+             (sixty-second pass)"
         );
         assert!(
             html.contains(".bd.u{color:#aeefce;border-color:#aeefce}"),
