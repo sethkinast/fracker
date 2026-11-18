@@ -1912,6 +1912,7 @@ async fn do_report(
         .unwrap_or_default();
     match report::generate(&opts.report, &proven).await {
         Ok(outcome) => {
+            apply_retained_completions(completions, &proven, &outcome.retained_completions);
             if let Ok(mut s) = status.lock() {
                 s.last_report = Some(chrono::Local::now().format("%H:%M:%S").to_string());
                 s.last_error = None;
@@ -1932,6 +1933,22 @@ async fn do_report(
     refresh_tray(tray).await;
 }
 
+/// Pass 62 §1a: write a report's pruned §4 ledger back into the
+/// shared ledger. Only entries that were in the snapshot this report
+/// consumed (`input`) and are absent from the pruned list (`retained`)
+/// are dropped — a completion the watch loop proved while the report
+/// was generating was never in the snapshot, so it survives the
+/// write-back instead of being clobbered by a stale list.
+fn apply_retained_completions(
+    completions: &Arc<Mutex<Vec<elog::MissionCompletion>>>,
+    input: &[elog::MissionCompletion],
+    retained: &[elog::MissionCompletion],
+) {
+    if let Ok(mut g) = completions.lock() {
+        g.retain(|c| !input.contains(c) || retained.contains(c));
+    }
+}
+
 /// "Open plan page" (ninth pass §2): open the loopback URL via the
 /// OpenURI portal (default browser, no chooser) when the server is up,
 /// else fall back to the OpenFile route on the rendered path. The report
@@ -1950,13 +1967,18 @@ async fn open_page(
             .lock()
             .map(|g| g.clone())
             .unwrap_or_default();
-        if let Err(e) = report::generate(&opts.report, &proven).await {
-            eprintln!("resident: report failed: {e}");
-            if let Ok(mut s) = status.lock() {
-                s.last_error = Some(e);
+        match report::generate(&opts.report, &proven).await {
+            Ok(outcome) => {
+                apply_retained_completions(completions, &proven, &outcome.retained_completions);
             }
-            refresh_tray(tray).await;
-            return;
+            Err(e) => {
+                eprintln!("resident: report failed: {e}");
+                if let Ok(mut s) = status.lock() {
+                    s.last_error = Some(e);
+                }
+                refresh_tray(tray).await;
+                return;
+            }
         }
     }
     let opened = match plan_url {
@@ -2070,9 +2092,18 @@ fn watch_loop(
     // `MissionInfo` block with its end-of-match success marker; proven
     // completions are stamped with the UTC day, persisted in app state,
     // and published to the shared ledger every report reads.
+    //
+    // Pass 62 §1a: the ledger is NO LONGER day-scoped. Retention is
+    // keyed to the alert's lifetime — a completion for an alert that
+    // is still live (e.g. Gift of the Lotus, finished yesterday)
+    // survives the UTC day boundary, and is pruned only when its
+    // alert expires, which the report pipeline decides against the
+    // fresh worldstate and writes back into the shared ledger (see
+    // `apply_retained_completions`); the save below adopts that
+    // pruned ledger so the persisted state follows. `today` still
+    // stamps new completions — it just no longer retires old ones.
     let mut missions = elog::MissionLog::new();
     let mut today = today_utc();
-    st.mission_completions.retain(|c| c.day == today);
     if let Ok(mut g) = completions.lock() {
         *g = st.mission_completions.clone();
     }
@@ -2098,16 +2129,13 @@ fn watch_loop(
             absent_since = None;
         }
 
-        // A UTC day rollover retires yesterday's completions: the ledger
-        // is today-scoped (ninth pass §4).
+        // A UTC day rollover only moves the stamp new completions
+        // carry (pass 62 §1a): the ledger is lifetime-scoped, so
+        // yesterday's completions stay until their alert expires.
         let mut rolled = false;
         let now_day = today_utc();
         if now_day != today {
             today = now_day;
-            st.mission_completions.retain(|c| c.day == today);
-            if let Ok(mut g) = completions.lock() {
-                g.retain(|c| c.day == today);
-            }
             rolled = true;
         }
 
@@ -2219,6 +2247,16 @@ fn watch_loop(
         let dirty = !lines.is_empty() || pos != st.log_position || rolled;
         st.log_position = pos;
         if dirty {
+            // Pass 62 §1a: the persisted ledger follows the shared
+            // one, which the report pipeline prunes on alert expiry
+            // (see `apply_retained_completions`). Adopt it before the
+            // save so an expired alert's completion leaves state.json
+            // too — the watch loop's own copy is only ever appended
+            // to, never pruned, so without this the file would keep
+            // entries the live ledger already dropped.
+            if let Ok(g) = completions.lock() {
+                st.mission_completions = g.clone();
+            }
             st.save(&state_dir)?;
         }
     }
@@ -2726,5 +2764,80 @@ mod tests {
         assert!(!pre_credit_was_needed(&d, &c, &s, "Fang Prime Handle"));
         // Kompressa is not owned: still Need.
         assert!(pre_credit_was_needed(&d, &c, &s, "Kompressa Prime Barrel"));
+    }
+
+    /// Pass 62 §1a: the write-back drops only entries the report
+    /// consumed and the fresh worldstate pruned — a completion proved
+    /// while the report was generating survives it.
+    #[test]
+    fn retained_writeback_drops_only_pruned_snapshot_entries() {
+        let mk = |id: &str, day: &str| elog::MissionCompletion {
+            info: elog::MissionInfo {
+                alert_id: id.to_owned(),
+                alert_tag: "GiftOfTheLotus".to_owned(),
+                ..Default::default()
+            },
+            day: day.to_owned(),
+            observed_at: format!("{day}T12:00:00Z"),
+        };
+        let live = mk("lotus-live", "2026-10-17");
+        let expired = mk("lotus-gone", "2026-10-16");
+        let shared = Arc::new(Mutex::new(vec![live.clone(), expired.clone()]));
+        // The report consumed [live, expired] and kept only [live].
+        apply_retained_completions(&shared, &[live.clone(), expired.clone()], &[live.clone()]);
+        assert_eq!(*shared.lock().unwrap(), vec![live.clone()]);
+        // A completion proved mid-report was never in the snapshot:
+        // a later write-back for that same snapshot must not drop it.
+        shared.lock().unwrap().push(mk("lotus-new", "2026-10-18"));
+        apply_retained_completions(&shared, &[live.clone(), expired.clone()], &[live.clone()]);
+        let kept = shared.lock().unwrap().clone();
+        assert_eq!(kept.len(), 2, "mid-report completion survives: {kept:?}");
+        assert!(kept.iter().any(|c| c.info.alert_id == "lotus-new"));
+    }
+
+    /// Pass 62 §1a: startup no longer day-prunes the ledger. A
+    /// completion stamped yesterday is still in the shared ledger
+    /// after the watch loop starts — its fate is decided by the
+    /// report pipeline against the live worldstate, not the clock.
+    #[test]
+    fn startup_keeps_yesterdays_completion() {
+        let dir = tmpdir("keep-yesterday");
+        let log = dir.join("EE.log");
+        let state = dir.join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let yesterday = "2026-10-17";
+        let mut st = crate::state::AppState::default();
+        st.mission_completions = vec![elog::MissionCompletion {
+            info: elog::MissionInfo {
+                alert_id: "lotus-1".to_owned(),
+                alert_tag: "GiftOfTheLotus".to_owned(),
+                ..Default::default()
+            },
+            day: yesterday.to_owned(),
+            observed_at: "2026-10-17T23:30:00Z".to_owned(),
+        }];
+        st.save(&state).unwrap();
+        std::fs::write(&log, "14.148 Sys [Info]: Logged in Jenterrobahne\n").unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let shutdown = Shutdown::new();
+        let status = Arc::new(Mutex::new(TrayStatus::default()));
+        let shared = Arc::new(Mutex::new(Vec::new()));
+        let handle = spawn_watch(
+            log.clone(),
+            20,
+            state.clone(),
+            status,
+            tx,
+            shutdown.receiver(),
+            shared.clone(),
+        );
+        let _ = collect_triggers(&mut rx, Duration::from_millis(500));
+        let kept = shared.lock().unwrap().clone();
+        assert_eq!(kept.len(), 1, "yesterday's completion survives startup");
+        assert_eq!(kept[0].day, yesterday);
+        assert_eq!(kept[0].info.alert_id, "lotus-1");
+        shutdown.trigger();
+        handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

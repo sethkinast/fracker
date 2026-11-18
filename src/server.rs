@@ -19,7 +19,9 @@
 //!   fragments whose rendered HTML changed since <known> (forty-first
 //!   pass) — the page swaps those in place, so updates never navigate;
 //! - `POST /tick` records one checkbox change server-side, keyed by item
-//!   id + in-game day;
+//!   id + in-game day — Nightwave ids (`nw-…`) by their Sunday-start
+//!   week instead (pass 62 §5), so a Monday tick still shows done
+//!   Friday and the Sunday reset clears it;
 //! - `POST /unverified` toggles one part's unverified (⍻) stock
 //!   membership in `stock.json` (thirtieth pass) — validated against
 //!   the roster parts universe, persisted through the stock writer,
@@ -938,6 +940,15 @@ fn apply_tick(
     };
     if let Ok(mut store) = ticks.lock() {
         store.set(&day, &id, done);
+        // Pass 62 §5: a tick made today also retires stale scope —
+        // yesterday's daily ticks and last week's Nightwave bucket
+        // leave the file. Only when the tick's day IS today: a stale
+        // page (loaded before midnight) ticking yesterday's day must
+        // never prune today's ticks.
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        if day == today {
+            store.retain_current(&day);
+        }
         // Persist best-effort; the in-memory store already reflects it.
         let _ = store.save(ticks_path);
     }
@@ -1436,6 +1447,32 @@ mod tests {
         // The change was persisted to the given path.
         assert!(TickStore::load(&path).is_done("2026-10-18", "chunk-1"));
         assert_eq!(apply_tick(&ticks, &path, "nope"), "400 Bad Request");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Pass 62 §5: a Nightwave tick posted for Monday lands in the
+    /// `nw-week:` bucket, reads back done on Friday, is gone after
+    /// the Sunday reset — and the persisted file carries the same
+    /// week scope.
+    #[test]
+    fn nightwave_tick_posts_to_the_week_bucket() {
+        let ticks = Arc::new(Mutex::new(TickStore::default()));
+        let path = std::env::temp_dir().join(format!("fracker-tick-nw-{}.json", std::process::id()));
+        let status = apply_tick(
+            &ticks,
+            &path,
+            r#"{"id":"nw-weekly-sortie","day":"2026-11-16","done":true}"#,
+        );
+        assert_eq!(status, "200 OK");
+        {
+            let store = ticks.lock().unwrap();
+            assert!(store.is_done("2026-11-16", "nw-weekly-sortie"), "ticked Monday");
+            assert!(store.is_done("2026-11-20", "nw-weekly-sortie"), "still done Friday");
+            assert!(!store.is_done("2026-11-22", "nw-weekly-sortie"), "Sunday reset clears");
+        }
+        let loaded = TickStore::load(&path);
+        assert!(loaded.is_done("2026-11-20", "nw-weekly-sortie"), "persisted week bucket");
+        assert!(!loaded.is_done("2026-11-22", "nw-weekly-sortie"));
         let _ = std::fs::remove_file(&path);
     }
 

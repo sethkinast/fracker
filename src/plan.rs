@@ -52,8 +52,10 @@ pub struct PlanInput<'a> {
     pub recent_gear: &'a HashSet<String>,
     pub steel_path_tiebreak: bool,
     /// Log-proven mission completions (ninth pass §4): the resident's
-    /// accumulated, today-scoped ledger. Used to strike live alerts that
-    /// the log positively matched (never inferred).
+    /// accumulated, lifetime-scoped ledger (pass 62 §1a — retained while
+    /// the alert is still live, pruned on alert expiry, never by the day
+    /// boundary). Used to strike live alerts that the log positively
+    /// matched (never inferred).
     pub completed_missions: &'a [crate::elog::MissionCompletion],
     /// Runtime estimates/thresholds (loaded from `data/`).
     pub tuning: &'a Tuning,

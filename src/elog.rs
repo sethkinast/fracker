@@ -20,6 +20,7 @@
 
 use std::collections::HashMap;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -292,9 +293,14 @@ impl MissionInfo {
 }
 
 /// A mission the log proved completed (an end-of-match success marker
-/// after its `MissionInfo` was armed), scoped to the UTC day it fired.
-/// The resident persists these and feeds them to every report so a
-/// finished alert strikes regardless of any manual tick.
+/// after its `MissionInfo` was armed). Pass 62 §1a: retention is keyed
+/// to the alert's lifetime, not the UTC day it fired — a completion for
+/// an alert that is still live (e.g. Gift of the Lotus, completed
+/// yesterday) stays in the ledger across the day boundary, and is
+/// pruned only when its alert expires (see
+/// [`retain_live_completions`]). The resident persists these and feeds
+/// them to every report so a finished alert strikes regardless of any
+/// manual tick.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MissionCompletion {
     #[serde(default)]
@@ -371,6 +377,41 @@ impl MissionCompletion {
         node_both || type_both
     }
 
+    /// Pass 62 §1a: true when this completion still strikes `alert`
+    /// AND that alert is still live at `now` — the retention predicate
+    /// for the §4 ledger. A completion for an alert that has since
+    /// expired (or left the worldstate entirely) no longer strikes
+    /// anything and is pruned; a completion for a still-live alert is
+    /// retained across the UTC day boundary, however old its `day`
+    /// stamp is. Liveness: a parseable expiry must be after `now`; an
+    /// empty expiry (legacy feed with no `Expiry` field) cannot prove
+    /// expiry, so the alert counts as live; a present-but-unreadable
+    /// expiry counts as expired — the same fail-closed rule as the
+    /// activation guard.
+    pub fn strikes_live_alert(
+        &self,
+        alert: &crate::model::Alert,
+        now: DateTime<Utc>,
+    ) -> bool {
+        if !self.matches_alert(alert) {
+            return false;
+        }
+        match alert.expiry.parse::<DateTime<Utc>>() {
+            Ok(expiry) => expiry > now,
+            Err(_) => alert.expiry.is_empty(),
+        }
+    }
+
+    /// Pass 62 §1a: true when this completion still strikes any alert
+    /// live at `now` in `alerts` (the current worldstate's alert list).
+    pub fn strikes_any_live_alert(
+        &self,
+        alerts: &[crate::model::Alert],
+        now: DateTime<Utc>,
+    ) -> bool {
+        alerts.iter().any(|a| self.strikes_live_alert(a, now))
+    }
+
     /// The §4 activation guard for corroboration paths. An alert with no
     /// recorded activation cannot be guarded, so the corroboration is
     /// allowed (legacy feeds with no `Activation` field at all). A
@@ -394,6 +435,24 @@ impl MissionCompletion {
         };
         observed + chrono::Duration::seconds(ACTIVATION_EPSILON_SECS) >= activation
     }
+}
+
+/// Pass 62 §1a: prune a §4 mission ledger to the completions whose
+/// alert is still live at `now` in `alerts` (the current worldstate's
+/// alert list). Retention is keyed to the alert's lifetime, not the
+/// UTC day boundary: a completion observed yesterday for an alert
+/// that is still live today is kept, and a completion whose alert has
+/// expired — or left the worldstate — is dropped. A completion that
+/// can strike no live alert at all (including a plain, non-alert
+/// mission completion, which the planner never strikes) is dropped
+/// too: it carries no rendering value and would otherwise accumulate
+/// forever. Pure in `now`, so tests drive it with a fake clock.
+pub fn retain_live_completions(
+    completions: &mut Vec<MissionCompletion>,
+    alerts: &[crate::model::Alert],
+    now: DateTime<Utc>,
+) {
+    completions.retain(|c| c.strikes_any_live_alert(alerts, now));
 }
 
 /// Normalize a mission type so `MT_MOBILE_DEFENSE` and `Mobile Defense`
@@ -1431,6 +1490,128 @@ mod tests {
             ..alert("2026-10-17T00:00:00Z")
         };
         assert!(by_id.matches_alert(&id_alert));
+    }
+
+    /// Pass 62 §1a: retention is keyed to the alert's lifetime, not
+    /// the day boundary. A Gift of the Lotus completed yesterday is
+    /// still live today, so its strike survives; once the alert
+    /// expires (or leaves the worldstate) the completion is pruned.
+    /// `now` is passed in explicitly — the fake clock.
+    #[test]
+    fn retention_keeps_yesterdays_completion_for_a_still_live_alert() {
+        use crate::model::{Alert, AlertMission};
+        let completion = MissionCompletion {
+            info: MissionInfo {
+                alert_id: "lotus-1".to_owned(),
+                alert_tag: "GiftOfTheLotus".to_owned(),
+                ..Default::default()
+            },
+            day: "2026-10-17".to_owned(),
+            observed_at: "2026-10-17T23:30:00Z".to_owned(),
+        };
+        let alert = Alert {
+            id: "lotus-1".to_owned(),
+            tag: "GiftOfTheLotus".to_owned(),
+            activation: "2026-10-17T12:00:00Z".to_owned(),
+            activation_degraded: false,
+            expiry: "2026-10-18T12:00:00Z".to_owned(),
+            mission: AlertMission {
+                node: "Nimus (Eris)".to_owned(),
+                ..Default::default()
+            },
+        };
+        // Today, 08:00 UTC: the alert is still live, the completion
+        // was observed yesterday — retained across the boundary.
+        let now = "2026-10-18T08:00:00Z"
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .unwrap();
+        assert!(completion.strikes_live_alert(&alert, now));
+        let mut ledger = vec![completion.clone()];
+        retain_live_completions(&mut ledger, std::slice::from_ref(&alert), now);
+        assert_eq!(ledger.len(), 1, "live alert keeps its strike");
+    }
+
+    #[test]
+    fn retention_prunes_a_completion_whose_alert_has_expired() {
+        use crate::model::{Alert, AlertMission};
+        let completion = MissionCompletion {
+            info: MissionInfo {
+                alert_id: "lotus-1".to_owned(),
+                alert_tag: "GiftOfTheLotus".to_owned(),
+                ..Default::default()
+            },
+            day: "2026-10-17".to_owned(),
+            observed_at: "2026-10-17T23:30:00Z".to_owned(),
+        };
+        let alert = |expiry: &str| Alert {
+            id: "lotus-1".to_owned(),
+            tag: "GiftOfTheLotus".to_owned(),
+            activation: "2026-10-17T12:00:00Z".to_owned(),
+            activation_degraded: false,
+            expiry: expiry.to_owned(),
+            mission: AlertMission {
+                node: "Nimus (Eris)".to_owned(),
+                ..Default::default()
+            },
+        };
+        let now = "2026-10-18T08:00:00Z"
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .unwrap();
+        // Expired at midnight: pruned even though the id matches.
+        assert!(!completion.strikes_live_alert(&alert("2026-10-18T00:00:00Z"), now));
+        let mut ledger = vec![completion.clone()];
+        retain_live_completions(&mut ledger, std::slice::from_ref(&alert("2026-10-18T00:00:00Z")), now);
+        assert!(ledger.is_empty(), "expired alert drops its completion");
+        // Gone from the worldstate entirely: pruned as well.
+        let mut ledger = vec![completion.clone()];
+        retain_live_completions(&mut ledger, &[], now);
+        assert!(ledger.is_empty(), "absent alert drops its completion");
+    }
+
+    #[test]
+    fn retention_corroboration_path_is_liveness_gated_too() {
+        use crate::model::{Alert, AlertMission};
+        // No alert id: identity by tag + node + type, inside the
+        // activation window.
+        let completion = MissionCompletion {
+            info: MissionInfo {
+                alert_tag: "RoadToTauEvent".to_owned(),
+                location: "SolNode175".to_owned(),
+                mission_type: "MT_HIVE".to_owned(),
+                ..Default::default()
+            },
+            day: "2026-10-17".to_owned(),
+            observed_at: "2026-10-17T12:00:00Z".to_owned(),
+        };
+        let alert = |expiry: &str| Alert {
+            tag: "RoadToTauEvent".to_owned(),
+            activation: "2026-10-17T11:00:00Z".to_owned(),
+            activation_degraded: false,
+            expiry: expiry.to_owned(),
+            mission: AlertMission {
+                node: "Nimus (Eris)".to_owned(),
+                sol_node: "SolNode175".to_owned(),
+                mission_type: "Hive".to_owned(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let now = "2026-10-18T00:30:00Z"
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .unwrap();
+        assert!(completion.strikes_live_alert(&alert("2026-10-18T05:00:00Z"), now));
+        assert!(!completion.strikes_live_alert(&alert("2026-10-18T00:00:00Z"), now));
+        // A plain non-alert mission completion strikes no live alert
+        // and is pruned: the planner never renders it.
+        let plain = MissionCompletion {
+            info: MissionInfo::default(),
+            day: "2026-10-17".to_owned(),
+            observed_at: "2026-10-17T12:00:00Z".to_owned(),
+        };
+        let mut ledger = vec![completion.clone(), plain];
+        retain_live_completions(&mut ledger, std::slice::from_ref(&alert("2026-10-18T05:00:00Z")), now);
+        assert_eq!(ledger.len(), 1, "only the live-alert completion survives");
+        assert_eq!(ledger[0], completion);
     }
 
     /// Ninth pass §4 audit: parse Seth's real EE.log (gitignored) and
