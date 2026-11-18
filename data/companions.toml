@@ -34,3 +34,15 @@ profile_prime_sentinels_mastered = 5
 profile_prime_sentinels_unmastered = ["Nautilus Prime"]
 backlog_primes_unmastered = 63
 kavasa_in_backlog = false
+# Pass-62 regen (2026-11-18): Pets backlog derived from the same
+# fixture profile. Masterable pets in WFCD Pets.json: 22; mastered
+# per profile XPInfo >= 900k (companions): 10; unmastered (absent
+# from XPInfo = 0 XP): 12 — Bhaira Hound, Crescent Vulpaphyla,
+# Dorma Hound, Lambeo Moa, Medjay Predasite, Nychus Moa, Panzer
+# Vulpaphyla, Para Moa, Pharaoh Predasite, Sly Vulpaphyla, Vasca
+# Kavat, Vizier Predasite. Venari / Venari Prime stay excluded
+# (masterable=false in the dataset; see [unmasterable] above).
+pets_in_roster = 22
+profile_pets_mastered = 10
+profile_pets_unmastered = ["Bhaira Hound", "Crescent Vulpaphyla", "Dorma Hound", "Lambeo Moa", "Medjay Predasite", "Nychus Moa", "Panzer Vulpaphyla", "Para Moa", "Pharaoh Predasite", "Sly Vulpaphyla", "Vasca Kavat", "Vizier Predasite"]
+backlog_pets_unmastered = 12

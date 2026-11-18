@@ -61,10 +61,12 @@ pub struct AppState {
     /// the final mission-end picks.
     #[serde(default)]
     pub log_position: crate::watch::LogPosition,
-    /// Log-proven mission completions (ninth pass §4), today-scoped. The
-    /// resident feeds these to every report so a finished worldstate
-    /// alert strikes regardless of any manual tick; persisted so a
-    /// restart mid-session keeps its strikes.
+    /// Log-proven mission completions (ninth pass §4), lifetime-scoped
+    /// since pass 62 §1a: retained while their alert is still live, pruned
+    /// on alert expiry by the report pipeline — never by the UTC day
+    /// boundary. The resident feeds these to every report so a finished
+    /// worldstate alert strikes regardless of any manual tick; persisted
+    /// so a restart mid-session keeps its strikes.
     #[serde(default)]
     pub mission_completions: Vec<crate::elog::MissionCompletion>,
 }

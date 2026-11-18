@@ -271,15 +271,29 @@ pub fn fmt_compact(n: u32) -> String {
     }
 }
 
-/// "25m" / "1h05m" / "in 2d" -> minutes, for the event-alert heat class.
+/// "25m" / "1h05m" / "12d 14h" / "in 2d" -> minutes, for the
+/// event-alert heat class. Day-long labels parse to their full
+/// minute count (heat only ever fires below 60m, so they stay cold).
 fn parse_left_minutes(left: &str) -> Option<u32> {
     let s = left.trim().trim_start_matches("in ").trim();
-    if let Some((h, rest)) = s.split_once('h') {
-        let hh: u32 = h.trim().parse().ok()?;
-        let mm: u32 = rest.trim().trim_end_matches('m').trim().parse().unwrap_or(0);
-        return Some(hh * 60 + mm);
+    let mut total: u32 = 0;
+    let mut rest = s;
+    if let Some((d, r)) = rest.split_once('d') {
+        if !d.trim().is_empty() && d.trim().chars().all(|c| c.is_ascii_digit()) {
+            total += d.trim().parse::<u32>().ok()? * 24 * 60;
+            rest = r.trim();
+            if rest.is_empty() {
+                return Some(total);
+            }
+        }
     }
-    s.strip_suffix('m')?.trim().parse().ok()
+    if let Some((h, r)) = rest.split_once('h') {
+        let hh: u32 = h.trim().parse().ok()?;
+        let mm: u32 = r.trim().trim_end_matches('m').trim().parse().unwrap_or(0);
+        return Some(total + hh * 60 + mm);
+    }
+    let m: u32 = rest.strip_suffix('m')?.trim().parse().ok()?;
+    Some(total + m)
 }
 
 /// "Xini (Eris)" -> ("Xini", "Eris"); a bare node keeps an empty planet.
@@ -399,7 +413,12 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     // dropped socket. A file:// demo export has neither and is simply
     // static. The refresh-flash rule (§19) keeps every repaint dark
     // (root background + color-scheme: dark).
-    h.push_str("<title>Fracker — session plan</title>\n");
+    h.push_str("<title>Fracker</title>\n");
+    // The Warframe Lotus logo as favicon (sixty-second pass): the
+    // resident serves the embedded PNG at /favicon.ico, so the
+    // served page carries the logo in the tab. A file:// demo
+    // export has no server; the link simply 404s there, harmless.
+    h.push_str("<link rel=\"icon\" type=\"image/png\" href=\"/favicon.ico\">\n");
     // Demo exports are self-contained (addendum #23: zero CDN
     // references): no font links, no hotlinks — system type only.
     // The product page keeps the display type + CDN icons.
@@ -505,7 +524,7 @@ pub fn render_plan(plan: &Plan, ctx: &RenderContext<'_>) -> String {
 /// reward window (forty-seventh pass, Seth's spec).
 const SEARCH_OVERLAY_SHELL: &str = r#"<div id="search-overlay" hidden>
 <div class="so-box">
-<div class="so-top"><span class="so-prompt">&#8981;</span><span id="search-query"></span></div>
+<div class="so-top"><span class="so-prompt">&#8981;</span><input id="search-query" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Search relics and items"></div>
 <div id="search-result"></div>
 <div class="so-hint" id="search-hint">relics &amp; prime items &middot; esc to close</div>
 </div>
@@ -780,6 +799,18 @@ pub fn fragment_hash(html: &str) -> u64 {
     hasher.finish()
 }
 
+/// Mastery-rank label (pass 62 §7): ranks 0–30 read "MR{n}";
+/// Legendary ranks 31+ read "LR{n-30}" (LR1 at 31 through LR6
+/// at 36, the highest currently achievable). Display only — the
+/// caps math still uses the raw numeric rank.
+pub(crate) fn mastery_rank_label(mr: u32) -> String {
+    if mr >= 31 {
+        format!("LR{}", mr - 30)
+    } else {
+        format!("MR{mr}")
+    }
+}
+
 /// The mock's slim header: brand + three status pills + one-line stamp.
 fn header_html(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     let vendor = esc(&ctx.tuning.planner.vendor.name.to_uppercase());
@@ -798,7 +829,7 @@ fn header_html(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     let parts: usize = plan.goals.iter().map(|g| g.parts.len()).sum();
     let mr = ctx
         .mastery_rank
-        .map(|m| m.to_string())
+        .map(mastery_rank_label)
         .unwrap_or_else(|| "—".to_owned());
     let mut h = String::new();
     h.push_str("<header class=\"top\">\n");
@@ -824,7 +855,7 @@ fn header_html(plan: &Plan, ctx: &RenderContext<'_>) -> String {
     // opens on any printable keypress (see search::client_script).
     h.push_str("<button type=\"button\" class=\"sbtn\" id=\"search-open\" title=\"Search relics &amp; items — or just start typing\" aria-label=\"Search relics and items\">&#8981;</button>\n");
     h.push_str(&format!(
-        "<div class=\"stamp\">MR{mr} &middot; generated {} &middot; {} &middot; {}</div>\n",
+        "<div class=\"stamp\">{mr} &middot; generated {} &middot; {} &middot; {}</div>\n",
         esc(&ctx.generated_label),
         esc(&ctx.world_status),
         esc(&ctx.targets_status),
@@ -869,7 +900,7 @@ const DE_LOCK_JS: &str = r#"(function () {
 "#;
 
 /// One-line status countdown for a world-state expiry, relative to the
-/// plan's own timestamp ("in 2d", "in 5h", "in 25m").
+/// plan's own timestamp ("in 2d 3h", "in 5h", "in 25m").
 fn relative_countdown(ctx: &RenderContext<'_>, expiry: &str) -> String {
     let now = ctx
         .world
@@ -884,10 +915,11 @@ fn relative_countdown(ctx: &RenderContext<'_>, expiry: &str) -> String {
                 "now".to_owned()
             } else if mins < 60 {
                 format!("in {mins}m")
-            } else if mins < 48 * 60 {
+            } else if mins < 24 * 60 {
                 format!("in {}h", mins / 60)
             } else {
-                format!("in {}d", mins / (24 * 60))
+                // Pass 62 §1b: two places — d/h at a day or more.
+                format!("in {}", crate::plan::format_duration_mins(mins))
             }
         }
         _ => "—".to_owned(),
@@ -2213,13 +2245,12 @@ label.row{cursor:pointer}
 .so-box{width:min(900px,94vw)}
 .so-top{display:flex;align-items:baseline;gap:14px;border-bottom:2px solid var(--cy);padding-bottom:10px;margin-bottom:18px}
 .so-prompt{color:var(--cy);font-size:30px}
-#search-query{font:700 38px Rajdhani,sans-serif;letter-spacing:.04em;color:var(--tx);min-height:46px}
-/* An empty #search-query has no text run, so in the baseline-
-   aligned .so-top flex row its baseline is synthesized from its
-   bottom edge and the row jumps up when the first glyph lands
-   (fiftieth pass). The nbsp strut gives the empty state the same
-   alphabetic baseline as any glyph: the line cannot shift. */
-#search-query:empty::before{content:"\00a0"}
+#search-query{font:700 38px Rajdhani,sans-serif;letter-spacing:.04em;color:var(--tx);min-height:46px;background:transparent;border:0;outline:0;padding:0;width:100%}
+/* A real <input> (sixty-second pass): its own line box holds the
+   baseline, so the empty query can no longer shift the row — the
+   fiftieth pass's :empty::before nbsp strut is retired with the
+   <span> it propped up. Native editing comes free: Ctrl+A selects
+   the query, Ctrl+C copies it, paste works. */
 .bd.u{color:#aeefce;border-color:#aeefce}
 .sr .r .srdeal{grid-column:1/-1;font-size:16px;color:var(--mut)}
 .so-hint{margin-top:16px;color:var(--mut);font-size:14px;letter-spacing:.08em;min-height:20px}
@@ -2273,11 +2304,24 @@ const JS: &str = r#"
   var served = document.body.hasAttribute('data-fracker-ticks');
   var done = {};
   // Checkbox ticks: the resident's loopback HTTP server is the store
-  // of record (POST /tick, keyed by item id + in-game day) and
-  // re-applies the ticks it injects onto <body data-fracker-ticks>
-  // (base64 JSON) on every serve — and in every fragment payload, so
-  // a swap carries the same store. localStorage remains only a
-  // progressive cache for a file:// page.
+  // of record (POST /tick, keyed by item id + in-game day — Nightwave
+  // ids by week, pass 62 §5) and re-applies the ticks it injects onto
+  // <body data-fracker-ticks> (base64 JSON) on every serve — and in
+  // every fragment payload, so a swap carries the same store.
+  // localStorage remains only a progressive cache for a file:// page.
+  // Nightwave acts refresh every Sunday 00:00 UTC, so an `nw-` tick
+  // lives in the `nw-week:<sunday>` bucket for its week: a Monday
+  // tick still shows done Friday, and the Sunday reset starts the
+  // next week unticked. Ticks stored before pass 62 under plain day
+  // keys are merged too when that day falls in the current week.
+  function weekSunday(d) {
+    var p = (d || '').split('-');
+    if (p.length !== 3) return '';
+    var dt = new Date(Date.UTC(+p[0], +p[1] - 1, +p[2]));
+    if (isNaN(dt.getTime())) return '';
+    dt.setUTCDate(dt.getUTCDate() - dt.getUTCDay());
+    return dt.toISOString().slice(0, 10);
+  }
   function loadTicks() {
     day = document.body.getAttribute('data-day') || '';
     done = {};
@@ -2286,10 +2330,30 @@ const JS: &str = r#"
       if (raw) {
         var store = JSON.parse(atob(raw)).days || {};
         (store[day] || []).forEach(function (i) { done[i] = true; });
+        var wk = weekSunday(day);
+        if (wk) {
+          (store['nw-week:' + wk] || []).forEach(function (i) { done[i] = true; });
+          var end = new Date(Date.UTC(+wk.slice(0, 4), +wk.slice(5, 7) - 1, +wk.slice(8, 10)));
+          end.setUTCDate(end.getUTCDate() + 7);
+          var endStr = end.toISOString().slice(0, 10);
+          Object.keys(store).forEach(function (k) {
+            if (k >= wk && k < endStr) {
+              (store[k] || []).forEach(function (i) {
+                if (i.indexOf('nw-') === 0) { done[i] = true; }
+              });
+            }
+          });
+        }
       }
     } catch (e) {}
   }
-  function key(id) { return 'fracker:' + day + ':' + id; }
+  function key(id) {
+    if (id.indexOf('nw-') === 0) {
+      var wk = weekSunday(day);
+      if (wk) { return 'fracker:nw-week:' + wk + ':' + id; }
+    }
+    return 'fracker:' + day + ':' + id;
+  }
   function host(box) { return box.closest('.cell,.row,.g'); }
   function paint(box, on) {
     var h = host(box);
@@ -3117,6 +3181,86 @@ mod tests {
         );
     }
 
+    #[test]
+    fn page_title_is_just_fracker() {
+        // Pass 62 §3: the plan page's <title> reads exactly "Fracker".
+        let t = crate::tuning::Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let ctx = empty_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
+        let html = render_plan(&Plan::default(), &ctx);
+        assert!(html.contains("<title>Fracker</title>"), "title is just Fracker");
+        assert!(
+            !html.contains("Fracker — session plan"),
+            "old session-plan title is gone"
+        );
+    }
+
+    #[test]
+    fn mastery_rank_label_maps_legendary_ranks() {
+        // Pass 62 §7: 0–30 -> MR{n}, 31+ -> LR{n-30}.
+        assert_eq!(mastery_rank_label(0), "MR0");
+        assert_eq!(mastery_rank_label(30), "MR30");
+        assert_eq!(mastery_rank_label(31), "LR1");
+        assert_eq!(mastery_rank_label(36), "LR6");
+    }
+
+    #[test]
+    fn header_stamp_shows_legendary_rank() {
+        // Pass 62 §7: Seth at Legendary 1 sees "LR1" in the stamp,
+        // not "MR31"; rank 30 still reads "MR30".
+        let t = crate::tuning::Tuning::for_tests();
+        let world = WorldState::default();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let mut ctx = empty_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
+        ctx.mastery_rank = Some(31);
+        let html = render_plan(&Plan::default(), &ctx);
+        assert!(html.contains(">LR1 &middot;"), "stamp reads LR1 at rank 31");
+        assert!(!html.contains("MR31"), "no MR31 anywhere in the page");
+        ctx.mastery_rank = Some(30);
+        let html = render_plan(&Plan::default(), &ctx);
+        assert!(html.contains(">MR30 &middot;"), "stamp still reads MR30 at rank 30");
+    }
+
+    #[test]
+    fn relative_countdown_renders_days_with_hours() {
+        // Pass 62 §1b: 302h16m out reads "in 12d 14h", not "in 302h"
+        // or "in 12d"; below a day the coarse "in Nh" stands.
+        let t = crate::tuning::Tuning::for_tests();
+        let mut world = WorldState::default();
+        world.timestamp = "2026-10-20T00:00:00Z".to_owned();
+        let weekly: HashMap<String, String> = HashMap::new();
+        let proven: HashSet<String> = HashSet::new();
+        let icons: HashMap<String, String> = HashMap::new();
+        let cats: HashMap<String, Vec<String>> = HashMap::new();
+        let ctx = empty_ctx(&world, &t, &weekly, &proven, &icons, &cats, None);
+        assert_eq!(
+            relative_countdown(&ctx, "2026-11-01T14:16:00Z"),
+            "in 12d 14h"
+        );
+        assert_eq!(relative_countdown(&ctx, "2026-10-21T06:00:00Z"), "in 1d 6h");
+        assert_eq!(relative_countdown(&ctx, "2026-10-20T05:30:00Z"), "in 5h");
+        assert_eq!(relative_countdown(&ctx, "2026-10-20T00:25:00Z"), "in 25m");
+    }
+
+    #[test]
+    fn parse_left_minutes_handles_day_labels() {
+        // Pass 62 §1b: the new "12d 14h" alert labels still parse
+        // for the heat class (day-long alerts stay cold, as before).
+        assert_eq!(parse_left_minutes("12d 14h"), Some(12 * 24 * 60 + 14 * 60));
+        assert_eq!(parse_left_minutes("in 2d"), Some(2 * 24 * 60));
+        assert_eq!(parse_left_minutes("2d"), Some(2 * 24 * 60));
+        assert_eq!(parse_left_minutes("1h05m"), Some(65));
+        assert_eq!(parse_left_minutes("5h30m"), Some(330));
+        assert_eq!(parse_left_minutes("25m"), Some(25));
+    }
+
     /// Addendum #84: a part row in state Have is denoted on the Hunt
     /// card (row class + check mark) and fills its Backlog pip.
     #[test]
@@ -3821,6 +3965,28 @@ mod tests {
             "description renders with the name"
         );
         assert!(html.contains(">Daily <small>1 · 1k</small>"), "nightwave grouping");
+    }
+
+    /// Pass 62 §5: the page's tick script merges the current
+    /// Nightwave week bucket (`nw-week:<sunday>`) on load, so a tick
+    /// made Monday paints done on Friday's page and the Sunday reset
+    /// clears it. The script is a string constant — this pins the
+    /// wiring; the bucket semantics themselves are covered by the
+    /// `TickStore` tests.
+    #[test]
+    fn tick_script_merges_the_nightwave_week_bucket() {
+        assert!(
+            JS.contains("store['nw-week:' + wk]"),
+            "loadTicks reads the current week's Nightwave bucket"
+        );
+        assert!(
+            JS.contains("function weekSunday(d)"),
+            "the week is anchored on its Sunday"
+        );
+        assert!(
+            JS.contains("fracker:nw-week:' + wk + ':' + id"),
+            "the file:// fallback key is week-scoped for nw- ids too"
+        );
     }
 
     #[test]
@@ -4587,9 +4753,14 @@ mod tests {
             "the overlay script prefetches its index"
         );
         assert!(
-            html.contains("#search-query:empty::before{content:\"\\00a0\"}"),
-            "the query line's empty-state strut (fiftieth pass): \
-             the empty query carries a text baseline, so the line cannot shift"
+            html.contains("<input id=\"search-query\" type=\"text\""),
+            "the query line is a real text input (sixty-second pass): \
+             native Ctrl+A/Ctrl+C/paste, no JS selection to maintain"
+        );
+        assert!(
+            html.contains("<link rel=\"icon\" type=\"image/png\" href=\"/favicon.ico\">"),
+            "the page head carries the Warframe logo favicon link \
+             (sixty-second pass)"
         );
         assert!(
             html.contains(".bd.u{color:#aeefce;border-color:#aeefce}"),

@@ -135,12 +135,17 @@ pub fn client_script() -> String {
     const TEMPLATE: &str = r#"// Item search overlay (forty-seventh pass): Alfred-style, built
 // for a one-glance read during the 15 s reward window. An icon in
 // the header opens it, and so does simply starting to type — the
-// page has no text inputs, so any printable keypress (modifier
-// combos ignored) pops the overlay seeded with that character.
-// Esc closes it, and so does the window losing focus. There is no
-// submit and no selection: typing filters the prefetched,
-// server-rendered index LOCALLY (a keystroke never waits on the
-// network) and exactly ONE best result shows, fully expanded.
+// page has no text inputs outside the overlay, so any printable
+// keypress (modifier combos ignored) pops the overlay seeded with
+// that character. The query lives in a REAL text <input>
+// (sixty-second pass), so Ctrl+A selects it, Ctrl+C copies it,
+// and paste works natively — the script only syncs the input's
+// value into the query and paints the best match; it never
+// re-implements editing. Esc closes it, and so does the window
+// losing focus. There is no submit and no selection: typing
+// filters the prefetched, server-rendered index LOCALLY (a
+// keystroke never waits on the network) and exactly ONE best
+// result shows, fully expanded.
 // Matching mirrors search::best_match: every word of the query
 // must be a prefix of one word token of the name ("Prime" tokens
 // are not indexed); closest token fit (summed over the words)
@@ -245,7 +250,11 @@ pub fn client_script() -> String {
     });
   }
   function paint() {
-    queryEl.textContent = query;
+    // Sync the input only when the script's query differs from
+    // what the input already shows: an unconditional write would
+    // move the caret (and drop a Ctrl+A selection) on every
+    // keystroke the input itself just handled.
+    if (queryEl.value !== query) { queryEl.value = query; }
     resultEl.innerHTML = '';
     var q = query.replace(/^\s+|\s+$/g, '').toLowerCase();
     var w = winner(q);
@@ -266,6 +275,10 @@ pub fn client_script() -> String {
     open = true;
     query = seed || '';
     overlay.hidden = false;
+    // Focus the real input: typing, Backspace, and Ctrl+A/Ctrl+C
+    // then land on it natively instead of on the document handler.
+    queryEl.value = query;
+    queryEl.focus();
     ensureIndex();
     paint();
   }
@@ -274,10 +287,23 @@ pub fn client_script() -> String {
     open = false;
     overlay.hidden = true;
     query = '';
+    queryEl.blur();
   }
+  // The input is the editor: every edit (typing, Backspace,
+  // paste, cut) arrives here, and the script only re-filters.
+  queryEl.addEventListener('input', function () {
+    query = queryEl.value;
+    paint();
+  });
   document.addEventListener('keydown', function (e) {
     if (open) {
       if (e.key === 'Escape') { closeOverlay(); e.preventDefault(); return; }
+      // Keys landing on the input are the input's own: native
+      // editing — typing, Backspace, Ctrl+A select-all, Ctrl+C,
+      // paste — with the 'input' listener above doing the
+      // re-filter. The document handler must not also append the
+      // character or swallow the modifier combo.
+      if (e.target === queryEl) { return; }
       if (e.ctrlKey || e.metaKey || e.altKey) { return; }
       if (e.key === 'Backspace') {
         query = query.slice(0, -1);
@@ -480,8 +506,54 @@ mod tests {
         assert!(js.contains("'/unverified'"), "the ⍻ toggle path: {js}");
         assert!(js.contains("'Escape'"), "esc closes: {js}");
         assert!(js.contains("'blur'"), "blur closes: {js}");
-        assert!(js.contains("ctrlKey"), "modifier combos ignored: {js}");
+        assert!(js.contains("ctrlKey"), "modifier combos ignored when closed: {js}");
         assert!(js.contains("__frackerResync"), "generation chaining: {js}");
         assert!(!js.contains("__MIN_QUERY_CHARS__"), "tokens substituted");
+        // Sixty-second pass: the query is a real <input>, so the
+        // script syncs its value and focuses it — never a span's
+        // textContent, never a JS-only query string.
+        assert!(js.contains("queryEl.value"), "input value sync: {js}");
+        assert!(!js.contains("queryEl.textContent"), "no span textContent: {js}");
+        assert!(js.contains("queryEl.focus()"), "open focuses the input: {js}");
+        assert!(
+            js.contains("addEventListener('input'"),
+            "edits arrive via the input event: {js}"
+        );
+    }
+
+    /// Sixty-second pass: Ctrl+A selects the query. The script
+    /// must not intercept keys that land on the real input —
+    /// native editing (Ctrl+A select-all, Ctrl+C, paste,
+    /// Backspace, typing) is the input's own, and the document
+    /// handler returns early for exactly those events. The
+    /// modifier early-return survives only for keys landing
+    /// elsewhere (the closed page, or the overlay with focus
+    /// lost), where Ctrl+anything still does nothing.
+    #[test]
+    fn client_script_lets_the_input_edit_natively() {
+        let js = client_script();
+        assert!(
+            js.contains("if (e.target === queryEl) { return; }"),
+            "keys on the input fall through to native editing: {js}"
+        );
+        // The guard sits after Escape (which still closes from the
+        // input) and before the modifier early-return (which must
+        // not swallow Ctrl+A on the input).
+        let esc = js.find("'Escape'").expect("esc closes");
+        let guard = js
+            .find("if (e.target === queryEl) { return; }")
+            .expect("input guard");
+        assert!(esc < guard, "escape is checked before the input guard");
+        assert!(
+            js[guard..].contains("e.ctrlKey || e.metaKey || e.altKey"),
+            "the modifier early-return survives after the guard, \
+             for keys landing elsewhere: {js}"
+        );
+        // paint() never clobbers the input's caret/selection with
+        // an unconditional write.
+        assert!(
+            js.contains("if (queryEl.value !== query) { queryEl.value = query; }"),
+            "paint syncs the value only when it differs: {js}"
+        );
     }
 }

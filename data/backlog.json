@@ -1,5 +1,5 @@
 {
- "note": "Mastery test: lifetime XP per item type in profile XPInfo >= 900k (suits/frames/companions) or 450k (weapons). Pass-3 regen: companions wired via WFCD data/json/Pets.json + data/json/Sentinels.json (cached under data/cache/; manifest data/companions.toml) \u2014 6 prime Sentinels in universe, 5 mastered per profile, Nautilus Prime unmastered; Kavasa Prime EXCLUDED (owned collar, not a weapon \u2014 addendum #22), 63 unmastered primes. Exalted weapons excluded.",
+ "note": "Mastery test: lifetime XP per item type in profile XPInfo >= 900k (suits/frames/companions) or 450k (weapons). Pass-3 regen: companions wired via WFCD data/json/Pets.json + data/json/Sentinels.json (cached under data/cache/; manifest data/companions.toml) \u2014 6 prime Sentinels in universe, 5 mastered per profile, Nautilus Prime unmastered; Kavasa Prime EXCLUDED (owned collar, not a weapon \u2014 addendum #22), 63 unmastered primes. Exalted weapons excluded. Pass-62 regen: Melee deduped (75 -> 67, the 8 duplicated Zaw strikes); Pets added (22 masterable in WFCD Pets.json, 10 mastered per profile XPInfo >= 900k, 12 unmastered); Amps added (8 prisms, roster in data/amps.toml, 4 mastered per profile XPInfo >= 450k weapon threshold - Granmu, Klamora, Mote, Shwaak - 4 unmastered). Sirocco mastered (1,265,897 XP), correctly absent from Amps.",
  "primes": {
   "roster": 163,
   "mastered": 99,
@@ -934,6 +934,12 @@
   ]
  },
  "unmastered_by_category": {
+  "Amps": [
+   "Cantic Amp",
+   "Lega Amp",
+   "Rahn Amp",
+   "Raplak Amp"
+  ],
   "Arch-Gun": [
    "Arbucep",
    "Cortege",
@@ -949,10 +955,7 @@
    "Argo & Vel",
    "Arum Spinosa",
    "Balla",
-   "Balla",
    "Cyath",
-   "Cyath",
-   "Dehtat",
    "Dehtat",
    "Dorrclave",
    "Edun",
@@ -973,24 +976,19 @@
    "Korumm",
    "Kreska",
    "Kronsh",
-   "Kronsh",
    "Kroostra",
    "Kuva Ghoulsaw",
    "Kuva Shildeg",
    "Kwath",
    "Laka",
    "Mewan",
-   "Mewan",
    "Nepheri",
-   "Ooltha",
    "Ooltha",
    "Pathocyst",
    "Peye",
    "Plague Akwin",
    "Plague Bokwin",
    "Plague Keewar",
-   "Plague Keewar",
-   "Plague Kripath",
    "Plague Kripath",
    "Praedos",
    "Pride",
@@ -1020,6 +1018,20 @@
    "Verdilac",
    "War Prime",
    "Wrath"
+  ],
+  "Pets": [
+   "Bhaira Hound",
+   "Crescent Vulpaphyla",
+   "Dorma Hound",
+   "Lambeo Moa",
+   "Medjay Predasite",
+   "Nychus Moa",
+   "Panzer Vulpaphyla",
+   "Para Moa",
+   "Pharaoh Predasite",
+   "Sly Vulpaphyla",
+   "Vasca Kavat",
+   "Vizier Predasite"
   ],
   "Primary": [
    "Acceltra",

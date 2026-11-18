@@ -52,8 +52,10 @@ pub struct PlanInput<'a> {
     pub recent_gear: &'a HashSet<String>,
     pub steel_path_tiebreak: bool,
     /// Log-proven mission completions (ninth pass §4): the resident's
-    /// accumulated, today-scoped ledger. Used to strike live alerts that
-    /// the log positively matched (never inferred).
+    /// accumulated, lifetime-scoped ledger (pass 62 §1a — retained while
+    /// the alert is still live, pruned on alert expiry, never by the day
+    /// boundary). Used to strike live alerts that the log positively
+    /// matched (never inferred).
     pub completed_missions: &'a [crate::elog::MissionCompletion],
     /// Runtime estimates/thresholds (loaded from `data/`).
     pub tuning: &'a Tuning,
@@ -1483,14 +1485,38 @@ fn cand_rarity(tuning: &Tuning, cand: &CrackCandidate) -> Rarity {
         .rarity_of(100.0 / cand.expected_cracks.max(0.01))
 }
 
+/// Two-place duration label from a minute count (pass 62 §1b):
+/// "25m" below an hour, "5h30m" below a day, "12d 14h" at a day
+/// or more (minutes dropped — never d/h/m). An exact whole number
+/// of days renders bare ("2d", no "0h").
+pub(crate) fn format_duration_mins(mins: i64) -> String {
+    if mins < 60 {
+        format!("{mins}m")
+    } else if mins < 24 * 60 {
+        format!("{}h{:02}m", mins / 60, mins % 60)
+    } else {
+        let days = mins / (24 * 60);
+        let hours = (mins % (24 * 60)) / 60;
+        if hours == 0 {
+            format!("{days}d")
+        } else {
+            format!("{days}d {hours}h")
+        }
+    }
+}
+
 fn days_until(now: DateTime<Utc>, expiry: &str, tuning: &Tuning) -> String {
     match parse_time(expiry) {
         Some(t) if t > now => {
             let secs = (t - now).num_seconds();
-            if secs < tuning.planner.days_until_hour_boundary * 3600 {
+            // Pass 62 §1b: the two-place rule switches to d/h at 24h,
+            // so the tuned days_until_hour_boundary is no longer
+            // consulted here; below a day the coarse "in Nh" stands.
+            let _ = tuning;
+            if secs < 24 * 3600 {
                 format!("in {}h", secs / 3600)
             } else {
-                format!("in {}d", secs / 86400)
+                format!("in {}", format_duration_mins(secs / 60))
             }
         }
         _ => "soon".to_owned(),
@@ -1606,11 +1632,7 @@ fn build_chunks(
                 "Run the event alert now: {} ({}) — {} left",
                 alert.mission.node,
                 alert.mission.mission_type,
-                if mins >= 60 {
-                    format!("{}h{}m", mins / 60, mins % 60)
-                } else {
-                    format!("{mins}m")
-                },
+                format_duration_mins(mins),
             ),
             minutes_label: format!(
                 "~{}m",
@@ -2204,8 +2226,9 @@ fn donow_resurgence(input: &PlanInput<'_>, cards: &[GoalCard]) -> Option<Resurge
 fn donow_baro(input: &PlanInput<'_>) -> Option<BaroView> {
     let live = input.world.active_trader(&input.now)?;
     // Addendum #85: while the window is live the header pill reads
-    // "Leaves in HhMMm" at minute granularity — days_until's
-    // day-rounded "in 0d" told Seth nothing on the last day.
+    // "Leaves in …" at two-place granularity ("25h00m" below a day,
+    // "1d 1h" at a day or more) — days_until's day-rounded "in 0d"
+    // told Seth nothing on the last day.
     let ends_in = match parse_time(&live.expiry) {
         Some(expiry) => format!("Leaves in {}", mins_left_label(input.now, expiry)),
         None => "soon".to_owned(),
@@ -2217,14 +2240,9 @@ fn donow_baro(input: &PlanInput<'_>) -> Option<BaroView> {
     })
 }
 
-/// "25m" / "1h05m" countdown label for a live expiry.
+/// "25m" / "1h05m" / "12d 14h" countdown label for a live expiry.
 fn mins_left_label(now: DateTime<Utc>, expiry: DateTime<Utc>) -> String {
-    let mins = (expiry - now).num_seconds() / 60;
-    if mins >= 60 {
-        format!("{}h{:02}m", mins / 60, mins % 60)
-    } else {
-        format!("{mins}m")
-    }
+    format_duration_mins((expiry - now).num_seconds() / 60)
 }
 
 fn goal_cards_for(
@@ -3102,9 +3120,44 @@ mod tests {
         assert!(q.event_alerts.is_empty() && q.lotus_alerts.is_empty());
         let b = q.baro.expect("trader live mid-window");
         assert_eq!(b.location, "Orcus Relay (Pluto)");
-        // Addendum #85: live window reads "Leaves in …" at hour/minute
-        // granularity (noon Oct 17 -> expiry 13:00 Oct 18 = 25h00m).
-        assert_eq!(b.ends_in, "Leaves in 25h00m");
+        // Addendum #85: live window reads "Leaves in …" at two-place
+        // granularity (noon Oct 17 -> expiry 13:00 Oct 18 = 25h -> "1d 1h").
+        assert_eq!(b.ends_in, "Leaves in 1d 1h");
+    }
+
+    #[test]
+    fn format_duration_mins_keeps_two_places_of_granularity() {
+        // Pass 62 §1b: long durations render in days, never hours-only.
+        assert_eq!(format_duration_mins(302 * 60 + 16), "12d 14h");
+        assert_eq!(format_duration_mins(25 * 60), "1d 1h");
+        assert_eq!(format_duration_mins(24 * 60), "1d");
+        assert_eq!(format_duration_mins(48 * 60), "2d");
+        // Below a day the h/m rendering stands as before.
+        assert_eq!(format_duration_mins(5 * 60 + 30), "5h30m");
+        assert_eq!(format_duration_mins(60), "1h00m");
+        assert_eq!(format_duration_mins(23 * 60 + 59), "23h59m");
+        // Sub-hour is bare minutes.
+        assert_eq!(format_duration_mins(25), "25m");
+        assert_eq!(format_duration_mins(59), "59m");
+    }
+
+    #[test]
+    fn days_until_renders_days_with_hours() {
+        // Pass 62 §1b: a rotation ending 30h out reads "in 1d 6h",
+        // not "in 30h"; an exact whole number of days stays bare.
+        let t = tuning();
+        let now: DateTime<Utc> = "2026-10-17T12:00:00Z".parse().unwrap();
+        assert_eq!(
+            days_until(now, "2026-10-18T18:00:00Z", &t),
+            "in 1d 6h"
+        );
+        assert_eq!(
+            days_until(now, "2026-10-28T12:00:00Z", &t),
+            "in 11d"
+        );
+        // Below a day the coarse "in Nh" stands.
+        assert_eq!(days_until(now, "2026-10-17T17:30:00Z", &t), "in 5h");
+        assert_eq!(days_until(now, "2026-10-17T11:00:00Z", &t), "soon");
     }
 
     #[test]

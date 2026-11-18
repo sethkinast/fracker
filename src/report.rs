@@ -107,6 +107,13 @@ pub struct ReportOutcome {
     pub out: PathBuf,
     /// The generation token stamped on this page (item 52/58).
     pub generation: String,
+    /// Pass 62 §1a: the §4 ledger as this run actually fed the
+    /// planner — pruned to the completions whose alert is still live
+    /// when the worldstate was fresh, the input ledger verbatim
+    /// otherwise. The resident writes this back to its shared ledger
+    /// (dropping only entries that were in the input) so an expired
+    /// alert's completion leaves the persisted ledger too.
+    pub retained_completions: Vec<MissionCompletion>,
 }
 
 impl ReportOutcome {
@@ -137,10 +144,14 @@ impl ReportOutcome {
 /// Render the checklist page from the configured inputs. Never dies on a
 /// dead endpoint: each fetch falls back to its recorded fixture.
 ///
-/// `completed` is the resident's log-proven, today-scoped mission ledger
-/// (ninth pass §4). Every report — auto, manual, or session-start — takes
-/// it so a finished worldstate alert renders struck regardless of any
-/// manual tick; the CLI demo passes an empty slice.
+/// `completed` is the resident's log-proven mission ledger (ninth pass
+/// §4, lifetime-scoped since pass 62 §1a). Every report — auto, manual,
+/// or session-start — takes it so a finished worldstate alert renders
+/// struck regardless of any manual tick; the CLI demo passes an empty
+/// slice. Against a fresh worldstate the ledger is pruned to the
+/// completions whose alert is still live (see below); the pruned list
+/// rides [`ReportOutcome::retained_completions`] so the resident can
+/// drop the expired entries from its ledger too.
 /// A token unique to one regeneration (item 52). Wall-clock nanos alone
 /// are not enough in tests/tight loops, so a process-local sequence is
 /// appended; across restarts the timestamp keeps it distinct.
@@ -311,6 +322,26 @@ pub async fn generate(
         .timestamp
         .parse::<DateTime<Utc>>()
         .unwrap_or_else(|_| Utc::now());
+    // Pass 62 §1a: prune the §4 ledger to the completions whose alert
+    // is still live in this worldstate — retention keyed to the alert's
+    // lifetime, not the UTC day boundary, so a Gift of the Lotus
+    // completed yesterday still strikes today while a completion for
+    // an expired alert drops out. Only a FRESH worldstate may prune:
+    // a TTL-cached, fallback, or fixture payload may predate the
+    // alert (or carry no alerts at all), and pruning against it could
+    // drop a completion for an alert that is live now; in that case
+    // the ledger passes through unpruned and the next fresh report
+    // prunes it.
+    let live_completed: Vec<MissionCompletion> = if matches!(
+        &world_source,
+        model::WorldstateSource::Live | model::WorldstateSource::WfsLive
+    ) {
+        let mut kept = completed.to_vec();
+        crate::elog::retain_live_completions(&mut kept, &world.alerts, now);
+        kept
+    } else {
+        completed.to_vec()
+    };
     // Freshness is judged by the payload's own Time against the render
     // clock, not by the fetch time — except for a TTL hit, whose
     // label carries the cache age instead (addendum #120).
@@ -448,7 +479,7 @@ pub async fn generate(
         pins: &cfg_file.pins,
         recent_gear: &HashSet::new(),
         steel_path_tiebreak: cfg_file.steel_path_tiebreak,
-        completed_missions: completed,
+        completed_missions: &live_completed,
         tuning: &tuning,
     };
     let plan = plan::plan(&input);
@@ -591,6 +622,7 @@ pub async fn generate(
         generated_at: now,
         out: cfg.out.clone(),
         generation,
+        retained_completions: live_completed,
     })
 }
 

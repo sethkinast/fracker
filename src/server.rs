@@ -19,7 +19,9 @@
 //!   fragments whose rendered HTML changed since <known> (forty-first
 //!   pass) — the page swaps those in place, so updates never navigate;
 //! - `POST /tick` records one checkbox change server-side, keyed by item
-//!   id + in-game day;
+//!   id + in-game day — Nightwave ids (`nw-…`) by their Sunday-start
+//!   week instead (pass 62 §5), so a Monday tick still shows done
+//!   Friday and the Sunday reset clears it;
 //! - `POST /unverified` toggles one part's unverified (⍻) stock
 //!   membership in `stock.json` (thirtieth pass) — validated against
 //!   the roster parts universe, persisted through the stock writer,
@@ -30,6 +32,8 @@
 //! - `GET /ws` upgrades to a WebSocket and pushes the plan generation the
 //!   moment a regeneration is published (item 58), so open pages fetch
 //!   the fragment diff immediately instead of waiting for the slow poll;
+//! - `GET /favicon.ico` serves the embedded Warframe logo PNG
+//!   (sixty-second pass) so the served page carries it as its favicon;
 //! - `GET /health` is a liveness probe.
 //!
 //! The WebSocket side is a minimal RFC 6455 implementation — handshake,
@@ -643,6 +647,13 @@ fn handle(
             // browser fetches it once and keeps it.
             respond_cached(&mut stream, "200 OK", "audio/mpeg", CHIME_MP3)
         }
+        ("GET", "/favicon.ico") => {
+            // The Warframe logo favicon (sixty-second pass):
+            // the embedded PNG, cacheable like the chime —
+            // the browser asks for it on every page load, and
+            // before this route it got a 404.
+            respond_cached(&mut stream, "200 OK", "image/png", FAVICON_PNG)
+        }
         ("GET", "/health") => respond(&mut stream, "200 OK", "text/plain", b"ok"),
         _ => respond(&mut stream, "404 Not Found", "text/plain", b"not found"),
     }
@@ -938,6 +949,15 @@ fn apply_tick(
     };
     if let Ok(mut store) = ticks.lock() {
         store.set(&day, &id, done);
+        // Pass 62 §5: a tick made today also retires stale scope —
+        // yesterday's daily ticks and last week's Nightwave bucket
+        // leave the file. Only when the tick's day IS today: a stale
+        // page (loaded before midnight) ticking yesterday's day must
+        // never prune today's ticks.
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        if day == today {
+            store.retain_current(&day);
+        }
         // Persist best-effort; the in-memory store already reflects it.
         let _ = store.save(ticks_path);
     }
@@ -1146,9 +1166,18 @@ fn respond(
 /// docs/fifty-first-pass.md).
 const CHIME_MP3: &[u8] = include_bytes!("../assets/sounds/chime.mp3");
 
+/// The Warframe Lotus logo, embedded like the vendored font and
+/// chime (sixty-second pass): the real logo PNG (840x859 RGBA,
+/// transparency), served cacheable at /favicon.ico and linked
+/// from the page head by the renderer. 180 KB is small enough to
+/// embed rather than ship as a Flatpak data file; the bytes can
+/// never change under the URL, so the immutable cache lifetime
+/// applies exactly as for the chime.
+const FAVICON_PNG: &[u8] = include_bytes!("../assets/warframe-logo.png");
+
 /// [`respond`] with a long immutable cache lifetime, for
 /// embedded assets whose bytes can never change under a
-/// given URL (the chime is the only one).
+/// given URL (the chime and the favicon).
 fn respond_cached(
     stream: &mut TcpStream,
     status: &str,
@@ -1436,6 +1465,32 @@ mod tests {
         // The change was persisted to the given path.
         assert!(TickStore::load(&path).is_done("2026-10-18", "chunk-1"));
         assert_eq!(apply_tick(&ticks, &path, "nope"), "400 Bad Request");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Pass 62 §5: a Nightwave tick posted for Monday lands in the
+    /// `nw-week:` bucket, reads back done on Friday, is gone after
+    /// the Sunday reset — and the persisted file carries the same
+    /// week scope.
+    #[test]
+    fn nightwave_tick_posts_to_the_week_bucket() {
+        let ticks = Arc::new(Mutex::new(TickStore::default()));
+        let path = std::env::temp_dir().join(format!("fracker-tick-nw-{}.json", std::process::id()));
+        let status = apply_tick(
+            &ticks,
+            &path,
+            r#"{"id":"nw-weekly-sortie","day":"2026-11-16","done":true}"#,
+        );
+        assert_eq!(status, "200 OK");
+        {
+            let store = ticks.lock().unwrap();
+            assert!(store.is_done("2026-11-16", "nw-weekly-sortie"), "ticked Monday");
+            assert!(store.is_done("2026-11-20", "nw-weekly-sortie"), "still done Friday");
+            assert!(!store.is_done("2026-11-22", "nw-weekly-sortie"), "Sunday reset clears");
+        }
+        let loaded = TickStore::load(&path);
+        assert!(loaded.is_done("2026-11-20", "nw-weekly-sortie"), "persisted week bucket");
+        assert!(!loaded.is_done("2026-11-22", "nw-weekly-sortie"));
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1865,6 +1920,16 @@ mod tests {
         write!(s, "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").unwrap();
         let mut out = String::new();
         s.read_to_string(&mut out).unwrap();
+        out
+    }
+
+    /// Byte-level GET, for routes whose bodies are not text (the
+    /// favicon PNG): `read_to_string` would fail on non-UTF-8.
+    fn http_get_bytes(port: u16, path: &str) -> Vec<u8> {
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write!(s, "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").unwrap();
+        let mut out = Vec::new();
+        s.read_to_end(&mut out).unwrap();
         out
     }
 
@@ -2453,6 +2518,43 @@ mod tests {
         assert!(fired.load(Ordering::Relaxed), "regen hook fired");
         let resp2 = http_post(server.port(), "/clear-de-lock");
         assert!(resp2.contains("404"), "second clear: nothing left: {resp2}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn favicon_route_serves_the_warframe_logo_png() {
+        // Sixty-second pass: GET /favicon.ico returns the embedded
+        // Warframe Lotus logo PNG with an image content type — the
+        // browser used to get a 404 here, so the served page had
+        // no favicon at all.
+        let dir = std::env::temp_dir().join(format!("fracker-favicon-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let report = dir.join("plan.html");
+        std::fs::write(&report, "<!DOCTYPE html><html><body></body></html>").unwrap();
+        let server = serve(
+            0,
+            report,
+            TickStore::file(&dir),
+            TabStore::file(&dir),
+            Arc::new(Mutex::new(TickStore::default())),
+            None,
+            None,
+            None,
+        )
+        .expect("server binds");
+        let raw = http_get_bytes(server.port(), "/favicon.ico");
+        let split = raw
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("response has a header/body split");
+        let (head, body) = (&raw[..split], &raw[split + 4..]);
+        let head = String::from_utf8_lossy(head);
+        assert!(head.contains("200 OK"), "{head}");
+        assert!(head.contains("Content-Type: image/png"), "{head}");
+        assert!(head.contains("immutable"), "cacheable like the chime: {head}");
+        assert_eq!(&body[..8], b"\x89PNG\r\n\x1a\n", "PNG magic");
+        assert_eq!(body, FAVICON_PNG, "the served bytes are the embedded logo");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
